@@ -1,0 +1,43 @@
+.item-card {
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.item-card:hover {
+    transform: scale(1.02);
+}
+
+#cartItems {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.cart-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px;
+    border-bottom: 1px solid #eee;
+}
+
+.cart-item-quantity {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.quantity-btn {
+    padding: 2px 8px;
+    border: 1px solid #ddd;
+    background: #f8f9fa;
+    cursor: pointer;
+}
+
+#itemSearch {
+    margin-bottom: 20px;
+}
+
+.card {
+    position: sticky;
+    top: 20px;
+}
