@@ -61,14 +61,14 @@ def get_items():
     if USE_MOCK:
         # Mock catalog: shoes with brands
         items = [
-            {"name": "SHOE-ATH-001", "item_name": "Runner Pro", "brand": "Stride", "standard_rate": 59.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-ATH-002", "item_name": "Trail Master", "brand": "Stride", "standard_rate": 69.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-CAS-001", "item_name": "Everyday Comfort", "brand": "ComfortStep", "standard_rate": 49.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-CAS-002", "item_name": "Urban Walk", "brand": "ComfortStep", "standard_rate": 54.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-DRS-001", "item_name": "Oxford Classic", "brand": "Elegance", "standard_rate": 79.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-DRS-002", "item_name": "Derby Prime", "brand": "Elegance", "standard_rate": 84.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-KID-001", "item_name": "Playtime Sneaker", "brand": "LittleFeet", "standard_rate": 39.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-KID-002", "item_name": "School Buddy", "brand": "LittleFeet", "standard_rate": 34.99, "stock_uom": "Pair", "image": None}
+            {"name": "SHOE-ATH-001", "item_code": "SHOE-ATH-001", "barcode": "100001", "item_name": "Runner Pro", "brand": "Stride", "standard_rate": 59.99, "stock_uom": "Pair", "image": None},
+            {"name": "SHOE-ATH-002", "item_code": "SHOE-ATH-002", "barcode": "100002", "item_name": "Trail Master", "brand": "Stride", "standard_rate": 69.99, "stock_uom": "Pair", "image": None},
+            {"name": "SHOE-CAS-001", "item_code": "SHOE-CAS-001", "barcode": "100003", "item_name": "Everyday Comfort", "brand": "ComfortStep", "standard_rate": 49.99, "stock_uom": "Pair", "image": None},
+            {"name": "SHOE-CAS-002", "item_code": "SHOE-CAS-002", "barcode": "100004", "item_name": "Urban Walk", "brand": "ComfortStep", "standard_rate": 54.99, "stock_uom": "Pair", "image": None},
+            {"name": "SHOE-DRS-001", "item_code": "SHOE-DRS-001", "barcode": "100005", "item_name": "Oxford Classic", "brand": "Elegance", "standard_rate": 79.99, "stock_uom": "Pair", "image": None},
+            {"name": "SHOE-DRS-002", "item_code": "SHOE-DRS-002", "barcode": "100006", "item_name": "Derby Prime", "brand": "Elegance", "standard_rate": 84.99, "stock_uom": "Pair", "image": None},
+            {"name": "SHOE-KID-001", "item_code": "SHOE-KID-001", "barcode": "100007", "item_name": "Playtime Sneaker", "brand": "LittleFeet", "standard_rate": 39.99, "stock_uom": "Pair", "image": None},
+            {"name": "SHOE-KID-002", "item_code": "SHOE-KID-002", "barcode": "100008", "item_name": "School Buddy", "brand": "LittleFeet", "standard_rate": 34.99, "stock_uom": "Pair", "image": None}
         ]
         return jsonify({'status': 'success', 'items': items})
     try:
@@ -76,13 +76,24 @@ def get_items():
             f"{ERPNEXT_URL}/api/resource/Item",
             headers=_erp_headers(),
             params={
-                'fields': '["name", "item_name", "brand", "image", "standard_rate", "stock_uom"]',
+                'fields': '["name", "item_code", "item_name", "brand", "image", "standard_rate", "stock_uom", "barcode"]',
                 'filters': '[["is_sales_item","=",1],["disabled","=",0]]'
             },
             timeout=15
         )
         response.raise_for_status()
         items = response.json().get('data', [])
+        for item in items:
+            item_code = item.get('item_code') or item.get('name')
+            item['item_code'] = item_code
+            barcode = item.get('barcode')
+            if not barcode and isinstance(item.get('barcodes'), list):
+                for entry in item['barcodes']:
+                    candidate = entry.get('barcode') if isinstance(entry, dict) else entry
+                    if candidate:
+                        barcode = candidate
+                        break
+            item['barcode'] = barcode or None
         return jsonify({'status': 'success', 'items': items})
     except requests.HTTPError as e:
         return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500

@@ -52,6 +52,7 @@ let currentTender = '';
 let cashInput = '';
 let denomSubtract = false;
 let vouchers = [];
+let barcodeFeedbackTimer = null;
 // App settings and receipt state
 let settings = { till_number: '', dark_mode: false, auto_print: false };
 let lastReceiptInfo = null;
@@ -90,17 +91,192 @@ document.addEventListener('DOMContentLoaded',()=>{
   // Capture global errors for diagnostics
   window.addEventListener('error', e=>{ err('window error', e.message||e, e.error||null); });
   window.addEventListener('unhandledrejection', e=>{ err('unhandled rejection', e.reason||e); });
+  focusBarcodeInput();
 });
 
-async function loadItems(){ try{ const r=await fetch('/api/items'); const d=await r.json(); if(d.status==='success'){ items=d.items; renderItems(items);} }catch(e){ console.error(e);} }
+async function loadItems(){
+  try {
+    const response = await fetch('/api/items');
+    const data = await response.json();
+    if (data.status === 'success') {
+      items = (data.items || []).map(it => {
+        const entry = { ...it };
+        entry.item_code = entry.item_code || entry.name;
+        if (entry.barcode === undefined || entry.barcode === null || entry.barcode === '') {
+          entry.barcode = null;
+        } else {
+          entry.barcode = String(entry.barcode).trim();
+        }
+        return entry;
+      });
+      renderItems(items);
+    }
+  } catch (error) {
+    console.error(error);
+  }
+}
 async function loadCustomers(){ try{ const r=await fetch('/api/customers'); const d=await r.json(); if(d.status==='success'){ customers=d.customers; const b=document.getElementById('customerSelect'); const t=document.getElementById('topCustomerSelect'); customers.forEach(c=>{ if(b){const o=document.createElement('option'); o.value=c.name;o.textContent=c.customer_name;b.appendChild(o);} if(t){const o2=document.createElement('option'); o2.value=c.name;o2.textContent=c.customer_name;t.appendChild(o2);} }); setDefaultCustomer(); } }catch(e){ console.error(e);} }
 
 function renderItems(list){ const grid=document.getElementById('itemsGrid'); if(!grid) return; grid.innerHTML=''; list.forEach(it=>{ const d=document.createElement('div'); d.className='col'; d.innerHTML=`<div class="card item-card h-100"><div class="card-body"><h5 class="card-title">${it.item_name}</h5><p class="card-text">${money(it.standard_rate)}</p><p class="card-text"><small>${it.stock_uom}</small></p></div></div>`; d.onclick=()=>openProduct(it); grid.appendChild(d); });}
 
-function addToCart(it){ const ex=cart.find(ci=>ci.item_code===it.name); if(ex){ex.qty+=1;ex.amount=ex.qty*ex.rate;} else {cart.push({item_code:it.name,item_name:it.item_name,qty:1,rate:it.standard_rate,amount:it.standard_rate,image:it.image||null});} updateCartDisplay();}
-function updateQuantity(code,chg){ const it=cart.find(i=>i.item_code===code); if(!it) return; it.qty+=chg; if(it.qty<=0){ cart=cart.filter(i=>i.item_code!==code);} else {it.amount=it.qty*it.rate;} updateCartDisplay();}
-function removeFromCart(code){ cart=cart.filter(i=>i.item_code!==code); updateCartDisplay(); }
-function updateCartDisplay(){ const wrap=document.getElementById('cartItems'); const tot=document.getElementById('cartTotal'); if(!wrap||!tot) return; wrap.innerHTML=''; let sum=0; cart.forEach(it=>{ const line=it.qty*it.rate; sum+=line; const el=document.createElement('div'); el.className='cart-item'; el.innerHTML=`<div class="cart-item-main"><div class="cart-item-name">${it.item_name}</div><div class="cart-item-meta text-muted">${money(it.rate)} each</div></div><div class="cart-item-quantity"><span class="quantity-btn" onclick="updateQuantity('${it.item_code}',-1)">-</span><span>${it.qty}</span><span class="quantity-btn" onclick="updateQuantity('${it.item_code}',1)">+</span></div><div class="cart-item-total">${money(line)}</div><button class="remove-btn" onclick="removeFromCart('${it.item_code}')">Ã—</button>`; wrap.appendChild(el); }); tot.textContent=money(sum); }
+function addToCart(item) {
+  const existing = cart.find(ci => ci.item_code === item.name);
+  if (existing) {
+    existing.qty += 1;
+    existing.amount = existing.qty * existing.rate;
+  } else {
+    cart.push({
+      item_code: item.name,
+      item_name: item.item_name,
+      qty: 1,
+      rate: item.standard_rate,
+      amount: item.standard_rate,
+      image: item.image || null,
+      refund: false
+    });
+  }
+  updateCartDisplay();
+}
+
+function updateQuantity(code, change) {
+  const item = cart.find(i => i.item_code === code);
+  if (!item) return;
+  item.qty += change;
+  if (item.qty <= 0) {
+    cart = cart.filter(i => i.item_code !== code);
+  } else {
+    item.amount = item.qty * item.rate;
+  }
+  updateCartDisplay();
+}
+
+function removeFromCart(code) {
+  cart = cart.filter(i => i.item_code !== code);
+  updateCartDisplay();
+}
+
+function toggleRefund(code) {
+  const item = cart.find(i => i.item_code === code);
+  if (!item) return;
+  item.refund = !item.refund;
+  updateCartDisplay();
+}
+
+function updateCheckoutButtonState(total) {
+  const btn = document.getElementById('checkoutBtn');
+  if (!btn) return;
+  const isRefund = total < 0;
+  btn.classList.toggle('btn-danger', isRefund);
+  btn.classList.toggle('btn-primary', !isRefund);
+  btn.textContent = isRefund ? 'Process Refund' : 'Checkout';
+}
+
+function updateCartDisplay() {
+  const wrap = document.getElementById('cartItems');
+  const tot = document.getElementById('cartTotal');
+  if (!wrap || !tot) return;
+  wrap.innerHTML = '';
+  let sum = 0;
+  cart.forEach(item => {
+    const isRefund = !!item.refund;
+    const sign = isRefund ? -1 : 1;
+    const lineTotal = sign * item.qty * item.rate;
+    sum += lineTotal;
+    const element = document.createElement('div');
+    element.className = 'cart-item' + (isRefund ? ' refund' : '');
+    const refundTag = isRefund ? '<span class="cart-refund-tag">Refund</span>' : '';
+    const refundBtnLabel = isRefund ? 'Refunding' : 'Refund';
+    element.innerHTML = `
+      <div class="cart-item-main">
+        <div class="cart-item-name">${item.item_name}${refundTag}</div>
+        <div class="cart-item-meta text-muted">${money(item.rate)} each</div>
+        <div class="cart-item-actions">
+          <button type="button" class="refund-btn${isRefund ? ' active' : ''}" onclick="toggleRefund('${item.item_code}')">${refundBtnLabel}</button>
+        </div>
+      </div>
+      <div class="cart-item-quantity">
+        <span class="quantity-btn" onclick="updateQuantity('${item.item_code}',-1)">-</span>
+        <span>${item.qty}</span>
+        <span class="quantity-btn" onclick="updateQuantity('${item.item_code}',1)">+</span>
+      </div>
+      <div class="cart-item-total">${money(lineTotal)}</div>
+      <button type="button" class="remove-btn" onclick="removeFromCart('${item.item_code}')">Remove</button>
+    `;
+    wrap.appendChild(element);
+  });
+  tot.textContent = money(sum);
+  updateCheckoutButtonState(sum);
+}
+
+function findItemByCode(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  const matches = candidate => {
+    if (!candidate) return false;
+    return String(candidate).trim().toLowerCase() === normalized;
+  };
+  for (const item of items) {
+    if (matches(item.barcode)) return item;
+    if (matches(item.item_code)) return item;
+    if (matches(item.name)) return item;
+    if (Array.isArray(item.barcodes)) {
+      const found = item.barcodes.some(bar => matches(bar.barcode || bar));
+      if (found) return item;
+    }
+  }
+  return null;
+}
+
+function showBarcodeFeedback(message, isError = false) {
+  const feedback = document.getElementById('barcodeFeedback');
+  if (!feedback) return;
+  feedback.textContent = message;
+  feedback.classList.toggle('error', !!isError);
+  if (barcodeFeedbackTimer) clearTimeout(barcodeFeedbackTimer);
+  if (message) {
+    barcodeFeedbackTimer = setTimeout(() => {
+      feedback.textContent = '';
+      feedback.classList.remove('error');
+    }, 3000);
+  }
+}
+
+function focusBarcodeInput() {
+  const input = document.getElementById('barcodeInput');
+  if (!input) return;
+  setTimeout(() => {
+    if (document.activeElement !== input) {
+      input.focus();
+      input.select();
+    }
+  }, 0);
+}
+
+function processBarcodeScan(rawValue) {
+  const input = document.getElementById('barcodeInput');
+  const value = String(rawValue || (input && input.value) || '').trim();
+  if (!value) {
+    if (input) input.value = '';
+    showBarcodeFeedback('', false);
+    return;
+  }
+  const match = findItemByCode(value);
+  if (match) {
+    addToCart(match);
+    showBarcodeFeedback(`Added ${match.item_name || match.name || value}`, false);
+    if (input) {
+      input.value = '';
+      input.classList.remove('is-invalid');
+    }
+  } else {
+    showBarcodeFeedback(`No product found for "${value}"`, true);
+    if (input) {
+      input.classList.add('is-invalid');
+      input.select();
+    }
+  }
+  focusBarcodeInput();
+}
 
 function bindEvents(){
   // Settings/menu overlay
@@ -141,6 +317,29 @@ function bindEvents(){
   // search overlay
   const so=document.getElementById('searchOverlay'), sb=document.getElementById('searchInputBig'), bf=document.getElementById('brandFilter'), sc=document.getElementById('searchCloseBtn');
   if(so){ if(sb) sb.addEventListener('input',renderSearchResults); if(bf) bf.addEventListener('change',renderSearchResults); if(sc) sc.addEventListener('click',hideSearchOverlay); document.addEventListener('keydown',e=>{ if(e.key==='Escape') hideSearchOverlay(); }); so.addEventListener('click',e=>{ if(e.target===so) hideSearchOverlay(); }); }
+  // barcode scanner bar
+  const barcodeInput = document.getElementById('barcodeInput');
+  const barcodeButton = document.getElementById('barcodeAddBtn');
+  if (barcodeInput) {
+    barcodeInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        processBarcodeScan(barcodeInput.value);
+      }
+    });
+    barcodeInput.addEventListener('focus', () => {
+      barcodeInput.classList.remove('is-invalid');
+      showBarcodeFeedback('', false);
+    });
+    barcodeInput.addEventListener('input', () => {
+      barcodeInput.classList.remove('is-invalid');
+    });
+  }
+  if (barcodeButton) {
+    barcodeButton.addEventListener('click', () => {
+      processBarcodeScan(barcodeInput && barcodeInput.value);
+    });
+  }
   // product overlay
   const po=document.getElementById('productOverlay'), pc=document.getElementById('productCloseBtn'); if(po){ if(pc) pc.addEventListener('click',hideProductOverlay); po.addEventListener('click',e=>{ if(e.target===po) hideProductOverlay(); }); document.addEventListener('keydown',e=>{ if(e.key==='Escape') hideProductOverlay(); }); }
   // checkout overlay
@@ -206,7 +405,28 @@ async function openProduct(item){ currentProduct=item; const o=document.getEleme
   try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} try{ const r=await fetch(`/api/item_matrix?item=${encodeURIComponent(item.name)}`); const d=await r.json(); if(d.status==='success') renderVariantMatrix(item,d.data);}catch(e){ console.error(e);} }
 function hideProductOverlay(){ const o=document.getElementById('productOverlay'); if(o) o.style.display='none'; }
 function renderVariantMatrix(item,m){ const h=document.getElementById('matrixHead'), b=document.getElementById('matrixBody'); if(!h||!b) return; h.innerHTML=''; const tr=document.createElement('tr'); ['Colour','Width',...(m.sizes||[])].forEach(x=>{ const th=document.createElement('th'); th.textContent=x; tr.appendChild(th);}); h.appendChild(tr); b.innerHTML=''; (m.colors||[]).forEach(color=>{ (m.widths||[]).forEach(width=>{ const row=document.createElement('tr'); const tc=document.createElement('th'); tc.textContent=color; row.appendChild(tc); const tw=document.createElement('th'); tw.textContent=width; row.appendChild(tw); (m.sizes||[]).forEach(sz=>{ const key=`${color}|${width}|${sz}`; const qty=(m.stock&&m.stock[key])||0; const td=document.createElement('td'); td.className='variant-cell'+(qty<=0?' disabled':''); td.textContent=qty; if(qty>0){ td.addEventListener('click',()=>addVariantToCart(item,{color,width,size:sz,qtyAvailable:qty})); } row.appendChild(td); }); b.appendChild(row); }); }); }
-function addVariantToCart(item,v){ const name=`${item.item_name} â€¢ ${v.color} â€¢ ${v.width} â€¢ ${v.size}`; const code=`${item.name}-${v.color}-${v.width}-${v.size}`; const ex=cart.find(ci=>ci.item_code===code); const rate=item.standard_rate; if(ex){ ex.qty+=1; ex.amount=ex.qty*ex.rate;} else { cart.push({item_code:code,item_name:name,qty:1,rate,amount:rate,image:item.image||null,variant:v}); } updateCartDisplay(); }
+function addVariantToCart(item, variant){
+  const name = `${item.item_name} - ${variant.color} - ${variant.width} - ${variant.size}`;
+  const code = `${item.name}-${variant.color}-${variant.width}-${variant.size}`;
+  const existing = cart.find(ci => ci.item_code === code);
+  const rate = item.standard_rate;
+  if (existing) {
+    existing.qty += 1;
+    existing.amount = existing.qty * existing.rate;
+  } else {
+    cart.push({
+      item_code: code,
+      item_name: name,
+      qty: 1,
+      rate,
+      amount: rate,
+      image: item.image || null,
+      variant,
+      refund: false
+    });
+  }
+  updateCartDisplay();
+}
 
 // Checkout overlay
 function openCheckoutOverlay(){
@@ -227,24 +447,201 @@ function openCheckoutOverlay(){
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
 }
 function hideCheckoutOverlay(){ const o=document.getElementById('checkoutOverlay'); if(o) o.style.display='none'; cashInput=''; }
-function renderCheckoutCart(){ const el=document.getElementById('checkoutCart'); if(!el) return; el.innerHTML=''; cart.forEach(it=>{ const d=document.createElement('div'); d.className='checkout-item'; const img=document.createElement('div'); img.className='img'; if(it.image) img.style.backgroundImage=`url('${it.image}')`; const mid=document.createElement('div'); const n=document.createElement('div'); n.className='name'; n.textContent=it.item_name; const meta=document.createElement('div'); meta.className='meta'; meta.textContent=`${it.qty} Ã— ${money(it.rate)}`; mid.appendChild(n); mid.appendChild(meta); const price=document.createElement('div'); price.className='price'; price.textContent=money(it.qty*it.rate); d.appendChild(img); d.appendChild(mid); d.appendChild(price); el.appendChild(d); }); updateCashSection(); }
-function selectTender(t){ currentTender=t; document.querySelectorAll('.tender-btn').forEach(b=>{ b.classList.toggle('active', b.getAttribute('data-tender')===t); }); const cs=document.getElementById('cashSection'); if(cs) cs.style.display=(t==='cash')?'block':'none'; updateCashSection(); if(t==='voucher') openVoucherOverlay(); }
-function addCashAmount(a){ const curr=Number(cashInput||0); let next=Math.round((curr+a)*100)/100; if(next<0) next=0; cashInput=next.toFixed(2); updateCashSection(); }
-function updateCashSection(){ const due=document.getElementById('amountDue'), cashEl=document.getElementById('amountCash'), ch=document.getElementById('amountChange'), cashBtn=document.getElementById('tenderCashBtn'), clear=document.getElementById('clearCashBtn'); const total=cart.reduce((s,it)=>s+(it.qty*it.rate),0); const vTot=(Array.isArray(vouchers)?vouchers:[]).reduce((s,v)=>s+Number(v.amount||0),0); const rem=Math.max(0,total-vTot); if(due) due.textContent=money(rem); const cval=Number(cashInput||0); if(cashEl) cashEl.textContent=money(cval); if(ch) ch.textContent=money(Math.max(0,cval-rem)); if(cashBtn) cashBtn.textContent=`${money(cval)} Cash`; if(clear) clear.onclick=()=>{ cashInput=''; updateCashSection(); } }
-async function completeSaleFromOverlay(){ let customer=''; const tSel=document.getElementById('topCustomerSelect'), bSel=document.getElementById('customerSelect'); if(tSel&&tSel.value) customer=tSel.value; else if(bSel&&bSel.value) customer=bSel.value; if(!customer) customer=getDefaultCustomerValue(); if(cart.length===0) return alert('Cart is empty'); const total=cart.reduce((s,it)=>s+(it.qty*it.rate),0); const vTot=(Array.isArray(vouchers)?vouchers:[]).reduce((s,v)=>s+Number(v.amount||0),0); const rem=Math.max(0,total-vTot); let payments=[]; (Array.isArray(vouchers)?vouchers:[]).forEach(v=>payments.push({mode_of_payment:'Voucher',amount:Number(v.amount),reference_no:v.code})); if(currentTender==='cash'){ const cVal=Number(cashInput||0); if(cVal<rem) return alert('Cash is less than remaining due'); if(rem>0) payments.push({mode_of_payment:'Cash',amount:rem}); } else if(currentTender==='card'){ if(rem>0) payments.push({mode_of_payment:'Card',amount:rem}); } else if(currentTender==='other'){ if(rem>0) payments.push({mode_of_payment:'Other',amount:rem}); } else if(currentTender==='voucher'){ if(rem>0) return alert('Remaining due after vouchers. Select Cash or Card for the remainder.'); }
-  if (!currentTender){ alert('Please select a tender type.'); return; }
-  const payload={ customer, items: cart.map(i=>({item_code:i.item_code,qty:i.qty,rate:i.rate})), payments, tender: currentTender, cash_given: (currentTender==='cash') ? Number(cashInput||0) : null, change: (currentTender==='cash') ? (Number(cashInput||0) - rem) : 0, total, vouchers, till_number: settings.till_number };
-  try{ const r=await fetch('/api/create-sale',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await r.json(); if(d.status==='success'){ const changeVal = (currentTender==='cash') ? (Number(cashInput||0) - rem) : 0; const info = { invoice: d.invoice_name||'N/A', change: changeVal }; lastReceiptInfo = info; showReceiptOverlay(info); if(settings.auto_print){ setTimeout(()=>window.print(), 50); } } else { alert('Error: '+d.message); } }catch(e){ console.error(e); alert('Error creating sale. Please try again.'); }
+function renderCheckoutCart() {
+  const el = document.getElementById('checkoutCart');
+  if (!el) return;
+  el.innerHTML = '';
+  cart.forEach(item => {
+    const isRefund = !!item.refund;
+    const sign = isRefund ? -1 : 1;
+    const lineTotal = sign * item.qty * item.rate;
+    const row = document.createElement('div');
+    row.className = 'checkout-item' + (isRefund ? ' refund' : '');
+    const img = document.createElement('div');
+    img.className = 'img';
+    if (item.image) img.style.backgroundImage = `url('${item.image}')`;
+    const details = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = item.item_name;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = `${item.qty} x ${money(item.rate)}${isRefund ? ' (refund)' : ''}`;
+    details.appendChild(name);
+    details.appendChild(meta);
+    const price = document.createElement('div');
+    price.className = 'price';
+    price.textContent = money(lineTotal);
+    row.appendChild(img);
+    row.appendChild(details);
+    row.appendChild(price);
+    el.appendChild(row);
+  });
+  updateCashSection();
+}
+
+function updateCashSection() {
+  const due = document.getElementById('amountDue');
+  const cashEl = document.getElementById('amountCash');
+  const changeEl = document.getElementById('amountChange');
+  const cashBtn = document.getElementById('tenderCashBtn');
+  const clear = document.getElementById('clearCashBtn');
+  const voucherList = Array.isArray(vouchers) ? vouchers : [];
+  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
+  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
+  const net = total - voucherTotal;
+  if (due) due.textContent = money(net);
+  const cashVal = Number(cashInput || 0);
+  if (cashEl) cashEl.textContent = money(cashVal);
+  const amountToCollect = net > 0 ? net : 0;
+  if (changeEl) changeEl.textContent = money(Math.max(0, cashVal - amountToCollect));
+  if (cashBtn) cashBtn.textContent = `${money(cashVal)} Cash`;
+  if (clear) clear.onclick = () => { cashInput = ''; updateCashSection(); };
+}
+
+async function completeSaleFromOverlay() {
+  let customer = '';
+  const topSelect = document.getElementById('topCustomerSelect');
+  const bottomSelect = document.getElementById('customerSelect');
+  if (topSelect && topSelect.value) customer = topSelect.value;
+  else if (bottomSelect && bottomSelect.value) customer = bottomSelect.value;
+  if (!customer) customer = getDefaultCustomerValue();
+  if (cart.length === 0) { alert('Cart is empty'); return; }
+
+  const voucherList = Array.isArray(vouchers) ? vouchers : [];
+  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
+  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
+  const net = total - voucherTotal;
+  const amountToCollect = net > 0 ? net : 0;
+  const isRefund = net < 0;
+
+  let payments = [];
+  voucherList.forEach(v => {
+    payments.push({ mode_of_payment: 'Voucher', amount: Number(v.amount), reference_no: v.code });
+  });
+
+  let tender = currentTender;
+  if (!tender) {
+    if (isRefund) {
+      tender = 'cash';
+    } else {
+      alert('Please select a tender type.');
+      return;
+    }
+  }
+
+  if (tender === 'cash') {
+    const cashVal = Number(cashInput || 0);
+    if (amountToCollect > 0 && cashVal < amountToCollect) {
+      alert('Cash is less than remaining due');
+      return;
+    }
+    if (amountToCollect > 0) {
+      payments.push({ mode_of_payment: 'Cash', amount: amountToCollect });
+    }
+  } else if (tender === 'card') {
+    if (amountToCollect > 0) payments.push({ mode_of_payment: 'Card', amount: amountToCollect });
+  } else if (tender === 'other') {
+    if (amountToCollect > 0) payments.push({ mode_of_payment: 'Other', amount: amountToCollect });
+  } else if (tender === 'voucher') {
+    if (amountToCollect > 0) {
+      alert('Remaining due after vouchers. Select Cash or Card for the remainder.');
+      return;
+    }
+  }
+
+  const payload = {
+    customer,
+    items: cart.map(i => ({
+      item_code: i.item_code,
+      qty: i.refund ? -Math.abs(i.qty) : i.qty,
+      rate: i.rate
+    })),
+    payments,
+    tender,
+    cash_given: tender === 'cash' ? Number(cashInput || 0) : null,
+    change: tender === 'cash'
+      ? (amountToCollect > 0 ? Number(cashInput || 0) - amountToCollect : Math.abs(net))
+      : 0,
+    total: net,
+    vouchers,
+    till_number: settings.till_number
+  };
+
+  try {
+    const response = await fetch('/api/create-sale', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (data.status === 'success') {
+      const cashVal = Number(cashInput || 0);
+      const changeVal = tender === 'cash'
+        ? (amountToCollect > 0 ? cashVal - amountToCollect : Math.abs(net))
+        : 0;
+      const info = { invoice: data.invoice_name || 'N/A', change: changeVal };
+      lastReceiptInfo = info;
+      showReceiptOverlay(info);
+      if (settings.auto_print) {
+        setTimeout(() => window.print(), 50);
+      }
+    } else {
+      alert('Error: ' + data.message);
+    }
+  } catch (error) {
+    console.error(error);
+    alert('Error creating sale. Please try again.');
+  }
 }
 
 // Voucher overlay
-function openVoucherOverlay(){ const o=document.getElementById('voucherOverlay'), c=document.getElementById('voucherCodeInput'), a=document.getElementById('voucherAmountInput'); if(!o){ err('loginOverlay element missing'); return; }
-  neutralizeForeignOverlays(); const total=cart.reduce((s,it)=>s+(it.qty*it.rate),0); const vTot=(Array.isArray(vouchers)?vouchers:[]).reduce((s,v)=>s+Number(v.amount||0),0); const rem=Math.max(0,total-vTot); o.style.display='flex';
-  o.style.visibility='visible';
-  o.style.opacity='1';
-  try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} if(c){ c.value=''; setTimeout(()=>c.focus(),0);} if(a){ a.value=rem.toFixed(2);} }
+function openVoucherOverlay(){
+  const overlay = document.getElementById('voucherOverlay');
+  const codeInput = document.getElementById('voucherCodeInput');
+  const amountInput = document.getElementById('voucherAmountInput');
+  if (!overlay) { err('loginOverlay element missing'); return; }
+  neutralizeForeignOverlays();
+  const voucherList = Array.isArray(vouchers) ? vouchers : [];
+  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
+  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
+  const net = total - voucherTotal;
+  const suggested = Math.max(0, net);
+  overlay.style.display = 'flex';
+  overlay.style.visibility = 'visible';
+  overlay.style.opacity = '1';
+  try {
+    const cs = getComputedStyle(overlay);
+    log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity });
+  } catch (_) {}
+  if (codeInput) {
+    codeInput.value = '';
+    setTimeout(() => codeInput.focus(), 0);
+  }
+  if (amountInput) {
+    amountInput.value = suggested.toFixed(2);
+  }
+}
+
 function hideVoucherOverlay(){ const o=document.getElementById('voucherOverlay'); if(o) o.style.display='none'; }
-function submitVoucher(){ const cEl=document.getElementById('voucherCodeInput'), aEl=document.getElementById('voucherAmountInput'), btn=document.getElementById('tenderVoucherBtn'); const code=(cEl&&cEl.value.trim())||''; const amt=Number(aEl&&aEl.value)||0; if(!code) return alert('Please enter or scan a voucher code.'); if(amt<=0) return alert('Please enter a voucher amount greater than 0.'); const total=cart.reduce((s,it)=>s+(it.qty*it.rate),0); const vTot=(Array.isArray(vouchers)?vouchers:[]).reduce((s,v)=>s+Number(v.amount||0),0); const rem=Math.max(0,total-vTot); const applied=Math.min(amt,rem); vouchers.push({code,amount:applied}); if(btn) btn.textContent=`Voucher (${vouchers.length})`; hideVoucherOverlay(); updateCashSection(); }
+function submitVoucher(){
+  const codeEl = document.getElementById('voucherCodeInput');
+  const amountEl = document.getElementById('voucherAmountInput');
+  const btn = document.getElementById('tenderVoucherBtn');
+  const code = (codeEl && codeEl.value.trim()) || '';
+  const amount = Number(amountEl && amountEl.value) || 0;
+  if (!code) return alert('Please enter or scan a voucher code.');
+  if (amount <= 0) return alert('Please enter a voucher amount greater than 0.');
+  const voucherList = Array.isArray(vouchers) ? vouchers : [];
+  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
+  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
+  const remaining = Math.max(0, total - voucherTotal);
+  const applied = Math.min(amount, remaining);
+  vouchers.push({ code, amount: applied });
+  if (btn) btn.textContent = `Voucher (${vouchers.length})`;
+  hideVoucherOverlay();
+  updateCashSection();
+}
 
 // Cashier/login helpers
 function getDefaultCustomerValue(){ if(!customers||customers.length===0) return ''; const w=customers.find(c=>(c.name||'').toUpperCase().includes('WALKIN') || (c.customer_name||'').toLowerCase()==='walk-in customer'); return w?w.name:(customers[0]&&customers[0].name?customers[0].name:''); }
@@ -254,7 +651,7 @@ function updateCashierInfo(){
   const b=document.getElementById('cashierBadge');
   if(!b) return;
   if(currentCashier){
-    b.textContent = `${currentCashier.code} â€” ${currentCashier.name}`;
+    b.textContent = `${currentCashier.code} \u2014 ${currentCashier.name}`;
     b.classList.remove('btn-light');
     b.classList.add('btn-success');
     b.title = 'Click to change cashier';
@@ -271,7 +668,7 @@ function showLogin(){
   const e=document.getElementById('loginError');
   if(!o){ err('loginOverlay element missing'); return; }
   neutralizeForeignOverlays();
-  // Ensure other overlays are closed so login isnâ€™t obscured
+  // Ensure other overlays are closed so login isn't obscured
   const overlays=['searchOverlay','productOverlay','checkoutOverlay','voucherOverlay','menuOverlay','receiptOverlay'];
   overlays.forEach(id=>{ const el=document.getElementById(id); if(el) el.style.display='none'; });
   o.style.display='flex';
@@ -281,7 +678,11 @@ function showLogin(){
   if(i){ i.value=''; setTimeout(()=>i.focus(),0); }
   if(e) e.style.display='none';
 }
-function hideLogin(){ const o=document.getElementById('loginOverlay'); if(o) o.style.display='none'; }
+function hideLogin(){
+  const o = document.getElementById('loginOverlay');
+  if (o) o.style.display = 'none';
+  focusBarcodeInput();
+}
 function logoutToLogin(reason){ cart=[]; updateCartDisplay(); setDefaultCustomer(); const s=document.getElementById('itemSearch'); if(s) s.value=''; currentCashier=null; updateCashierInfo(); showLogin(); if(reason){ const e=document.getElementById('loginError'); if(e){ e.textContent=reason; e.style.display='block'; } } }
 
 // Receipt overlay

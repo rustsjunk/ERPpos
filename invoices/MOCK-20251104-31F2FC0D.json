@@ -1,0 +1,24 @@
+{
+  "invoice_name": "MOCK-20251104-31F2FC0D",
+  "created_at": "2025-11-04T11:10:38.532694",
+  "mode": "mock",
+  "customer": "CUST-WALKIN",
+  "items": [
+    {
+      "item_code": "SHOE-CAS-001-Brown-Wide Fitting-6",
+      "qty": 1,
+      "rate": 49.99
+    }
+  ],
+  "payments": [
+    {
+      "mode_of_payment": "Cash",
+      "amount": 49.99
+    }
+  ],
+  "tender": "cash",
+  "cash_given": 50,
+  "change": 0.00999999999999801,
+  "total": 49.99,
+  "vouchers": []
+}

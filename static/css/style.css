@@ -1,4 +1,4 @@
-﻿.item-card {
+.item-card {
     cursor: pointer;
     transition: transform 0.2s;
 }
@@ -22,6 +22,61 @@
     align-items: center;
     gap: 10px;
 }
+.cart-item-main {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.cart-item-name {
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.cart-item-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.cart-refund-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 6px;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    font-weight: 600;
+    border-radius: 999px;
+    background: #ffe3e3;
+    color: #d6336c;
+}
+.refund-btn {
+    border: 1px solid #dee2e6;
+    background: #fff;
+    color: #495057;
+    font-size: 0.8rem;
+    padding: 2px 10px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.refund-btn:hover {
+    background: #f8f9fa;
+}
+.refund-btn.active {
+    background: #ffe3e3;
+    border-color: #ffc9c9;
+    color: #c92a2a;
+}
+.cart-item.refund {
+    background: #fff5f5;
+}
+.cart-item.refund .cart-item-total {
+    color: #c92a2a;
+}
+.cart-item.refund .cart-item-name {
+    color: #c92a2a;
+}
 .quantity-btn {
     padding: 2px 8px;
     border: 1px solid #ddd;
@@ -31,12 +86,11 @@
 .remove-btn {
     border: 1px solid #ddd;
     background: #fff;
-    color: #333;
-    padding: 2px 8px;
+    color: #495057;
+    padding: 2px 10px;
+    border-radius: 6px;
     cursor: pointer;
 }
-.remove-btn { color: transparent; position: relative; }
-.remove-btn::after { content: 'x'; color: #333; position: absolute; left: 8px; top: 2px; }
 .cart-item-total {
     font-weight: 600;
 }
@@ -59,12 +113,101 @@
     display: flex;
     align-items: center;
     z-index: 1030;
-    overflow: hidden; /* prevent tall children from overflowing */
+    overflow: visible; /* allow dropdowns such as the cashier menu to render above content */
 }
-body { padding-top: 64px; }
+body { padding-top: 64px; padding-bottom: 96px; }
 
 /* Global text size adjust for compatibility */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+/* Layout adjustments for the main POS view */
+.pos-layout { row-gap: 24px; }
+
+@media (max-width: 1200px) {
+    .pos-layout {
+        align-items: stretch;
+    }
+}
+
+@media (max-width: 1100px) and (max-aspect-ratio: 1 / 1) {
+    .pos-layout {
+        flex-direction: column;
+    }
+    .pos-layout > .col-md-8,
+    .pos-layout > .col-md-4 {
+        max-width: 100%;
+        flex: 1 1 auto;
+    }
+    .cart-column {
+        order: -1;
+    }
+    .cart-column #cartCard {
+        position: static;
+        max-height: clamp(420px, 70vh, 640px);
+        width: 100%;
+        max-width: 520px;
+        margin: 0 auto;
+    }
+    .cart-column #cartItems {
+        max-height: clamp(260px, 45vh, 480px);
+    }
+}
+
+.barcode-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: #ffffff;
+    border-top: 1px solid #dee2e6;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.05);
+    padding: 12px 0;
+    z-index: 1025;
+}
+.barcode-inner {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: center;
+}
+.barcode-heading {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.barcode-input-group {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    max-width: 480px;
+}
+.barcode-input {
+    flex: 1 1 auto;
+}
+.barcode-feedback {
+    min-height: 20px;
+    font-size: 0.85rem;
+    color: #6c757d;
+    text-align: center;
+}
+.barcode-feedback.error {
+    color: #c92a2a;
+}
+@media (max-width: 576px) {
+    .barcode-inner {
+        align-items: stretch;
+        padding: 0 16px;
+    }
+    .barcode-input-group {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .barcode-feedback {
+        text-align: left;
+    }
+}
+
 /* Topbar visual refinements */
 :root { --topbar-font: 'Poppins', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
 .app-topbar .cashier-badge,
@@ -137,7 +280,7 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     opacity: 0;
     pointer-events: none;
     transition: transform 150ms ease, opacity 150ms ease;
-    z-index: 1040;
+    z-index: 10400;
     min-width: 160px;
 }
 .cashier-menu.open {
@@ -146,7 +289,7 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     pointer-events: auto;
 }
 .cashier-menu::before {
-    content: '×'';
+    content: '';
     position: absolute;
     top: -6px;
     right: 16px;
@@ -184,7 +327,8 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     position: fixed;
     inset: 0;
     background: rgba(255, 255, 255, 0.55);
-    -webkit-backdrop-filter: blur(10px);`n    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
     display: none;
     align-items: center;
     justify-content: center;
@@ -234,6 +378,8 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
 .checkout-item .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .checkout-item .meta { color: #6c757d; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .checkout-item .price { font-weight: 600; text-align: right; }
+.checkout-item.refund .name { color: #c92a2a; }
+.checkout-item.refund .price { color: #c92a2a; }
 .tender-btn { background: #f1f3f5; border: 1px solid #dee2e6; }
 .tender-btn.active { background: #0d6efd; color: #fff; border-color: #0d6efd; }
 .tender-grid {
@@ -339,7 +485,8 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
     position: fixed;
     top: 0; right: 0; bottom: 0; left: 0;
     background: rgba(0, 0, 0, 0.45); /* darker to ensure visibility */
-    -webkit-backdrop-filter: blur(8px);`n    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
     display: flex;
     align-items: center;
     justify-content: center;

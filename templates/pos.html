@@ -34,7 +34,7 @@
         </div>
     </div>
     <div class="container-fluid">
-        <div class="row">
+        <div class="row pos-layout">
             <!-- Left side - Items list -->
             <div class="col-md-8">
                 <div class="row mb-3">
@@ -48,7 +48,7 @@
             </div>
             
             <!-- Right side - Cart -->
-            <div class="col-md-4">
+            <div class="col-md-4 cart-column">
                 <div id="cartCard" class="card">
                     <div class="card-header">
                         <h3>Current Cart</h3>
@@ -69,6 +69,17 @@
                     </div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <div class="barcode-bar">
+        <div class="barcode-inner container-fluid">
+            <div class="barcode-heading text-muted">Barcode Scanner</div>
+            <div class="barcode-input-group">
+                <input type="text" id="barcodeInput" class="form-control barcode-input" placeholder="Scan or enter barcode..." autocomplete="off" />
+                <button id="barcodeAddBtn" class="btn btn-outline-primary">Add</button>
+            </div>
+            <div id="barcodeFeedback" class="barcode-feedback"></div>
         </div>
     </div>
 
