@@ -1,0 +1,24 @@
+{
+  "invoice_name": "MOCK-20251103-7D44BFD6",
+  "created_at": "2025-11-03T22:48:02.961243",
+  "mode": "mock",
+  "customer": "CUST-WALKIN",
+  "items": [
+    {
+      "item_code": "SHOE-DRS-002-Brown-Wide Fitting-3",
+      "qty": 1,
+      "rate": 84.99
+    }
+  ],
+  "payments": [
+    {
+      "mode_of_payment": "Cash",
+      "amount": 84.99
+    }
+  ],
+  "tender": "cash",
+  "cash_given": 100,
+  "change": 15.010000000000005,
+  "total": 84.99,
+  "vouchers": []
+}

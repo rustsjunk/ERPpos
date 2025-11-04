@@ -1,0 +1,707 @@
+let items = [];
+let cart = [];
+let customers = [];
+let currentCashier = null;
+
+// Currency formatting
+const CURRENCY = 'GBP'; // adjust as needed
+const formatter = new Intl.NumberFormat(undefined, { style: 'currency', currency: CURRENCY });
+const formatCurrency = (value) => formatter.format(Number(value || 0));
+
+// Demo cashier code map; extend as needed
+const CASHIER_CODES = {
+    '1111': 'Alice',
+    '2222': 'Bob',
+    '3333': 'Charlie'
+};
+
+// Idle timeout (ms) to auto-logout
+const IDLE_TIMEOUT_MS = 120000; // 2 minutes
+let idleTimer = null;
+function resetIdleTimer() {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (currentCashier) {
+        idleTimer = setTimeout(() => {
+            logoutToLogin('Session timed out due to inactivity');
+        }, IDLE_TIMEOUT_MS);
+    }
+}
+
+// Initialize the POS system
+document.addEventListener('DOMContentLoaded', function() {
+    loadItems();
+    loadCustomers();
+    setupEventListeners();
+    // Initialize totals display
+    updateCartDisplay();
+    updateCashierInfo();
+    // Show login on load
+    showLogin();
+    // Idle tracking
+    ['click','keydown','mousemove','touchstart'].forEach(ev => {
+        document.addEventListener(ev, resetIdleTimer, { passive: true });
+    });
+});
+
+// Load items from ERPNext
+async function loadItems() {
+    try {
+        const response = await fetch('/api/items');
+        const data = await response.json();
+        if (data.status === 'success') {
+            items = data.items;
+            displayItems(items);
+        }
+    } catch (error) {
+        console.error('Error loading items:', error);
+    }
+}
+
+// Load customers from ERPNext
+async function loadCustomers() {
+    try {
+        const response = await fetch('/api/customers');
+        const data = await response.json();
+        if (data.status === 'success') {
+            customers = data.customers;
+            const bottomSelect = document.getElementById('customerSelect');
+            const topSelect = document.getElementById('topCustomerSelect');
+            customers.forEach(customer => {
+                const option1 = document.createElement('option');
+                option1.value = customer.name;
+                option1.textContent = customer.customer_name;
+                if (bottomSelect) bottomSelect.appendChild(option1);
+                const option2 = document.createElement('option');
+                option2.value = customer.name;
+                option2.textContent = customer.customer_name;
+                if (topSelect) topSelect.appendChild(option2);
+            });
+            // Set default customer to Walk-in Customer if available
+            setDefaultCustomer();
+        }
+    } catch (error) {
+        console.error('Error loading customers:', error);
+    }
+}
+
+// Display items in the grid
+function displayItems(itemsToDisplay) {
+    const itemsGrid = document.getElementById('itemsGrid');
+    itemsGrid.innerHTML = '';
+    
+    itemsToDisplay.forEach(item => {
+        const itemCard = document.createElement('div');
+        itemCard.className = 'col';
+        itemCard.innerHTML = `
+            <div class="card item-card h-100">
+                <div class="card-body">
+                    <h5 class="card-title">${item.item_name}</h5>
+                    <p class="card-text">${formatCurrency(item.standard_rate)}</p>
+                    <p class="card-text"><small>${item.stock_uom}</small></p>
+                </div>
+            </div>
+        `;
+        itemCard.onclick = () => openProduct(item);
+        itemsGrid.appendChild(itemCard);
+    });
+}
+
+// Add item to cart
+function addToCart(item) {
+    const existingItem = cart.find(cartItem => cartItem.item_code === item.name);
+    
+    if (existingItem) {
+        existingItem.qty += 1;
+        existingItem.amount = existingItem.qty * existingItem.rate;
+    } else {
+        cart.push({
+            item_code: item.name,
+            item_name: item.item_name,
+            qty: 1,
+            rate: item.standard_rate,
+            amount: item.standard_rate,
+            image: item.image || null
+        });
+    }
+    
+    updateCartDisplay();
+}
+
+// Update cart display
+function updateCartDisplay() {
+    const cartItems = document.getElementById('cartItems');
+    const cartTotal = document.getElementById('cartTotal');
+    cartItems.innerHTML = '';
+    
+    let total = 0;
+    
+    cart.forEach(item => {
+        const itemElement = document.createElement('div');
+        itemElement.className = 'cart-item';
+        const lineTotal = item.qty * item.rate;
+        itemElement.innerHTML = `
+            <div class="cart-item-main">
+                <div class="cart-item-name">${item.item_name}</div>
+                <div class="cart-item-meta text-muted">${formatCurrency(item.rate)} each</div>
+            </div>
+            <div class="cart-item-quantity">
+                <span class="quantity-btn" onclick="updateQuantity('${item.item_code}', -1)">-</span>
+                <span>${item.qty}</span>
+                <span class="quantity-btn" onclick="updateQuantity('${item.item_code}', 1)">+</span>
+            </div>
+            <div class="cart-item-total">${formatCurrency(lineTotal)}</div>
+            <button class="remove-btn" onclick="removeFromCart('${item.item_code}')">×</button>
+        `;
+        cartItems.appendChild(itemElement);
+        total += lineTotal;
+    });
+    
+    cartTotal.textContent = formatCurrency(total);
+}
+
+// Update item quantity
+function updateQuantity(itemCode, change) {
+    const item = cart.find(item => item.item_code === itemCode);
+    if (item) {
+        item.qty += change;
+        if (item.qty <= 0) {
+            cart = cart.filter(cartItem => cartItem.item_code !== itemCode);
+        } else {
+            item.amount = item.qty * item.rate;
+        }
+        updateCartDisplay();
+    }
+}
+
+// Remove item entirely
+function removeFromCart(itemCode) {
+    cart = cart.filter(cartItem => cartItem.item_code !== itemCode);
+    updateCartDisplay();
+}
+
+// Setup event listeners
+function setupEventListeners() {
+    // Search functionality
+    const smallSearch = document.getElementById('itemSearch');
+    smallSearch.addEventListener('focus', function(e) { showSearchOverlay(); });
+    smallSearch.addEventListener('input', function(e) {
+        showSearchOverlay(e.target.value);
+    });
+    
+    // Checkout functionality
+    document.getElementById('checkoutBtn').addEventListener('click', async function() {
+        if (!currentCashier) {
+            showLogin();
+            return;
+        }
+        if (cart.length === 0) { alert('Cart is empty'); return; }
+        openCheckoutOverlay();
+    });
+
+    // Clear cart button
+    const clearBtn = document.getElementById('clearCartBtn');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            if (cart.length === 0) return;
+            if (confirm('Clear all items from cart?')) {
+                cart = [];
+                updateCartDisplay();
+            }
+        });
+    }
+
+    // Cashier info click -> change cashier
+    const badge = document.getElementById('cashierBadge');
+    const menu = document.getElementById('cashierMenu');
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (badge) {
+        badge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!currentCashier) {
+                showLogin();
+                return;
+            }
+            if (menu) {
+                menu.classList.toggle('open');
+            }
+        });
+    }
+    if (logoutBtn) {
+        logoutBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const menuEl = document.getElementById('cashierMenu');
+            if (menuEl) menuEl.classList.remove('open');
+            logoutToLogin();
+        });
+    }
+    // click outside to close
+    document.addEventListener('click', (e) => {
+        const wrap = document.querySelector('.cashier-wrap');
+        if (menu && wrap && !wrap.contains(e.target)) {
+            menu.classList.remove('open');
+        }
+    });
+    // esc to close
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && menu) menu.classList.remove('open');
+    });
+
+    // Login overlay interactions
+    const overlay = document.getElementById('loginOverlay');
+    const codeInput = document.getElementById('cashierCodeInput');
+    const loginBtn = document.getElementById('loginEnterBtn');
+    const errorEl = document.getElementById('loginError');
+    if (overlay && codeInput && loginBtn) {
+        loginBtn.addEventListener('click', attemptLogin);
+        codeInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                attemptLogin();
+            }
+        });
+        document.querySelectorAll('.key-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const k = btn.getAttribute('data-key');
+                if (k === 'C') {
+                    codeInput.value = '';
+                    errorEl.style.display = 'none';
+                } else if (k === 'B') {
+                    codeInput.value = codeInput.value.slice(0, -1);
+                } else {
+                    codeInput.value += k;
+                }
+            });
+        });
+    }
+
+    // Search overlay events
+    const searchOverlay = document.getElementById('searchOverlay');
+    const searchInputBig = document.getElementById('searchInputBig');
+    const brandFilter = document.getElementById('brandFilter');
+    const searchCloseBtn = document.getElementById('searchCloseBtn');
+    if (searchOverlay) {
+        if (searchInputBig) searchInputBig.addEventListener('input', renderSearchResults);
+        if (brandFilter) brandFilter.addEventListener('change', renderSearchResults);
+        if (searchCloseBtn) searchCloseBtn.addEventListener('click', hideSearchOverlay);
+        // close on Escape
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') hideSearchOverlay();
+        });
+        // close on backdrop click
+        searchOverlay.addEventListener('click', (e) => {
+            if (e.target === searchOverlay) hideSearchOverlay();
+        });
+    }
+
+    // Product overlay events
+    const productOverlay = document.getElementById('productOverlay');
+    const productCloseBtn = document.getElementById('productCloseBtn');
+    if (productOverlay) {
+        if (productCloseBtn) productCloseBtn.addEventListener('click', hideProductOverlay);
+        productOverlay.addEventListener('click', (e) => { if (e.target === productOverlay) hideProductOverlay(); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideProductOverlay(); });
+    }
+
+    // Checkout overlay events
+    const checkoutOverlay = document.getElementById('checkoutOverlay');
+    const checkoutCloseBtn = document.getElementById('checkoutCloseBtn');
+    const completeSaleBtn = document.getElementById('completeSaleBtn');
+    if (checkoutOverlay) {
+        if (checkoutCloseBtn) checkoutCloseBtn.addEventListener('click', hideCheckoutOverlay);
+        checkoutOverlay.addEventListener('click', (e) => { if (e.target === checkoutOverlay) hideCheckoutOverlay(); });
+        // tender buttons
+        document.querySelectorAll('.tender-btn').forEach(b => {
+            b.addEventListener('click', () => selectTender(b.getAttribute('data-tender')));
+        });
+        // denomination quick keys
+        checkoutOverlay.querySelectorAll('.denom-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const amt = Number(btn.getAttribute('data-amount')) || 0;
+                addCashAmount(amt);
+            });
+        });
+        if (completeSaleBtn) completeSaleBtn.addEventListener('click', completeSaleFromOverlay);
+    }
+
+    // Voucher overlay events
+    const voucherOverlay = document.getElementById('voucherOverlay');
+    const voucherCloseBtn = document.getElementById('voucherCloseBtn');
+    const voucherSubmitBtn = document.getElementById('voucherSubmitBtn');
+    const voucherCodeInput = document.getElementById('voucherCodeInput');
+    if (voucherOverlay) {
+        if (voucherCloseBtn) voucherCloseBtn.addEventListener('click', hideVoucherOverlay);
+        if (voucherSubmitBtn) voucherSubmitBtn.addEventListener('click', submitVoucher);
+        if (voucherCodeInput) voucherCodeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitVoucher(); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideVoucherOverlay(); });
+        voucherOverlay.addEventListener('click', (e) => { if (e.target === voucherOverlay) hideVoucherOverlay(); });
+    }
+}
+
+// ----- Checkout overlay -----
+let currentTender = 'cash';
+let cashInput = '';
+let voucherCode = '';
+function openCheckoutOverlay() {
+    const overlay = document.getElementById('checkoutOverlay');
+    const cartEl = document.getElementById('checkoutCart');
+    if (!overlay || !cartEl) return;
+    renderCheckoutCart();
+    overlay.style.display = 'flex';
+    selectTender('cash');
+}
+
+function hideCheckoutOverlay() {
+    const overlay = document.getElementById('checkoutOverlay');
+    if (overlay) overlay.style.display = 'none';
+    cashInput = '';
+}
+
+function renderCheckoutCart() {
+    const cartEl = document.getElementById('checkoutCart');
+    if (!cartEl) return;
+    cartEl.innerHTML = '';
+    cart.forEach(it => {
+        const div = document.createElement('div');
+        div.className = 'checkout-item';
+        const imgDiv = document.createElement('div');
+        imgDiv.className = 'img';
+        if (it.image) imgDiv.style.backgroundImage = `url('${it.image}')`;
+        const mid = document.createElement('div');
+        const name = document.createElement('div'); name.className = 'name'; name.textContent = it.item_name;
+        const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = `${it.qty} × ${formatCurrency(it.rate)}`;
+        mid.appendChild(name); mid.appendChild(meta);
+        const price = document.createElement('div'); price.className = 'price'; price.textContent = formatCurrency(it.qty * it.rate);
+        div.appendChild(imgDiv); div.appendChild(mid); div.appendChild(price);
+        cartEl.appendChild(div);
+    });
+    updateCashSection();
+}
+
+function selectTender(t) {
+    currentTender = t;
+    document.querySelectorAll('.tender-btn').forEach(b => {
+        if (b.getAttribute('data-tender') === t) b.classList.add('active'); else b.classList.remove('active');
+    });
+    const cashSec = document.getElementById('cashSection');
+    cashSec.style.display = (t === 'cash') ? 'block' : 'none';
+    updateCashSection();
+    if (t === 'voucher') {
+        openVoucherOverlay();
+    }
+}
+
+function addCashAmount(amount) {
+    const current = Number(cashInput || 0);
+    const next = Math.round((current + amount) * 100) / 100;
+    cashInput = next.toFixed(2);
+    updateCashSection();
+}
+
+function updateCashSection() {
+    const dueEl = document.getElementById('amountDue');
+    const cashEl = document.getElementById('amountCash');
+    const changeEl = document.getElementById('amountChange');
+    const tenderCashBtn = document.getElementById('tenderCashBtn');
+    const clearBtn = document.getElementById('clearCashBtn');
+    const total = cart.reduce((s, it) => s + (it.qty * it.rate), 0);
+    if (dueEl) dueEl.textContent = formatCurrency(total);
+    const cashVal = Number(cashInput || 0);
+    if (cashEl) cashEl.textContent = formatCurrency(cashVal);
+    if (changeEl) changeEl.textContent = formatCurrency(Math.max(0, cashVal - total));
+    if (tenderCashBtn) tenderCashBtn.textContent = `${formatCurrency(cashVal)} Cash`;
+    if (clearBtn) clearBtn.onclick = () => { cashInput = ''; updateCashSection(); };
+}
+
+async function completeSaleFromOverlay() {
+    let customer = '';
+    const topSel = document.getElementById('topCustomerSelect');
+    const bottomSel = document.getElementById('customerSelect');
+    if (topSel && topSel.value) customer = topSel.value; else if (bottomSel && bottomSel.value) customer = bottomSel.value;
+    if (!customer) customer = getDefaultCustomerValue();
+    if (cart.length === 0) { alert('Cart is empty'); return; }
+    const total = cart.reduce((s, it) => s + (it.qty * it.rate), 0);
+    let payments = [];
+    if (currentTender === 'cash') {
+        const cashVal = Number(cashInput || 0);
+        if (cashVal < total) { alert('Cash is less than total due'); return; }
+        payments = [{ mode_of_payment: 'Cash', amount: total }];
+    } else if (currentTender === 'card') {
+        payments = [{ mode_of_payment: 'Card', amount: total }];
+    } else if (currentTender === 'voucher') {
+        if (!voucherCode) { alert('Please scan the voucher barcode.'); return; }
+        payments = [{ mode_of_payment: 'Voucher', amount: total, reference_no: voucherCode }];
+    } else {
+        payments = [{ mode_of_payment: 'Other', amount: total }];
+    }
+
+    const saleData = {
+        customer: customer,
+        items: cart.map(item => ({ item_code: item.item_code, qty: item.qty, rate: item.rate })),
+        payments
+    };
+    try {
+        const response = await fetch('/api/create-sale', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(saleData) });
+        const result = await response.json();
+        if (result.status === 'success') {
+            alert(`Sale completed successfully!\nInvoice: ${result.invoice_name || 'N/A'}`);
+            hideCheckoutOverlay();
+            cart = [];
+            updateCartDisplay();
+            logoutToLogin();
+        } else {
+            alert('Error: ' + result.message);
+        }
+    } catch (e) {
+        console.error('Error creating sale:', e);
+        alert('Error creating sale. Please try again.');
+    }
+}
+
+// ----- Voucher overlay -----
+function openVoucherOverlay() {
+    const overlay = document.getElementById('voucherOverlay');
+    const input = document.getElementById('voucherCodeInput');
+    if (!overlay) return;
+    overlay.style.display = 'flex';
+    if (input) { input.value = ''; setTimeout(() => input.focus(), 0); }
+}
+
+function hideVoucherOverlay() {
+    const overlay = document.getElementById('voucherOverlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+function submitVoucher() {
+    const input = document.getElementById('voucherCodeInput');
+    const voucherBtn = document.getElementById('tenderVoucherBtn');
+    voucherCode = (input && input.value.trim()) || '';
+    if (!voucherCode) { alert('Please enter or scan a voucher code.'); return; }
+    if (voucherBtn) voucherBtn.textContent = `Voucher (${voucherCode})`;
+    hideVoucherOverlay();
+}
+
+function getDefaultCustomerValue() {
+    if (!customers || customers.length === 0) return '';
+    const walkIn = customers.find(c => (c.name || '').toUpperCase().includes('WALKIN') || (c.customer_name || '').toLowerCase() === 'walk-in customer');
+    return walkIn ? walkIn.name : (customers[0] && customers[0].name ? customers[0].name : '');
+}
+
+function setDefaultCustomer() {
+    const bottom = document.getElementById('customerSelect');
+    const top = document.getElementById('topCustomerSelect');
+    const defVal = getDefaultCustomerValue();
+    if (defVal) {
+        if (bottom) bottom.value = defVal;
+        if (top) top.value = defVal;
+    }
+}
+
+function attemptLogin() {
+    const codeInput = document.getElementById('cashierCodeInput');
+    const errorEl = document.getElementById('loginError');
+    const code = (codeInput.value || '').trim();
+    if (!code) {
+        errorEl.textContent = 'Please enter a code';
+        errorEl.style.display = 'block';
+        return;
+    }
+    const name = CASHIER_CODES[code] || `Cashier ${code}`;
+    currentCashier = { code, name };
+    updateCashierInfo();
+    hideLogin();
+    resetIdleTimer();
+}
+
+function updateCashierInfo() {
+    const ci = document.getElementById('cashierBadge');
+    if (!ci) return;
+    if (currentCashier) {
+        ci.textContent = `${currentCashier.code} — ${currentCashier.name}`;
+        ci.classList.remove('btn-outline-dark');
+        ci.classList.add('btn-success');
+        ci.title = 'Click to change cashier';
+    } else {
+        ci.textContent = 'Not signed in';
+        ci.classList.remove('btn-success');
+        ci.classList.add('btn-light');
+        ci.removeAttribute('title');
+    }
+}
+
+function showLogin() {
+    const overlay = document.getElementById('loginOverlay');
+    const codeInput = document.getElementById('cashierCodeInput');
+    const errorEl = document.getElementById('loginError');
+    if (!overlay) return;
+    overlay.style.display = 'flex';
+    if (codeInput) {
+        codeInput.value = '';
+        setTimeout(() => codeInput.focus(), 0);
+    }
+    if (errorEl) errorEl.style.display = 'none';
+}
+
+function hideLogin() {
+    const overlay = document.getElementById('loginOverlay');
+    if (!overlay) return;
+    overlay.style.display = 'none';
+}
+
+function logoutToLogin(reason) {
+    cart = [];
+    updateCartDisplay();
+    // reset UI inputs
+    const customerSelect = document.getElementById('customerSelect');
+    if (customerSelect) {
+        // reset to Walk-in customer if available
+        setDefaultCustomer();
+    }
+    const search = document.getElementById('itemSearch');
+    if (search) search.value = '';
+    currentCashier = null;
+    updateCashierInfo();
+    showLogin();
+    if (reason) {
+        const errorEl = document.getElementById('loginError');
+        if (errorEl) { errorEl.textContent = reason; errorEl.style.display = 'block'; }
+    }
+}
+
+// ----- Product search overlay -----
+function showSearchOverlay(initialQuery = '') {
+    const overlay = document.getElementById('searchOverlay');
+    const input = document.getElementById('searchInputBig');
+    const brandSel = document.getElementById('brandFilter');
+    if (!overlay || !input || !brandSel) return;
+    overlay.style.display = 'flex';
+    // Build brand options
+    const brands = Array.from(new Set(items.map(it => (it.brand || 'Unbranded')))).sort();
+    brandSel.innerHTML = '<option value="">All Brands</option>' + brands.map(b => `<option value="${b}">${b}</option>`).join('');
+    input.value = initialQuery;
+    renderSearchResults();
+    setTimeout(() => input.focus(), 0);
+}
+
+function hideSearchOverlay() {
+    const overlay = document.getElementById('searchOverlay');
+    if (!overlay) return;
+    overlay.style.display = 'none';
+}
+
+function renderSearchResults() {
+    const grid = document.getElementById('searchGrid');
+    const input = document.getElementById('searchInputBig');
+    const brandSel = document.getElementById('brandFilter');
+    if (!grid) return;
+    let list = items.slice();
+    const q = (input.value || '').toLowerCase();
+    const b = (brandSel.value || '');
+    if (q) {
+        list = list.filter(it => it.item_name.toLowerCase().includes(q));
+    }
+    if (b) {
+        list = list.filter(it => (it.brand || 'Unbranded') === b);
+    }
+    grid.innerHTML = '';
+    list.forEach(it => {
+        const col = document.createElement('div');
+        col.className = 'col';
+        const imgStyle = it.image ? `style="background-image:url('${it.image}')"` : '';
+        col.innerHTML = `
+            <div class="product-card" onclick='selectProduct("${it.name}")'>
+                <div class="product-img" ${imgStyle}></div>
+                <div class="fw-semibold">${it.item_name}</div>
+                <div class="text-muted small">${(it.brand || 'Unbranded')}</div>
+                <div class="mt-1">${formatCurrency(it.standard_rate)}</div>
+            </div>
+        `;
+        grid.appendChild(col);
+    });
+}
+
+function selectProduct(itemName) {
+    const it = items.find(x => x.name === itemName);
+    if (it) openProduct(it);
+}
+
+// ----- Product detail / variant matrix -----
+let currentProduct = null;
+async function openProduct(item) {
+    currentProduct = item;
+    const overlay = document.getElementById('productOverlay');
+    const title = document.getElementById('productTitle');
+    const img = document.getElementById('productImage');
+    const brand = document.getElementById('productBrand');
+    const price = document.getElementById('productPrice');
+    if (!overlay) return;
+    title.textContent = item.item_name;
+    brand.textContent = item.brand || '';
+    price.textContent = formatCurrency(item.standard_rate);
+    img.style.backgroundImage = item.image ? `url('${item.image}')` : '';
+    overlay.style.display = 'flex';
+    try {
+        const resp = await fetch(`/api/item_matrix?item=${encodeURIComponent(item.name)}`);
+        const data = await resp.json();
+        if (data.status === 'success') {
+            renderVariantMatrix(item, data.data);
+        }
+    } catch (e) {
+        console.error('Error loading matrix', e);
+    }
+}
+
+function hideProductOverlay() {
+    const overlay = document.getElementById('productOverlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+function renderVariantMatrix(item, matrix) {
+    const head = document.getElementById('matrixHead');
+    const body = document.getElementById('matrixBody');
+    if (!head || !body) return;
+    // Build header: Colour | Width | sizes...
+    head.innerHTML = '';
+    const tr = document.createElement('tr');
+    const thColor = document.createElement('th'); thColor.textContent = 'Colour'; tr.appendChild(thColor);
+    const thWidth = document.createElement('th'); thWidth.textContent = 'Width'; tr.appendChild(thWidth);
+    (matrix.sizes || []).forEach(sz => {
+        const th = document.createElement('th'); th.textContent = sz; tr.appendChild(th);
+    });
+    head.appendChild(tr);
+
+    // Build body: rows for each colour/width
+    body.innerHTML = '';
+    (matrix.colors || []).forEach(color => {
+        (matrix.widths || []).forEach(width => {
+            const row = document.createElement('tr');
+            const tdColor = document.createElement('th'); tdColor.textContent = color; row.appendChild(tdColor);
+            const tdWidth = document.createElement('th'); tdWidth.textContent = width; row.appendChild(tdWidth);
+            (matrix.sizes || []).forEach(sz => {
+                const key = `${color}|${width}|${sz}`;
+                const qty = (matrix.stock && matrix.stock[key]) || 0;
+                const td = document.createElement('td');
+                td.className = 'variant-cell' + (qty <= 0 ? ' disabled' : '');
+                td.textContent = qty;
+                if (qty > 0) {
+                    td.addEventListener('click', () => addVariantToCart(item, { color, width, size: sz, qtyAvailable: qty }));
+                }
+                row.appendChild(td);
+            });
+            body.appendChild(row);
+        });
+    });
+}
+
+function addVariantToCart(item, variant) {
+    const displayName = `${item.item_name} • ${variant.color} • ${variant.width} • ${variant.size}`;
+    const variantCode = `${item.name}-${variant.color}-${variant.width}-${variant.size}`;
+    const existing = cart.find(ci => ci.item_code === variantCode);
+    const rate = item.standard_rate;
+    if (existing) {
+        existing.qty += 1;
+        existing.amount = existing.qty * existing.rate;
+    } else {
+        cart.push({ item_code: variantCode, item_name: displayName, qty: 1, rate, amount: rate, image: item.image || null, variant });
+    }
+    updateCartDisplay();
+}
+
