@@ -374,6 +374,15 @@ function bindEvents(){
   // voucher overlay
   const vo=document.getElementById('voucherOverlay'), vclose=document.getElementById('voucherCloseBtn'), vsubmit=document.getElementById('voucherSubmitBtn'), vinput=document.getElementById('voucherCodeInput');
   if(vo){ if(vclose) vclose.addEventListener('click',hideVoucherOverlay); if(vsubmit) vsubmit.addEventListener('click',submitVoucher); if(vinput) vinput.addEventListener('keydown',e=>{ if(e.key==='Enter') submitVoucher(); }); document.addEventListener('keydown',e=>{ if(e.key==='Escape') hideVoucherOverlay(); }); vo.addEventListener('click',e=>{ if(e.target===vo) hideVoucherOverlay(); }); }
+  // Ensure tender buttons are always wired up (robust / idempotent)
+  document.querySelectorAll('.tender-btn').forEach(btn => {
+    if (btn.__posTenderBound) return; // avoid duplicate handlers
+    btn.addEventListener('click', () => {
+      const t = (btn.dataset && btn.dataset.tender) ? btn.dataset.tender : btn.getAttribute('data-tender');
+      try { selectTender(String(t || '')); } catch (e) { err('selectTender failed', e); }
+    });
+    btn.__posTenderBound = true;
+  });
 }
 
 function showMenu(){ const o=document.getElementById('menuOverlay'); const mv=document.getElementById('menuView'); const sv=document.getElementById('settingsView'); if(!o){ err('loginOverlay element missing'); return; }
@@ -497,6 +506,36 @@ function updateCashSection() {
   if (changeEl) changeEl.textContent = money(Math.max(0, cashVal - amountToCollect));
   if (cashBtn) cashBtn.textContent = `${money(cashVal)} Cash`;
   if (clear) clear.onclick = () => { cashInput = ''; updateCashSection(); };
+}
+
+// Select tender type (Cash / Card / Voucher / Other)
+function selectTender(t){
+  try{
+    t = (t || '').toString();
+    currentTender = t;
+    // toggle active class on buttons
+    document.querySelectorAll('.tender-btn').forEach(b=>{
+      const tb = (b.dataset && b.dataset.tender) ? b.dataset.tender : b.getAttribute('data-tender');
+      b.classList.toggle('active', tb === t);
+    });
+
+    // Show/hide cash section
+    const cashSection = document.getElementById('cashSection');
+    if (cashSection) {
+      cashSection.style.display = (t === 'cash') ? 'block' : 'none';
+      if (t !== 'cash') {
+        cashSection.classList.remove('show-keypad');
+      }
+    }
+
+    // If voucher selected, open voucher overlay
+    if (t === 'voucher') {
+      openVoucherOverlay();
+    }
+
+    updateCashSection();
+    log('selectTender', t);
+  }catch(e){ err('selectTender error', e); }
 }
 
 async function completeSaleFromOverlay() {
