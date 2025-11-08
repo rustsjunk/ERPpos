@@ -17,6 +17,39 @@ CREATE TABLE IF NOT EXISTS items (
   modified_utc   TEXT
 );
 
+-- Normalized item attributes (attribute definitions, options, and per-item values)
+CREATE TABLE IF NOT EXISTS attributes (
+  attr_name   TEXT PRIMARY KEY,
+  label       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS attribute_options (
+  attr_name   TEXT NOT NULL REFERENCES attributes(attr_name) ON DELETE CASCADE,
+  option      TEXT NOT NULL,
+  sort_order  INTEGER DEFAULT 0,
+  PRIMARY KEY (attr_name, option)
+);
+
+-- Which attributes apply to a given template (and whether required)
+CREATE TABLE IF NOT EXISTS template_attributes (
+  template_id TEXT NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+  attr_name   TEXT NOT NULL REFERENCES attributes(attr_name) ON DELETE CASCADE,
+  required    INTEGER NOT NULL DEFAULT 1,
+  sort_order  INTEGER DEFAULT 0,
+  PRIMARY KEY (template_id, attr_name)
+);
+
+-- Attribute values for a variant item
+CREATE TABLE IF NOT EXISTS variant_attributes (
+  item_id     TEXT NOT NULL REFERENCES items(item_id) ON DELETE CASCADE,
+  attr_name   TEXT NOT NULL REFERENCES attributes(attr_name) ON DELETE CASCADE,
+  value       TEXT NOT NULL,
+  PRIMARY KEY (item_id, attr_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_variant_attr_item ON variant_attributes(item_id);
+CREATE INDEX IF NOT EXISTS idx_variant_attr_name ON variant_attributes(attr_name, value);
+
 -- Many barcodes per item (EAN/UPC, internal, Shopify, supplier, etc.)
 CREATE TABLE IF NOT EXISTS barcodes (
   barcode   TEXT PRIMARY KEY,
@@ -132,6 +165,14 @@ CREATE TABLE IF NOT EXISTS outbox (
   last_error    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox(kind, attempts, created_utc);
+
+-- Cashiers/users
+CREATE TABLE IF NOT EXISTS cashiers (
+  code    TEXT PRIMARY KEY,  -- login code (can include leading zeros)
+  name    TEXT NOT NULL,
+  active  INTEGER NOT NULL DEFAULT 1,
+  meta    TEXT
+);
 
 -- Optional: home screen cache for tiles
 CREATE TABLE IF NOT EXISTS home_tiles (

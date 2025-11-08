@@ -256,23 +256,114 @@ def backup_ndjson(conn: sqlite3.Connection, day: Optional[str] = None):
 
 # ---------- DEMO & CLI ----------
 def demo_seed(conn: sqlite3.Connection):
-    # Minimal catalog: one template with 2 variants + barcodes + stock
+    """Seed a richer demo catalog matching mock examples + one boot template.
+    Items seeded include:
+      - Stride (Athletic/Trail): SHOE-ATH-001/002
+      - ComfortStep (Casual): SHOE-CAS-001/002
+      - Elegance (Dress): SHOE-DRS-001/002
+      - LittleFeet (Kids): SHOE-KID-001/002
+      - Boot template with 2 variants
+    """
     now = iso_now()
-    upsert_item(conn, {"item_id":"TEMPLATE-BOOT-1","parent_id":None,"name":"Chelsea Boot","brand":"Russells","attributes":None,"price":79.99,"image_url":"https://example/boot.jpg","is_template":1,"active":1,"modified_utc":now})
-    upsert_item(conn, {"item_id":"BOOT-1-BLK-7","parent_id":"TEMPLATE-BOOT-1","name":"Chelsea Boot Black 7","brand":"Russells","attributes":json.dumps({"Size":"7","Color":"Black"}),"price":None,"image_url":None,"is_template":0,"active":1,"modified_utc":now})
-    upsert_item(conn, {"item_id":"BOOT-1-BLK-8","parent_id":"TEMPLATE-BOOT-1","name":"Chelsea Boot Black 8","brand":"Russells","attributes":json.dumps({"Size":"8","Color":"Black"}),"price":None,"image_url":None,"is_template":0,"active":1,"modified_utc":now})
-    upsert_barcode(conn, "505000000007", "BOOT-1-BLK-7")
-    upsert_barcode(conn, "505000000008", "BOOT-1-BLK-8")
-    upsert_stock(conn, "BOOT-1-BLK-7", 3, "Shop")
-    upsert_stock(conn, "BOOT-1-BLK-8", 2, "Shop")
+    def add_template(tpl_id, name, brand=None, price=None, image=None):
+        upsert_item(conn, {"item_id":tpl_id,"parent_id":None,"name":name,"brand":brand,"attributes":None,
+                           "price":price,"image_url":image,"is_template":1,"active":1,"modified_utc":now})
+    def add_variant(item_id, tpl_id, name, brand, price, barcode, stock_qty, attributes=None, image=None):
+        upsert_item(conn, {"item_id":item_id,"parent_id":tpl_id,"name":name,"brand":brand,
+                           "attributes":json.dumps(attributes) if isinstance(attributes, dict) else (attributes if attributes else None),
+                           "price":price,"image_url":image,"is_template":0,"active":1,"modified_utc":now})
+        if barcode:
+            upsert_barcode(conn, barcode, item_id)
+        if stock_qty is not None:
+            upsert_stock(conn, item_id, stock_qty, "Shop")
 
-    # Voucher
+    # Define attributes (Size, Color, Width) and options
+    conn.execute("INSERT OR IGNORE INTO attributes (attr_name, label) VALUES (?,?)", ("Size","Size"))
+    conn.execute("INSERT OR IGNORE INTO attributes (attr_name, label) VALUES (?,?)", ("Color","Color"))
+    conn.execute("INSERT OR IGNORE INTO attributes (attr_name, label) VALUES (?,?)", ("Width","Width"))
+    # Common size options (adult)
+    for s, order in [("6",0),("7",1),("8",2),("9",3),("10",4)]:
+        conn.execute("INSERT OR IGNORE INTO attribute_options (attr_name, option, sort_order) VALUES (?,?,?)", ("Size", s, order))
+    # Kids sizes
+    for s, order in [("1",0),("2",1),("3",2),("4",3),("5",4)]:
+        conn.execute("INSERT OR IGNORE INTO attribute_options (attr_name, option, sort_order) VALUES (?,?,?)", ("Size", s, 50+order))
+    # Colors
+    for c, order in [("Black",0),("Brown",1),("Blue",2)]:
+        conn.execute("INSERT OR IGNORE INTO attribute_options (attr_name, option, sort_order) VALUES (?,?,?)", ("Color", c, order))
+    # Widths
+    for w, order in [("Standard",0),("Wide",1)]:
+        conn.execute("INSERT OR IGNORE INTO attribute_options (attr_name, option, sort_order) VALUES (?,?,?)", ("Width", w, order))
+
+    # Athletic (Stride)
+    add_template("TPL-ATH-STRIDE", "Stride Athletic", brand="Stride")
+    # template required attributes
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,0)", ("TPL-ATH-STRIDE","Size"))
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,1)", ("TPL-ATH-STRIDE","Color"))
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,0,2)", ("TPL-ATH-STRIDE","Width"))
+    add_variant("SHOE-ATH-001", "TPL-ATH-STRIDE", "Runner Pro", "Stride", 59.99, "100001", 10, {"Style":"Runner Pro"})
+    add_variant("SHOE-ATH-002", "TPL-ATH-STRIDE", "Trail Master", "Stride", 69.99, "100002", 8, {"Style":"Trail Master"})
+    # Add attributes to variants
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-ATH-001","Size","8"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-ATH-001","Color","Blue"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-ATH-002","Size","9"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-ATH-002","Color","Black"))
+
+    # Casual (ComfortStep)
+    add_template("TPL-CAS-COMFORT", "ComfortStep Casual", brand="ComfortStep")
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,0)", ("TPL-CAS-COMFORT","Size"))
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,1)", ("TPL-CAS-COMFORT","Color"))
+    add_variant("SHOE-CAS-001", "TPL-CAS-COMFORT", "Everyday Comfort", "ComfortStep", 49.99, "100003", 12, {"Style":"Everyday Comfort"})
+    add_variant("SHOE-CAS-002", "TPL-CAS-COMFORT", "Urban Walk", "ComfortStep", 54.99, "100004", 9, {"Style":"Urban Walk"})
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-CAS-001","Size","7"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-CAS-001","Color","Brown"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-CAS-002","Size","8"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-CAS-002","Color","Black"))
+
+    # Dress (Elegance)
+    add_template("TPL-DRS-ELEG", "Elegance Dress", brand="Elegance")
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,0)", ("TPL-DRS-ELEG","Size"))
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,1)", ("TPL-DRS-ELEG","Color"))
+    add_variant("SHOE-DRS-001", "TPL-DRS-ELEG", "Oxford Classic", "Elegance", 79.99, "100005", 6, {"Style":"Oxford Classic"})
+    add_variant("SHOE-DRS-002", "TPL-DRS-ELEG", "Derby Prime", "Elegance", 84.99, "100006", 5, {"Style":"Derby Prime"})
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-DRS-001","Size","9"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-DRS-001","Color","Black"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-DRS-002","Size","10"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-DRS-002","Color","Brown"))
+
+    # Kids (LittleFeet)
+    add_template("TPL-KID-LFEET", "LittleFeet Kids", brand="LittleFeet")
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,0)", ("TPL-KID-LFEET","Size"))
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,1)", ("TPL-KID-LFEET","Color"))
+    add_variant("SHOE-KID-001", "TPL-KID-LFEET", "Playtime Sneaker", "LittleFeet", 39.99, "100007", 7, {"Style":"Playtime Sneaker"})
+    add_variant("SHOE-KID-002", "TPL-KID-LFEET", "School Buddy", "LittleFeet", 34.99, "100008", 11, {"Style":"School Buddy"})
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-KID-001","Size","3"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-KID-001","Color","Blue"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-KID-002","Size","4"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("SHOE-KID-002","Color","Black"))
+
+    # Existing boot example (template + 2 size variants)
+    add_template("TEMPLATE-BOOT-1", "Chelsea Boot", brand="Russells", price=79.99, image="https://example/boot.jpg")
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,0)", ("TEMPLATE-BOOT-1","Size"))
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,1,1)", ("TEMPLATE-BOOT-1","Color"))
+    conn.execute("INSERT OR IGNORE INTO template_attributes (template_id, attr_name, required, sort_order) VALUES (?,?,0,2)", ("TEMPLATE-BOOT-1","Width"))
+    add_variant("BOOT-1-BLK-7", "TEMPLATE-BOOT-1", "Chelsea Boot Black 7", "Russells", None, "505000000007", 3, {"Size":"7","Color":"Black"})
+    add_variant("BOOT-1-BLK-8", "TEMPLATE-BOOT-1", "Chelsea Boot Black 8", "Russells", None, "505000000008", 2, {"Size":"8","Color":"Black"})
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("BOOT-1-BLK-7","Size","7"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("BOOT-1-BLK-7","Color","Black"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("BOOT-1-BLK-7","Width","Standard"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("BOOT-1-BLK-8","Size","8"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("BOOT-1-BLK-8","Color","Black"))
+    conn.execute("INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value) VALUES (?,?,?)", ("BOOT-1-BLK-8","Width","Wide"))
+
+    # Demo voucher
     conn.execute("INSERT OR REPLACE INTO vouchers (voucher_code, issued_utc, initial_value, active, meta_json) VALUES (?,?,?,?,?)",
                  ("GV-ABC123", now, 100.0, 1, json.dumps({"note":"demo"})))
     conn.execute("INSERT INTO voucher_ledger (voucher_code, entry_utc, type, amount, sale_id, note) VALUES (?,?,?,?,?,?)",
                  ("GV-ABC123", now, "issue", 100.0, None, "Issued"))
+    # Demo cashier(s)
+    conn.execute("INSERT OR REPLACE INTO cashiers (code, name, active, meta) VALUES (?,?,1,?)", ("19", "Josh", json.dumps({"note":"demo user"})))
     conn.commit()
-    print("Demo seed inserted.")
+    print("Demo seed inserted: athletic, casual, dress, kids, and boot variants.")
 
 def demo_sale(conn: sqlite3.Connection):
     sale = {

@@ -2,6 +2,9 @@
 from dotenv import load_dotenv
 import requests
 import os
+import sqlite3
+from pathlib import Path
+import json as _json
 from datetime import datetime
 from uuid import uuid4
 
@@ -13,11 +16,83 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # disable static caching during dev
 
 # Behavior flags
 USE_MOCK = os.getenv('USE_MOCK', '1') == '1'  # default to mock POS with no ERP dependency
+POS_DB_PATH = os.getenv('POS_DB_PATH', 'pos.db')
+SCHEMA_PATH = os.getenv('POS_SCHEMA_PATH', 'schema.sql')
+PAUSED_DIR = os.getenv('POS_PAUSED_DIR', 'paused')
 
 # ERPNext API configuration (used only if USE_MOCK is False)
 ERPNEXT_URL = os.getenv('ERPNEXT_URL')
 API_KEY = os.getenv('ERPNEXT_API_KEY')
 API_SECRET = os.getenv('ERPNEXT_API_SECRET')
+
+# Optional SQLite service helpers
+try:
+    import pos_service as ps
+except Exception:
+    ps = None
+
+def _db_connect():
+    try:
+        if not ps:
+            return None
+        return ps.connect(POS_DB_PATH)
+    except Exception:
+        return None
+
+def _db_has_items(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute("SELECT COUNT(*) AS c FROM items WHERE active=1 AND is_template=0").fetchone()
+        return (row and row['c'] and row['c'] > 0) or False
+    except Exception:
+        return False
+
+def _db_items_payload(conn: sqlite3.Connection):
+    """Return template items as tiles, with aggregated variant attribute values for search/display."""
+    q_tpl = """
+    SELECT i.item_id AS name,
+           i.item_id AS item_code,
+           i.name AS item_name,
+           i.brand AS brand,
+           (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
+           'Each' AS stock_uom,
+           (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image
+    FROM items i
+    WHERE i.active=1 AND i.is_template=1
+    ORDER BY COALESCE(i.brand,''), i.name
+    """
+    # Preload aggregated attribute values per template from its variants
+    agg = {}
+    q_attr = """
+      SELECT t.item_id AS template_id, va.attr_name, va.value
+      FROM items v
+      JOIN items t ON t.item_id = v.parent_id
+      JOIN variant_attributes va ON va.item_id = v.item_id
+      WHERE v.active=1 AND v.is_template=0
+    """
+    for row in conn.execute(q_attr):
+        tpl = row["template_id"]
+        d = agg.setdefault(tpl, {})
+        vals = d.setdefault(row["attr_name"], set())
+        vals.add(row["value"])
+
+    out = []
+    for r in conn.execute(q_tpl):
+        attrs = {}
+        if r["name"] in agg:
+            for aname, values in agg[r["name"]].items():
+                attrs[aname] = " ".join(sorted(values))
+        out.append({
+            "name": r["name"],
+            "item_code": r["item_code"],
+            "item_name": r["item_name"],
+            "brand": r["brand"],
+            "barcode": None,
+            "standard_rate": float(r["standard_rate"]) if r["standard_rate"] is not None else None,
+            "stock_uom": r["stock_uom"],
+            "image": r["image"],
+            "attributes": attrs,
+        })
+    return out
 
 
 def _erp_headers():
@@ -58,47 +133,77 @@ def index():
 @app.route('/api/items')
 def get_items():
     """Get all items"""
-    if USE_MOCK:
-        # Mock catalog: shoes with brands
-        items = [
-            {"name": "SHOE-ATH-001", "item_code": "SHOE-ATH-001", "barcode": "100001", "item_name": "Runner Pro", "brand": "Stride", "standard_rate": 59.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-ATH-002", "item_code": "SHOE-ATH-002", "barcode": "100002", "item_name": "Trail Master", "brand": "Stride", "standard_rate": 69.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-CAS-001", "item_code": "SHOE-CAS-001", "barcode": "100003", "item_name": "Everyday Comfort", "brand": "ComfortStep", "standard_rate": 49.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-CAS-002", "item_code": "SHOE-CAS-002", "barcode": "100004", "item_name": "Urban Walk", "brand": "ComfortStep", "standard_rate": 54.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-DRS-001", "item_code": "SHOE-DRS-001", "barcode": "100005", "item_name": "Oxford Classic", "brand": "Elegance", "standard_rate": 79.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-DRS-002", "item_code": "SHOE-DRS-002", "barcode": "100006", "item_name": "Derby Prime", "brand": "Elegance", "standard_rate": 84.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-KID-001", "item_code": "SHOE-KID-001", "barcode": "100007", "item_name": "Playtime Sneaker", "brand": "LittleFeet", "standard_rate": 39.99, "stock_uom": "Pair", "image": None},
-            {"name": "SHOE-KID-002", "item_code": "SHOE-KID-002", "barcode": "100008", "item_name": "School Buddy", "brand": "LittleFeet", "standard_rate": 34.99, "stock_uom": "Pair", "image": None}
-        ]
-        return jsonify({'status': 'success', 'items': items})
+    # Prefer local SQLite items if available
     try:
-        response = requests.get(
-            f"{ERPNEXT_URL}/api/resource/Item",
-            headers=_erp_headers(),
-            params={
-                'fields': '["name", "item_code", "item_name", "brand", "image", "standard_rate", "stock_uom", "barcode"]',
-                'filters': '[["is_sales_item","=",1],["disabled","=",0]]'
-            },
-            timeout=15
-        )
-        response.raise_for_status()
-        items = response.json().get('data', [])
-        for item in items:
-            item_code = item.get('item_code') or item.get('name')
-            item['item_code'] = item_code
-            barcode = item.get('barcode')
-            if not barcode and isinstance(item.get('barcodes'), list):
-                for entry in item['barcodes']:
-                    candidate = entry.get('barcode') if isinstance(entry, dict) else entry
-                    if candidate:
-                        barcode = candidate
-                        break
-            item['barcode'] = barcode or None
-        return jsonify({'status': 'success', 'items': items})
-    except requests.HTTPError as e:
-        return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        conn = _db_connect()
+        if conn and _db_has_items(conn):
+            items = _db_items_payload(conn)
+            return jsonify({'status': 'success', 'items': items})
+    except Exception:
+        pass
+    # No hard-coded mock items. If ERPNext configured and not in mock mode, fetch from ERP.
+    if not USE_MOCK and ERPNEXT_URL:
+        try:
+            response = requests.get(
+                f"{ERPNEXT_URL}/api/resource/Item",
+                headers=_erp_headers(),
+                params={
+                    'fields': '["name", "item_code", "item_name", "brand", "image", "standard_rate", "stock_uom", "barcode"]',
+                    'filters': '[["is_sales_item","=",1],["disabled","=",0]]'
+                },
+                timeout=15
+            )
+            response.raise_for_status()
+            items = response.json().get('data', [])
+            for item in items:
+                item_code = item.get('item_code') or item.get('name')
+                item['item_code'] = item_code
+                barcode = item.get('barcode')
+                if not barcode and isinstance(item.get('barcodes'), list):
+                    for entry in item['barcodes']:
+                        candidate = entry.get('barcode') if isinstance(entry, dict) else entry
+                        if candidate:
+                            barcode = candidate
+                            break
+                item['barcode'] = barcode or None
+            return jsonify({'status': 'success', 'items': items})
+        except requests.HTTPError as e:
+            return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+    # Otherwise return empty list (prompt user to seed DB from Admin)
+    return jsonify({'status': 'success', 'items': []})
+
+
+@app.route('/api/cashier/login', methods=['POST'])
+def api_cashier_login():
+    """Login a cashier by code. Leading zeros are ignored."""
+    try:
+        code = (request.json or {}).get('code', '')
+    except Exception:
+        code = ''
+    if code is None:
+        code = ''
+    code = str(code).strip()
+    if not code:
+        return jsonify({'status': 'error', 'message': 'Missing code'}), 400
+    conn = _db_connect()
+    if not conn:
+        # fallback: allow Josh 19 even if DB not ready
+        if code.lstrip('0') == '19':
+            return jsonify({'status': 'success', 'cashier': {'code': '19', 'name': 'Josh'}})
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    row = conn.execute(
+        "SELECT code, name FROM cashiers WHERE active=1 AND (code = ? OR code = ltrim(?, '0'))",
+        (code, code)
+    ).fetchone()
+    if not row and code.lstrip('0'):
+        # Optional: try stripped form
+        stripped = code.lstrip('0')
+        row = conn.execute("SELECT code, name FROM cashiers WHERE active=1 AND code = ?", (stripped,)).fetchone()
+    if not row:
+        return jsonify({'status': 'error', 'message': 'Invalid code'}), 401
+    return jsonify({'status': 'success', 'cashier': {'code': row['code'], 'name': row['name']}})
 
 
 @app.route('/api/create-sale', methods=['POST'])
@@ -222,33 +327,390 @@ def get_customers():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/api/db/init', methods=['POST'])
+def api_db_init():
+    if not ps:
+        return jsonify({'status':'error','message':'pos_service not available'}), 500
+    try:
+        conn = _db_connect()
+        if not conn:
+            conn = ps.connect(POS_DB_PATH)
+        ps.init_db(conn, SCHEMA_PATH)
+        Path(POS_DB_PATH).touch(exist_ok=True)
+        return jsonify({'status':'success','message':'Database initialized','path': POS_DB_PATH})
+    except Exception as e:
+        return jsonify({'status':'error','message': str(e)}), 500
+
+
+@app.route('/api/db/seed-demo', methods=['POST'])
+def api_db_seed_demo():
+    if not ps:
+        return jsonify({'status':'error','message':'pos_service not available'}), 500
+    try:
+        conn = _db_connect() or ps.connect(POS_DB_PATH)
+        # ensure schema
+        try:
+            conn.execute('SELECT 1 FROM items LIMIT 1')
+        except Exception:
+            ps.init_db(conn, SCHEMA_PATH)
+        ps.demo_seed(conn)
+        return jsonify({'status':'success','message':'Demo data seeded'})
+    except Exception as e:
+        return jsonify({'status':'error','message': str(e)}), 500
+
+
+@app.route('/api/db/ensure-demo', methods=['POST'])
+def api_db_ensure_demo():
+    if not ps:
+        return jsonify({'status':'error','message':'pos_service not available'}), 500
+    try:
+        conn = _db_connect() or ps.connect(POS_DB_PATH)
+        # If no tables, init
+        try:
+            conn.execute('SELECT 1 FROM items LIMIT 1')
+        except Exception:
+            ps.init_db(conn, SCHEMA_PATH)
+        if not _db_has_items(conn):
+            ps.demo_seed(conn)
+            return jsonify({'status':'success','message':'Initialized and seeded demo data'})
+        return jsonify({'status':'success','message':'DB already has items'})
+    except Exception as e:
+        return jsonify({'status':'error','message': str(e)}), 500
+
+
+@app.route('/api/db/status')
+def api_db_status():
+    if not ps:
+        return jsonify({'status':'error','message':'pos_service not available'}), 500
+    try:
+        conn = _db_connect()
+        if not conn:
+            return jsonify({'status':'success','message':'No DB connection','present': False})
+        counts = {}
+        for name, sql in {
+            'items_total': 'SELECT COUNT(*) AS c FROM items',
+            'items_variants': 'SELECT COUNT(*) AS c FROM items WHERE is_template=0 AND active=1',
+            'items_templates': 'SELECT COUNT(*) AS c FROM items WHERE is_template=1 AND active=1',
+            'barcodes': 'SELECT COUNT(*) AS c FROM barcodes',
+            'stock_rows': 'SELECT COUNT(*) AS c FROM stock',
+            'vouchers': 'SELECT COUNT(*) AS c FROM vouchers',
+            'sales': 'SELECT COUNT(*) AS c FROM sales',
+        }.items():
+            row = conn.execute(sql).fetchone()
+            counts[name] = int(row['c']) if row and 'c' in row.keys() else 0
+        return jsonify({'status':'success','present': True, 'counts': counts, 'db_path': POS_DB_PATH})
+    except Exception as e:
+        return jsonify({'status':'error','message': str(e)}), 500
+
+
+@app.route('/api/db/sync-items', methods=['POST'])
+def api_db_sync_items():
+    # Placeholder: wiring for future ERPNext incremental pulls
+    if not ERPNEXT_URL:
+        return jsonify({'status':'error','message':'ERPNext not configured'}), 400
+    return jsonify({'status':'error','message':'Sync not implemented yet in this build'}), 501
+
 @app.route('/api/item_matrix')
 def item_matrix():
-    """Return a variant matrix for a given item (mock-first)."""
-    item_name = request.args.get('item')
-    if not item_name:
+    """Return a variant matrix for a template item from SQLite (sizes as columns; colors/widths as rows)."""
+    template_id = request.args.get('item')
+    if not template_id:
         return jsonify({'status': 'error', 'message': 'Missing item parameter'}), 400
-    if USE_MOCK:
-        sizes = [3, 4, 5, 6, 7]
-        colors = ['Brown', 'Black']
-        widths = ['Standard', 'Wide Fitting']
-        stock = {}
-        for c in colors:
-            for w in widths:
-                for s in sizes:
-                    stock[f"{c}|{w}|{s}"] = (s % 3) + (1 if w.startswith('Wide') else 0)
-        price = 49.99
-        image = None
-        return jsonify({'status': 'success', 'data': {
-            'item': item_name,
-            'sizes': sizes,
-            'colors': colors,
-            'widths': widths,
-            'stock': stock,
-            'price': price,
-            'image': image
-        }})
-    return jsonify({'status': 'error', 'message': 'Variant matrix not implemented for ERP mode'}), 501
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    tpl = conn.execute("SELECT item_id, name, brand FROM items WHERE item_id=? AND is_template=1", (template_id,)).fetchone()
+    if not tpl:
+        return jsonify({'status': 'error', 'message': 'Template not found'}), 404
+    qv = """
+      SELECT v.item_id,
+             v.name,
+             (SELECT price_effective FROM v_item_prices p WHERE p.item_id=v.item_id) AS rate,
+             COALESCE((SELECT qty FROM stock s WHERE s.item_id=v.item_id AND s.warehouse='Shop'), 0) AS qty
+      FROM items v
+      WHERE v.parent_id=? AND v.active=1 AND v.is_template=0
+    """
+    variants = {}
+    colors=set(); widths=set(); sizes=set()
+    rows = conn.execute(qv, (template_id,)).fetchall()
+    attr_map = {}
+    if rows:
+        ids = tuple(r["item_id"] for r in rows)
+        if ids:
+            placeholders = ",".join(["?"]*len(ids))
+            for ar in conn.execute(f"SELECT item_id, attr_name, value FROM variant_attributes WHERE item_id IN ({placeholders})", ids):
+                d = attr_map.setdefault(ar["item_id"], {})
+                d[ar["attr_name"]] = ar["value"]
+    for r in rows:
+        attrs = attr_map.get(r["item_id"], {})
+        color = attrs.get('Color', '-')
+        width = attrs.get('Width', 'Standard')
+        size = attrs.get('Size', '-')
+        colors.add(color); widths.add(width); sizes.add(size)
+        key = f"{color}|{width}|{size}"
+        variants[key] = { 'item_id': r['item_id'], 'item_name': r['name'], 'rate': float(r['rate']) if r['rate'] is not None else None, 'qty': float(r['qty']) }
+    data = {
+        'item': template_id,
+        'sizes': sorted(sizes, key=lambda x: (len(x), x)),
+        'colors': sorted(colors),
+        'widths': sorted(widths),
+        'stock': { k:v['qty'] for k,v in variants.items() },
+        'variants': variants,
+        'price': None,
+        'image': None,
+    }
+    return jsonify({'status': 'success', 'data': data})
+
+
+@app.route('/api/lookup-barcode')
+def api_lookup_barcode():
+    """Lookup a variant by barcode and return minimal details for POS add-to-cart.
+    Response: { status, variant: { item_id, name, rate, qty, attributes: {..} } }
+    """
+    code = request.args.get('code') or ''
+    code = str(code).strip()
+    if not code:
+        return jsonify({'status': 'error', 'message': 'Missing code'}), 400
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    row = conn.execute(
+        """
+        SELECT i.item_id,
+               i.name,
+               (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
+               COALESCE((SELECT qty FROM stock s WHERE s.item_id=i.item_id AND s.warehouse='Shop'), 0) AS qty
+        FROM barcodes b
+        JOIN items i ON i.item_id = b.item_id
+        WHERE b.barcode = ? AND i.active=1
+        """,
+        (code,)
+    ).fetchone()
+    if not row:
+        return jsonify({'status': 'error', 'message': 'Not found'}), 404
+    attrs = {}
+    for ar in conn.execute("SELECT attr_name, value FROM variant_attributes WHERE item_id=?", (row['item_id'],)):
+        attrs[ar['attr_name']] = ar['value']
+    out = {
+        'item_id': row['item_id'],
+        'name': row['name'],
+        'rate': float(row['rate']) if row['rate'] is not None else 0.0,
+        'qty': float(row['qty']) if row['qty'] is not None else 0.0,
+        'attributes': attrs,
+    }
+    return jsonify({'status': 'success', 'variant': out})
+
+
+@app.route('/api/variant-info')
+def api_variant_info():
+    """Return basic variant info for a list of item_ids: name and attributes.
+    Query param: ids=ID1,ID2,...
+    Response: { status, variants: { <id>: { item_id, name, brand, attributes } } }
+    """
+    ids_raw = request.args.get('ids') or ''
+    ids = [s for s in (ids_raw.split(',') if ids_raw else []) if s]
+    if not ids:
+        return jsonify({'status': 'error', 'message': 'Missing ids'}), 400
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    placeholders = ",".join(["?"]*len(ids))
+    out = {}
+    # Fetch base item names and brand
+    for r in conn.execute(f"SELECT item_id, name, brand FROM items WHERE item_id IN ({placeholders})", tuple(ids)):
+        out[r['item_id']] = {
+            'item_id': r['item_id'],
+            'name': r['name'],
+            'brand': r['brand'],
+            'attributes': {}
+        }
+    # Attach attributes
+    for ar in conn.execute(f"SELECT item_id, attr_name, value FROM variant_attributes WHERE item_id IN ({placeholders})", tuple(ids)):
+        if ar['item_id'] not in out:
+            out[ar['item_id']] = {'item_id': ar['item_id'], 'name': '', 'brand': None, 'attributes': {}}
+        out[ar['item_id']]['attributes'][ar['attr_name']] = ar['value']
+    return jsonify({'status': 'success', 'variants': out})
+
+
+# --- Receipt/Sale lookup (for returns) ---
+@app.route('/api/sale/<sale_id>')
+def api_get_sale(sale_id: str):
+    """Lookup a recorded sale/receipt by its id. Tries local invoices/ then SQLite sales table."""
+    sid = (sale_id or '').strip()
+    if not sid:
+        return jsonify({'status': 'error', 'message': 'Missing sale id'}), 400
+    # 1) invoices/<id>.json
+    try:
+        inv_path = os.path.join('invoices', f'{sid}.json')
+        if os.path.exists(inv_path):
+            with open(inv_path, 'r', encoding='utf-8') as f:
+                rec = _json.load(f)
+            items = []
+            for it in rec.get('items') or []:
+                items.append({
+                    'item_code': it.get('item_code') or it.get('code') or it.get('name'),
+                    'item_name': it.get('item_name') or it.get('name') or (it.get('item_code') or ''),
+                    'qty': it.get('qty') or 1,
+                    'rate': it.get('rate') or it.get('price') or 0
+                })
+            out = {
+                'id': rec.get('invoice_name') or sid,
+                'customer': rec.get('customer') or '',
+                'items': items,
+                'total': rec.get('total')
+            }
+            return jsonify({'status': 'success', 'sale': out})
+    except Exception:
+        pass
+    # 2) SQLite sales table via pos_service, if available
+    try:
+        conn = _db_connect()
+        if conn:
+            row = conn.execute("SELECT payload_json FROM sales WHERE sale_id=? OR erp_docname=?", (sid, sid)).fetchone()
+            if row and row[0]:
+                try:
+                    payload = _json.loads(row[0])
+                except Exception:
+                    payload = {}
+                lines = []
+                for ln in payload.get('lines') or payload.get('items') or []:
+                    lines.append({
+                        'item_code': ln.get('item_id') or ln.get('item_code') or ln.get('name'),
+                        'item_name': ln.get('item_name') or ln.get('name') or (ln.get('item_id') or ''),
+                        'qty': ln.get('qty') or 1,
+                        'rate': ln.get('rate') or ln.get('price') or 0
+                    })
+                out = {
+                    'id': sid,
+                    'customer': payload.get('customer_id') or payload.get('customer') or '',
+                    'items': lines,
+                    'total': payload.get('total')
+                }
+                return jsonify({'status': 'success', 'sale': out})
+    except Exception:
+        pass
+    return jsonify({'status': 'error', 'message': 'Sale not found'}), 404
+
+# ---- Paused/Hold transactions API ----
+
+def _paused_path_for_id(pid: str) -> str:
+    # Only allow simple IDs like PAUSE-YYYYMMDD-XXXXXXXX
+    safe = ''.join([c for c in pid if c.isalnum() or c in ('-', '_')])
+    if not safe or not safe.startswith('PAUSE-'):
+        raise ValueError('Invalid paused id')
+    return os.path.join(PAUSED_DIR, f"{safe}.json")
+
+
+@app.route('/api/hold-sale', methods=['POST'])
+def api_hold_sale():
+    """Persist the current cart as a paused/held transaction on disk.
+    Expected payload: { customer, cart: [ {item_code, item_name, qty, rate, refund?} ], vouchers: [], cashier: {code,name}, till_number }
+    """
+    try:
+        payload = request.json or {}
+    except Exception:
+        payload = {}
+    cart_rows = payload.get('cart') or []
+    if not isinstance(cart_rows, list) or len(cart_rows) == 0:
+        return jsonify({'status': 'error', 'message': 'Cart is empty'}), 400
+    cashier = payload.get('cashier') or {}
+    if not cashier or not cashier.get('code'):
+        return jsonify({'status': 'error', 'message': 'Missing cashier'}), 400
+    try:
+        os.makedirs(PAUSED_DIR, exist_ok=True)
+    except Exception:
+        pass
+    pid = f"PAUSE-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}"
+    created_at = datetime.now().isoformat()
+    total = 0.0
+    items_count = 0
+    for r in cart_rows:
+        qty = float(r.get('qty') or 0)
+        rate = float(r.get('rate') or 0)
+        is_refund = bool(r.get('refund'))
+        sign = -1.0 if is_refund else 1.0
+        total += sign * qty * rate
+        items_count += 1
+    record = {
+        'id': pid,
+        'created_at': created_at,
+        'customer': payload.get('customer') or '',
+        'cart': cart_rows,
+        'vouchers': payload.get('vouchers') or [],
+        'cashier': {'code': cashier.get('code'), 'name': cashier.get('name')},
+        'till_number': payload.get('till_number') or None,
+        'items_count': items_count,
+        'total': total,
+    }
+    try:
+        with open(os.path.join(PAUSED_DIR, f"{pid}.json"), 'w', encoding='utf-8') as f:
+            _json.dump(record, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Failed to write paused sale: {e}'}), 500
+    return jsonify({'status': 'success', 'id': pid, 'created_at': created_at})
+
+
+@app.route('/api/paused-sales')
+def api_list_paused_sales():
+    os.makedirs(PAUSED_DIR, exist_ok=True)
+    out = []
+    try:
+        for name in sorted(os.listdir(PAUSED_DIR)):
+            if not name.endswith('.json'):
+                continue
+            try:
+                with open(os.path.join(PAUSED_DIR, name), 'r', encoding='utf-8') as f:
+                    rec = _json.load(f)
+                out.append({
+                    'id': rec.get('id') or name[:-5],
+                    'created_at': rec.get('created_at'),
+                    'cashier': rec.get('cashier'),
+                    'customer': rec.get('customer'),
+                    'items_count': rec.get('items_count'),
+                    'total': rec.get('total'),
+                })
+            except Exception:
+                # Skip unreadable entries
+                continue
+    except FileNotFoundError:
+        pass
+    return jsonify({'status': 'success', 'paused': out})
+
+
+@app.route('/api/paused-sales/<pid>')
+def api_get_paused_sale(pid: str):
+    try:
+        path = _paused_path_for_id(pid)
+        if not os.path.exists(path):
+            return jsonify({'status': 'error', 'message': 'Not found'}), 404
+        with open(path, 'r', encoding='utf-8') as f:
+            rec = _json.load(f)
+        consume = (request.args.get('consume') or '').lower() in ('1', 'true', 'yes')
+        if consume:
+            try:
+                os.remove(path)
+            except Exception:
+                # If removal fails, still return the record
+                pass
+        return jsonify({'status': 'success', 'paused': rec})
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid id'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/paused-sales/<pid>', methods=['DELETE'])
+def api_delete_paused_sale(pid: str):
+    try:
+        path = _paused_path_for_id(pid)
+        if not os.path.exists(path):
+            return jsonify({'status': 'error', 'message': 'Not found'}), 404
+        os.remove(path)
+        return jsonify({'status': 'success'})
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid id'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 if __name__ == '__main__':
