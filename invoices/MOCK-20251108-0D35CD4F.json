@@ -1,0 +1,24 @@
+{
+  "invoice_name": "MOCK-20251108-0D35CD4F",
+  "created_at": "2025-11-08T22:23:03.716207",
+  "mode": "mock",
+  "customer": "CUST-WALKIN",
+  "items": [
+    {
+      "item_code": "SHOE-DRS-001",
+      "qty": 1,
+      "rate": 79.99
+    }
+  ],
+  "payments": [
+    {
+      "mode_of_payment": "Card",
+      "amount": 79.99
+    }
+  ],
+  "tender": "card",
+  "cash_given": null,
+  "change": 0,
+  "total": 79.99,
+  "vouchers": []
+}

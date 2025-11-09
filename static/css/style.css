@@ -558,3 +558,38 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
     padding: 8px 0;
     z-index: 1060;
 }
+/* Prominent, centered Return-by-Receipt button */
+#returnFromReceiptBtn.return-cta {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    top: 8px;
+    height: 40px;
+    line-height: 38px;
+    padding: 0 16px;
+    border-radius: 999px;
+    border: 1px solid #ffda6a;
+    background: #fff7e6;
+    color: #8a6d3b;
+    font-weight: 600;
+    font-size: 0.95rem;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    white-space: nowrap;
+}
+#returnFromReceiptBtn.return-cta:hover {
+    background: #fff1cc;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.10);
+}
+#returnFromReceiptBtn.return-cta:active {
+    transform: translateX(-50%) translateY(1px);
+}
+
+@media (max-width: 576px) {
+  #returnFromReceiptBtn.return-cta {
+    top: 10px;
+    height: 36px;
+    line-height: 34px;
+    font-size: 0.9rem;
+    padding: 0 12px;
+  }
+}

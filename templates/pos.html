@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -30,7 +30,7 @@
                         <button id="logoutBtn" class="logout-btn">Log Out</button>
                     </div>
                 </div>
-                <button id="returnFromReceiptBtn" aria-label="Return from receipt" class="icon-btn" title="Return from receipt">↩</button>
+                <button id="returnFromReceiptBtn" aria-label="Return from receipt" class="return-cta" title="Return from receipt">? Return by Receipt</button>
                 <button id="notifIcon" aria-label="Notifications" class="notif-icon" title="Notifications">&#128276;</button>
                 <button id="settingsBtn" aria-label="Settings" class="icon-btn" title="Settings">&#9881;</button>
             </div>
@@ -128,6 +128,13 @@
                             <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
                             <button class="btn tender-btn" data-tender="other">Other</button>
                         </div>
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div class="fw-semibold">Applied Payments</div>
+                                <div id="paymentsTotal" class="fw-semibold text-end"></div>
+                            </div>
+                            <div id="appliedPaymentsList" class="applied-payments-list"></div>
+                        </div>
                     </div>
                 </div>
                 <div class="col-12 col-lg-5">
@@ -171,6 +178,10 @@
                                 <div id="amountCash" class="fw-semibold"></div>
                             </div>
                             <div class="d-flex justify-content-between">
+                                <div>Entered</div>
+                                <div id="amountCashEntered" class="text-muted"></div>
+                            </div>
+                            <div class="d-flex justify-content-between">
                                 <div>Change</div>
                                 <div id="amountChange" class="fw-bold"></div>
                             </div>
@@ -179,11 +190,38 @@
                                 <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm" placeholder="Enter cash amount" style="max-width: 160px;" />
                                 <button id="toggleKeypadBtn" class="btn btn-outline-secondary btn-sm">Show Keypad</button>
                                 <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
+                                <button id="applyCashBtn" class="btn btn-primary btn-sm">Apply Cash</button>
+                            </div>
+                        </div>
+                        <div id="otherSection" class="mb-3" style="display:none;">
+                            <div class="d-flex justify-content-between">
+                                <div>Due</div>
+                                <div id="amountDueOther" class="fw-semibold"></div>
+                            </div>
+                            <div class="input-group mt-2" style="max-width: 260px; margin-left:auto;">
+                                <span id="otherLabel" class="input-group-text">Amount</span>
+                                <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
+                                <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
+                            </div>
+                            <!-- Keypad for Card/Other tender input -->
+                            <div id="otherKeypad" class="keypad-grid compact mt-2" style="display:block;">
+                                <button class="key-btn" data-k="7">7</button>
+                                <button class="key-btn" data-k="8">8</button>
+                                <button class="key-btn" data-k="9">9</button>
+                                <button class="key-btn" data-k="4">4</button>
+                                <button class="key-btn" data-k="5">5</button>
+                                <button class="key-btn" data-k="6">6</button>
+                                <button class="key-btn" data-k="1">1</button>
+                                <button class="key-btn" data-k="2">2</button>
+                                <button class="key-btn" data-k="3">3</button>
+                                <button class="key-btn key-action" data-k="C">C</button>
+                                <button class="key-btn" data-k="0">0</button>
+                                <button class="key-btn key-action" data-k="B">B</button>
                             </div>
                         </div>
                         <div class="d-grid gap-2 tender-actions">
                             <div class="d-flex justify-content-between align-items-center mb-2">
-                                <div class="fw-semibold text-muted">Amount Due</div>
+                                <div class="fw-semibold text-muted">Remaining Due</div>
                                 <div id="tenderDue" class="fw-bold"></div>
                             </div>
                             <button id="openDiscountBtn" class="btn btn-outline-secondary">Discount</button>
@@ -202,7 +240,7 @@
                 <div class="h5 m-0">Sale Complete</div>
                 <button id="receiptCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
             </div>
-            <div class="mb-2">Invoice: <span id="receiptInvoice"></span></div>
+            <div class="mb-2">Receipt: <span id="receiptInvoice"></span></div>
             <div class="display-6 mb-3">Change: <span id="receiptChange">0.00</span></div>
             <p class="text-muted">Would you like to print the receipt?</p>
             <div class="form-check mt-2">
@@ -211,6 +249,7 @@
             </div>
             <div class="d-flex justify-content-end gap-2 mt-3">
                 <button id="printReceiptBtn" class="btn btn-primary">Print Receipt</button>
+                <button id="receiptReturnBtn" class="btn btn-outline-warning">Return This Receipt</button>
                 <button id="receiptDoneBtn" class="btn btn-success">Done</button>
             </div>
         </div>
@@ -226,15 +265,47 @@
             <div id="menuView">
                 <div class="d-grid gap-2">
                     <button id="openSettingsBtn" class="btn btn-light">Settings</button>
+                    <button id="openCashMenuBtn" class="btn btn-light">Opening / Closing</button>
                     <button id="reprintLastBtn" class="btn btn-light">Reprint Last Receipt</button>
-                    <button id="viewInvoicesBtn" class="btn btn-light" disabled>View Invoices (coming soon)</button>
+                    <button id="viewInvoicesBtn" class="btn btn-light">View Receipts</button>
                     <button id="openAdminBtn" class="btn btn-light">Admin</button>
                 </div>
             </div>
-            <div id="settingsView" style="display:none;">
+            <!-- Cash menu overlay -->
+            <div id="cashMenuOverlay" class="search-overlay" style="display:none;">
+                <div class="search-modal" style="max-width: 420px;">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div class="h5 m-0">Till Menu</div>
+                        <button id="cashMenuCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button id="cashMenuXReadBtn" class="btn btn-outline-primary">X-Read (view/print)</button>
+                        <button id="cashMenuZReadBtn" class="btn btn-primary">Z-Read (end session)</button>
+                        <button id="cashMenuOpenBtn" class="btn btn-outline-secondary">Opening Float</button>
+                        <button id="cashMenuFloatBtn" class="btn btn-outline-secondary">Closing / Reconcile</button>
+                    </div>
+                </div>
+            </div>
+                <div id="settingsView" style="display:none;">
                 <div class="mb-3">
                     <label for="tillNumberInput" class="form-label">Till Number</label>
                     <input type="text" id="tillNumberInput" class="form-control" placeholder="e.g. TILL-01">
+                </div>
+                <div class="mb-3">
+                    <label for="branchNameInput" class="form-label">Branch</label>
+                    <input type="text" id="branchNameInput" class="form-control" placeholder="e.g. Main Street">
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <label for="vatRateInput" class="form-label">VAT Rate (%)</label>
+                        <input type="number" step="0.1" min="0" id="vatRateInput" class="form-control" placeholder="e.g. 20">
+                    </div>
+                    <div class="col-6 d-flex align-items-end">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="vatInclusiveSwitch">
+                            <label class="form-check-label" for="vatInclusiveSwitch">Prices include VAT</label>
+                        </div>
+                    </div>
                 </div>
                 <div class="form-check form-switch mb-2">
                     <input class="form-check-input" type="checkbox" id="darkModeSwitch">
@@ -267,6 +338,125 @@
         </div>
     </div>
 
+    <!-- Closing Menu Overlay (viewer/printer) -->
+    <div id="closingMenuOverlay" class="search-overlay" style="display:none;">
+        <div class="search-modal" style="max-width: 720px;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="h5 m-0">Closing Summary</div>
+                <button id="closingMenuCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+            </div>
+            <div id="closingMenuBody" class="mb-3 small"></div>
+            <div class="d-flex justify-content-end gap-2">
+                <button id="closingMenuReprintBtn" class="btn btn-primary">Reprint Z-read</button>
+            </div>
+        </div>
+    </div>
+    <!-- Opening Float Overlay -->
+    <div id="openingOverlay" class="search-overlay" style="display:none;">
+        <div class="search-modal" style="max-width: 520px;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="h5 m-0">Set Opening Float</div>
+                <button id="openingCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+            </div>
+            <p class="text-muted">Enter the total opening cash float for today.</p>
+            <div class="input-group mb-3">
+                <span class="input-group-text">Amount</span>
+                <input type="number" step="0.01" id="openingFloatInput" class="form-control" placeholder="e.g. 150.00" />
+            </div>
+            <div id="openingKeypad" class="keypad-grid mb-3">
+                <button class="key-btn" data-k="7">7</button>
+                <button class="key-btn" data-k="8">8</button>
+                <button class="key-btn" data-k="9">9</button>
+                <button class="key-btn" data-k="4">4</button>
+                <button class="key-btn" data-k="5">5</button>
+                <button class="key-btn" data-k="6">6</button>
+                <button class="key-btn" data-k="1">1</button>
+                <button class="key-btn" data-k="2">2</button>
+                <button class="key-btn" data-k="3">3</button>
+                <button class="key-btn key-action" data-k="C">C</button>
+                <button class="key-btn" data-k="0">0</button>
+                <button class="key-btn key-action" data-k="B">Back</button>
+            </div>
+            <div class="d-flex justify-content-end gap-2">
+                <button id="openingSaveBtn" class="btn btn-primary">Save Opening</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Closing / Reconciliation Overlay -->
+    <div id="closingOverlay" class="search-overlay" style="display:none;">
+        <div class="search-modal" style="max-width: 960px;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="h5 m-0">End of Day Reconciliation</div>
+                <button id="closingCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+            </div>
+            <div class="row g-3">
+                <div class="col-12 col-lg-7">
+                    <div class="card p-3">
+                        <div class="fw-semibold mb-2">Denominations</div>
+                        <div id="denomsGrid" class="row g-2">
+                            <!-- Denomination controls: readonly qty with +1 / -1 buttons -->
+                            <div class="col-6 col-md-4"><label class="form-label">£50</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="50" type="button">-1</button><input data-denom="50" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="50" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">£20</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="20" type="button">-1</button><input data-denom="20" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="20" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">£10</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="10" type="button">-1</button><input data-denom="10" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="10" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">£5</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="5" type="button">-1</button><input data-denom="5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="5" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">£2</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="2" type="button">-1</button><input data-denom="2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="2" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">£1</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="1" type="button">-1</button><input data-denom="1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="1" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">50p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.5" type="button">-1</button><input data-denom="0.5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.5" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">20p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.2" type="button">-1</button><input data-denom="0.2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.2" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">10p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.1" type="button">-1</button><input data-denom="0.1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.1" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">5p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.05" type="button">-1</button><input data-denom="0.05" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.05" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">2p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.02" type="button">-1</button><input data-denom="0.02" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.02" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">1p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.01" type="button">-1</button><input data-denom="0.01" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.01" type="button">+1</button></div></div>
+                        </div>
+                        <div class="mt-2 small text-muted">Tip: enter quantities; totals are calculated automatically.</div>
+                    </div>
+                </div>
+                <div class="col-12 col-lg-5">
+                    <div class="card p-3">
+                        <div class="fw-semibold mb-2">Summary</div>
+                        <div id="reconSummary" style="display:none;">
+                            <div class="d-flex justify-content-between"><div>Opening Float</div><div id="sumOpening">£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Cash Sales (net)</div><div id="sumCashSales">£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Card Sales (net)</div><div id="sumCardSales">£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Payouts</div><div>
+                                <input type="number" step="0.01" id="sumPayoutsInput" class="form-control form-control-sm" placeholder="0.00" style="max-width: 140px;">
+                            </div></div>
+                            <hr>
+                            <div class="d-flex justify-content-between"><div>Expected Till</div><div id="sumExpected">£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Counted (denoms)</div><div id="sumCounted">£0.00</div></div>
+                            <div class="d-flex justify-content-between fw-semibold"><div>Variance</div><div id="sumVariance">£0.00</div></div>
+                        </div>
+                        <div id="reconResult" class="mt-2" style="display:none;"></div>
+                        <div class="d-grid mt-3">
+                            <button id="reconcileBtn" class="btn btn-primary">Enter</button>
+                            <button id="reconConfirmBtn" class="btn btn-outline-success" style="display:none;">Confirm and Print</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cash Management Menu (front menu for Opening/Closing) -->
+    <div id="cashMenuOverlay" class="search-overlay" style="display:none;">
+        <div class="search-modal" style="max-width: 520px;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="h5 m-0">Cash Management</div>
+                <button id="cashMenuCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+            </div>
+            <div class="d-grid gap-2">
+                <button id="cashMenuOpenBtn" class="btn btn-light">Opening Float</button>
+            </div>
+            <hr>
+            <div class="mb-2 fw-semibold">Closing</div>
+            <div class="d-grid gap-2">
+                <button id="cashMenuZReadBtn" class="btn btn-light">Z-Read (Summary/Print)</button>
+                <button id="cashMenuFloatBtn" class="btn btn-light">Closing Float (Denominations)</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Paused Transactions Overlay -->
     <div id="pausedOverlay" class="search-overlay" style="display:none;">
         <div class="search-modal" style="max-width: 800px;">
@@ -292,9 +482,62 @@
         </div>
     </div>
 
-    <!-- Discount Overlay -->
-    <div id="discountOverlay" class="search-overlay" style="display:none;">
+    
+    <!-- Invoices Overlay -->
+    <div id="invoicesOverlay" class="search-overlay" style="display:none;">
         <div class="search-modal" style="max-width: 900px;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="d-flex align-items-center gap-2">
+                    <div class="h5 m-0">Receipts</div>
+                    <input type="date" id="invoiceDateInput" class="form-control form-control-sm" style="max-width: 180px;" />
+                </div>
+                <button id="invoicesCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+            </div>
+            <div class="table-responsive" style="overflow:auto; max-height:60vh;">
+                <table class="table table-sm align-middle">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Source</th>
+                            <th>Status</th>
+                            <th>Receipt ID</th><th>Customer</th><th>Cashier</th><th class="text-end">Total</th><th>Action</th></tr>
+                    </thead>
+                    <tbody id="invoicesListBody"></tbody>
+                </table>
+            </div>
+        </div>
+    
+    <!-- Receipt Detail Overlay -->
+    <div id="invoiceDetailOverlay" class="search-overlay" style="display:none;">
+      <div class="search-modal" style="max-width: 900px;">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <div class="h5 m-0" id="invDetailTitle">Receipt</div>
+          <div class="d-flex align-items-center gap-2">
+            <button id="invDetailReturnBtn" class="btn btn-outline-warning btn-sm">Return This Receipt</button>
+            <button id="invDetailCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+          </div>
+        </div>
+        <div id="invDetailMeta" class="small text-muted mb-2"></div>
+        <div class="row g-3">
+          <div class="col-12 col-lg-7">
+            <div class="list-group" id="invDetailItems" style="max-height: 50vh; overflow:auto;"></div>
+          </div>
+          <div class="col-12 col-lg-5">
+            <div class="card p-3">
+              <div class="fw-semibold mb-2">Payments</div>
+              <div id="invDetailPayments" class="small"></div>
+              <hr>
+              <div class="d-flex justify-content-between">
+                <div class="fw-semibold">Total</div>
+                <div id="invDetailTotal" class="fw-bold"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div></div><!-- Discount Overlay -->
+    <div id="discountOverlay" class="search-overlay" style="display:none;">
+        <div class="search-modal" style="max-width: 1000px;">
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <div class="h5 m-0">Apply Discount</div>
                 <button id="discountCloseBtn" class="btn btn-outline-secondary btn-sm">Done</button>
@@ -328,6 +571,20 @@
                         <div class="input-group mb-3">
                             <span class="input-group-text" id="discountValueLabel">Value</span>
                             <input type="number" step="0.01" id="discountValueInput" class="form-control" placeholder="e.g. 5.00 or 10 for %">
+                        </div>
+                        <div id="discountKeypad" class="keypad-grid mb-3">
+                            <button class="key-btn" data-k="7">7</button>
+                            <button class="key-btn" data-k="8">8</button>
+                            <button class="key-btn" data-k="9">9</button>
+                            <button class="key-btn" data-k="4">4</button>
+                            <button class="key-btn" data-k="5">5</button>
+                            <button class="key-btn" data-k="6">6</button>
+                            <button class="key-btn" data-k="1">1</button>
+                            <button class="key-btn" data-k="2">2</button>
+                            <button class="key-btn" data-k="3">3</button>
+                            <button class="key-btn key-action" data-k="C">C</button>
+                            <button class="key-btn" data-k="0">0</button>
+                            <button class="key-btn" data-k=".">.</button>
                         </div>
                         <div class="d-grid">
                             <button id="applyDiscountBtn" class="btn btn-primary">Apply</button>
@@ -422,6 +679,15 @@
     <script src="{{ url_for('static', filename='js/bootstrap_fix.js', v='1') }}"></script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
 
 
 

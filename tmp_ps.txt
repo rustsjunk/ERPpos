@@ -273,16 +273,9 @@ def demo_seed(conn: sqlite3.Connection):
         upsert_item(conn, {"item_id":tpl_id,"parent_id":None,"name":name,"brand":brand,"attributes":None,
                            "price":price,"image_url":image,"is_template":1,"active":1,"modified_utc":now})
     def add_variant(item_id, tpl_id, name, brand, price, barcode, stock_qty, attributes=None, image=None):
-        # Name variants the same as their template; all specifics live in attributes
-        try:
-            row = conn.execute("SELECT name FROM items WHERE item_id=?", (tpl_id,)).fetchone()
-            tpl_name = row["name"] if row else None
-        except Exception:
-            tpl_name = None
-        v_name = tpl_name or name
-        upsert_item(conn, {"item_id":item_id,"parent_id":tpl_id,"name":v_name,"brand":brand,
-                            "attributes":json.dumps(attributes) if isinstance(attributes, dict) else (attributes if attributes else None),
-                            "price":price,"image_url":image,"is_template":0,"active":1,"modified_utc":now})
+        upsert_item(conn, {"item_id":item_id,"parent_id":tpl_id,"name":name,"brand":brand,
+                           "attributes":json.dumps(attributes) if isinstance(attributes, dict) else (attributes if attributes else None),
+                           "price":price,"image_url":image,"is_template":0,"active":1,"modified_utc":now})
         if barcode:
             upsert_barcode(conn, barcode, item_id)
         if stock_qty is not None:
@@ -590,3 +583,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

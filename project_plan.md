@@ -49,6 +49,8 @@ ERPpos is a lightweight, web-based Point of Sale system designed to integrate wi
 - Sync & resilience
 	- Local backup DB or robust queue to hold sales until ERPNEXT sync succeeds.
 	- Automatic retry and exponential backoff for sync failures.
+	- Durable local index + receipts folder that supports either ERP pull (sidecar acknowledgements) or API push.
+	- Lightweight worker (`sync_worker.py`) to reconcile state and update statuses.
 
 - Till management & reporting
 	- Opening float setup on shift start.
@@ -116,6 +118,18 @@ Note: estimates assume a single developer working part-time. Adjust as needed.
 - Decide on local storage technology (IndexedDB for browser-based POS, or SQLite for packaged desktop use).
 - Draft the JSON receipt contract and add a sample in `invoices/` for reference (existing `MOCK-*.json` files can be used as templates).
 - Add a `docs/` folder with the API mapping and runbook for recovery in case of sync issues.
+- Implement and run the sync worker:
+  - See `sync.md` for pull-ack vs push modes, env vars, and ops guidance.
+  - Expose `/api/sales/status` for UI indicators of queued/failed receipts.
+
+### New: Local + ERP Pull Sync Design
+
+- Idempotent sales: POS assigns a stable `sale_id` (also used as the `invoice_name` for files in `invoices/`).
+- Local index in SQLite: table `sales` tracks `queue_status` in `queued|posting|posted|failed`.
+- ERP pull acknowledgement: ERPNext writes `invoices/<sale_id>.json.ok` after ingesting; the worker marks the sale `posted`.
+- Optional push mode: switch `SYNC_MODE=push` to post via REST using the existing `outbox` table.
+- UI: the bell icon shows pending/failed counts based on `/api/sales/status`.
+
 
 ---
 

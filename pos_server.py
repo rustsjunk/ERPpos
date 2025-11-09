@@ -1,4 +1,4 @@
-﻿from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify
 from dotenv import load_dotenv
 import requests
 import os
@@ -148,7 +148,7 @@ def get_items():
                 f"{ERPNEXT_URL}/api/resource/Item",
                 headers=_erp_headers(),
                 params={
-                    'fields': '["name", "item_code", "item_name", "brand", "image", "standard_rate", "stock_uom", "barcode"]',
+                    'fields': '["name", "item_code", "item_name", "brand", "item_group", "image", "standard_rate", "stock_uom", "barcode"]',
                     'filters': '[["is_sales_item","=",1],["disabled","=",0]]'
                 },
                 timeout=15
@@ -230,13 +230,58 @@ def create_sale():
                 'cash_given': data.get('cash_given'),
                 'change': data.get('change'),
                 'total': data.get('total'),
-                'vouchers': data.get('vouchers', [])
+                'vouchers': data.get('vouchers', []),
+                'cashier': data.get('cashier')
             }
             with open(os.path.join('invoices', f"{invoice_name}.json"), 'w', encoding='utf-8') as f:
                 import json
                 json.dump(record, f, ensure_ascii=False, indent=2)
         except Exception:
             # Don't fail the sale if writing the file has issues
+            pass
+        # Also index the sale into SQLite outbox for durable tracking (idempotency via invoice_name)
+        try:
+            if ps:
+                conn = _db_connect() or ps.connect(POS_DB_PATH)
+                sale_payload = {
+                    'sale_id': invoice_name,  # idempotency key matches file name
+                    'cashier': (data.get('cashier') or {}).get('code') or (data.get('cashier') or {}).get('name'),
+                    'customer_id': data.get('customer'),
+                    'lines': [
+                        {
+                            'item_id': it.get('item_code') or it.get('code') or it.get('name'),
+                            'item_name': it.get('item_name') or it.get('name') or (it.get('item_code') or ''),
+                            'brand': it.get('brand'),
+                            'attributes': it.get('attributes') or {},
+                            'qty': float(it.get('qty') or 0),
+                            'rate': float(it.get('rate') or 0),
+                            'barcode_used': None,
+                        }
+                        for it in (data.get('items') or [])
+                    ],
+                    'payments': [
+                        {
+                            'method': (p.get('mode_of_payment') or p.get('method') or 'Other'),
+                            'amount': float(p.get('amount') or 0),
+                            'ref': p.get('ref')
+                        }
+                        for p in (data.get('payments') or [])
+                    ],
+                    'warehouse': 'Shop',
+                    'voucher_redeem': [
+                        {
+                            'code': v.get('code'),
+                            'amount': float(v.get('amount') or 0)
+                        }
+                        for v in (data.get('vouchers') or []) if v.get('code')
+                    ],
+                }
+                try:
+                    ps.record_sale(conn, sale_payload)
+                except Exception:
+                    # Do not block POS on DB/indexing issues
+                    pass
+        except Exception:
             pass
         return jsonify({'status': 'success', 'message': 'Sale recorded (mock)', 'invoice_name': invoice_name})
     try:
@@ -283,7 +328,8 @@ def create_sale():
                 'cash_given': data.get('cash_given'),
                 'change': data.get('change'),
                 'total': data.get('total'),
-                'vouchers': data.get('vouchers', [])
+                'vouchers': data.get('vouchers', []),
+                'cashier': data.get('cashier')
             }
             with open(os.path.join('invoices', f"{invoice['name']}.json"), 'w', encoding='utf-8') as f:
                 import json
@@ -325,6 +371,77 @@ def get_customers():
         return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/sales/status')
+def api_sales_status():
+    """Return counts of local sales by queue_status and a quick scan of invoice acks.
+    Response: { status, counts: {queued, posting, posted, failed}, invoices_pending }
+    """
+    counts = {'queued': 0, 'posting': 0, 'posted': 0, 'failed': 0}
+    try:
+        conn = _db_connect()
+        if conn:
+            for st in counts.keys():
+                row = conn.execute('SELECT COUNT(*) AS c FROM sales WHERE queue_status=?', (st,)).fetchone()
+                counts[st] = int(row['c']) if row and 'c' in row.keys() else 0
+    except Exception:
+        pass
+    # Invoice folder pending (no .ok sidecar)
+    pending = 0
+    try:
+        inv_dir = 'invoices'
+        if os.path.isdir(inv_dir):
+            for name in os.listdir(inv_dir):
+                if not name.endswith('.json'):
+                    continue
+                base = name[:-5]
+                ok_path = os.path.join(inv_dir, base + '.json.ok')
+                if not os.path.exists(ok_path):
+                    pending += 1
+    except Exception:
+        pass
+    return jsonify({'status': 'success', 'counts': counts, 'invoices_pending': pending})
+
+
+@app.route('/api/admin/sync/scan-acks', methods=['POST'])
+def api_scan_acks():
+    """Scan invoices/ for .ok sidecar files and mark corresponding sales as posted.
+    This supports ERP pull flows that acknowledge by writing <name>.json.ok sidecars.
+    """
+    updated = 0
+    try:
+        conn = _db_connect()
+        inv_dir = 'invoices'
+        if not conn or not os.path.isdir(inv_dir):
+            return jsonify({'status': 'success', 'updated': 0})
+        to_delete = []
+        for name in os.listdir(inv_dir):
+            if not name.endswith('.json.ok'):
+                continue
+            base = name[:-3]  # strip '.ok'
+            sale_id = base[:-5] if base.endswith('.json') else base
+            try:
+                row = conn.execute('SELECT queue_status FROM sales WHERE sale_id=?', (sale_id,)).fetchone()
+                if row and row['queue_status'] != 'posted':
+                    conn.execute("UPDATE sales SET queue_status='posted', erp_docname=COALESCE(erp_docname, 'ACK') WHERE sale_id=?", (sale_id,))
+                    updated += 1
+                    to_delete.append(os.path.join(inv_dir, name))
+            except Exception:
+                continue
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        # Delete .json.ok sidecars only for acknowledged rows
+        for path in to_delete:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return jsonify({'status': 'success', 'updated': updated})
 
 
 @app.route('/api/db/init', methods=['POST'])
@@ -560,6 +677,35 @@ def api_get_sale(sale_id: str):
                 'total': rec.get('total')
             }
             return jsonify({'status': 'success', 'sale': out})
+        # Fallback: scan invoices/ for a record whose invoice_name matches sid (e.g., when filename differs)
+        inv_dir = 'invoices'
+        if os.path.isdir(inv_dir):
+            for name in os.listdir(inv_dir):
+                if not name.endswith('.json'):
+                    continue
+                try:
+                    with open(os.path.join(inv_dir, name), 'r', encoding='utf-8') as f:
+                        rec = _json.load(f)
+                    inv_name = (rec.get('invoice_name') or '').strip()
+                    if inv_name and inv_name == sid:
+                        items = []
+                        for it in rec.get('items') or []:
+                            items.append({
+                                'item_code': it.get('item_code') or it.get('code') or it.get('name'),
+                                'item_name': it.get('item_name') or it.get('name') or (it.get('item_code') or ''),
+                                'qty': it.get('qty') or 1,
+                                'rate': it.get('rate') or it.get('price') or 0
+                            })
+                        out = {
+                            'id': inv_name,
+                            'customer': rec.get('customer') or '',
+                            'items': items,
+                            'total': rec.get('total')
+                        }
+                        return jsonify({'status': 'success', 'sale': out})
+                except Exception:
+                    # ignore unreadable entries
+                    continue
     except Exception:
         pass
     # 2) SQLite sales table via pos_service, if available
@@ -718,4 +864,216 @@ if __name__ == '__main__':
     port = int(os.getenv('PORT', '5000'))
     host = os.getenv('HOST', '0.0.0.0')
     app.run(host=host, port=port, debug=debug)
+
+
+@app.route('/api/invoices')
+def api_invoices_by_date():
+    """Return sales/invoices for a given day, combining SQLite sales and local invoices/*.json.
+    Query param: date=YYYY-MM-DD (defaults to today, local time)
+    Response: { status, date, rows: [ {id, created_at, customer, total, source, status, erp_docname} ] }
+    """
+    try:
+        qdate = (request.args.get('date') or '').strip()
+    except Exception:
+        qdate = ''
+    if not qdate:
+        qdate = datetime.now().strftime('%Y-%m-%d')
+    out = []
+    seen_ids = set()
+
+    # From SQLite sales table
+    try:
+        conn = _db_connect()
+        if conn:
+            for row in conn.execute("SELECT sale_id, created_utc, customer_id, cashier, total, queue_status, erp_docname FROM sales WHERE substr(created_utc,1,10)=? ORDER BY created_utc ASC", (qdate,)):
+                rec = {
+                    'id': row['sale_id'],
+                    'created_at': row['created_utc'],
+                    'customer': row['customer_id'] or '',
+                    'total': float(row['total'] or 0),
+                    'source': 'db',
+                    'status': row['queue_status'] or 'queued',
+                    'erp_docname': row['erp_docname'] or None,
+                    'cashier': row['cashier'] or None,
+                }
+                out.append(rec)
+                seen_ids.add(rec['id'])
+    except Exception:
+        pass
+
+    # From local invoices/*.json
+    try:
+        inv_dir = 'invoices'
+        if os.path.isdir(inv_dir):
+            for name in os.listdir(inv_dir):
+                if not name.endswith('.json'):
+                    continue
+                fpath = os.path.join(inv_dir, name)
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        rec = _json.load(f)
+                except Exception:
+                    continue
+                created = (rec.get('created_at') or '').strip()
+                if not created:
+                    continue
+                # Compare date portion only
+                if not created.startswith(qdate):
+                    # Accept ISO without T (local) or with time; fallback parse
+                    try:
+                        dt = datetime.fromisoformat(created.replace('Z',''))
+                        if dt.strftime('%Y-%m-%d') != qdate:
+                            continue
+                    except Exception:
+                        continue
+                inv_id = (rec.get('invoice_name') or '').strip() or name[:-5]
+                if inv_id in seen_ids:
+                    continue
+                ok_sidecar = fpath + '.ok'
+                status = 'posted' if os.path.exists(ok_sidecar) else ('posted' if (rec.get('mode') == 'erpnext') else 'queued')
+                out.append({
+                    'id': inv_id,
+                    'created_at': created,
+                    'customer': rec.get('customer') or '',
+                    'cashier': (((rec.get('cashier') or {}).get('code','') + ' ' + (rec.get('cashier') or {}).get('name','')).strip()),
+                    'total': float(rec.get('total') or 0),
+                    'source': 'file',
+                    'status': status,
+                    'erp_docname': inv_id if rec.get('mode') == 'erpnext' else None,
+                })
+    except Exception:
+        pass
+
+    # Sort by created_at ascending
+    try:
+        out.sort(key=lambda r: (r.get('created_at') or ''))
+    except Exception:
+        pass
+    return jsonify({'status': 'success', 'date': qdate, 'rows': out})
+
+
+
+@app.route('/api/invoices/<inv_id>')
+def api_invoice_detail(inv_id: str):
+    """Detailed invoice view with items, images and payments.
+    Tries SQLite sales payload first, then invoices/<id>.json (or match by invoice_name).
+    Response: { status, invoice: { id, created_at, customer, cashier, total, items[], payments[] } }
+    """
+    sid = (inv_id or '').strip()
+    if not sid:
+        return jsonify({'status':'error','message':'Missing invoice id'}), 400
+    # 1) Try SQLite sales
+    try:
+        conn = _db_connect()
+        if conn:
+            row = conn.execute("SELECT sale_id, created_utc, customer_id, cashier, total, erp_docname, payload_json FROM sales WHERE sale_id=? OR erp_docname=?", (sid, sid)).fetchone()
+            if row:
+                try:
+                    payload = _json.loads(row['payload_json'] or '{}')
+                except Exception:
+                    payload = {}
+                items = []
+                ids = []
+                for ln in (payload.get('lines') or []):
+                    code = ln.get('item_id') or ln.get('item_code') or ln.get('name')
+                    items.append({
+                        'item_code': code,
+                        'item_name': ln.get('item_name') or ln.get('name') or code,
+                        'qty': ln.get('qty') or 1,
+                        'rate': ln.get('rate') or ln.get('price') or 0,
+                        'image': None,
+                    })
+                    if code: ids.append(code)
+                # images
+                try:
+                    if ids:
+                        qs = ','.join(['?']*len(ids))
+                        for ir in conn.execute(f"SELECT item_id, image_url_effective FROM v_item_images WHERE item_id IN ({qs})", tuple(ids)):
+                            for it in items:
+                                if it['item_code'] == ir['item_id']:
+                                    it['image'] = ir['image_url_effective']
+                except Exception:
+                    pass
+                pays = []
+                for p in (payload.get('payments') or []):
+                    pays.append({'method': p.get('method') or p.get('mode_of_payment') or 'Payment', 'amount': float(p.get('amount') or 0), 'ref': p.get('ref')})
+                inv = {
+                    'id': row['erp_docname'] or row['sale_id'] or sid,
+                    'created_at': row['created_utc'],
+                    'customer': row['customer_id'] or '',
+                    'cashier': row['cashier'] or '',
+                    'total': float(row['total'] or 0),
+                    'items': items,
+                    'payments': pays,
+                    'source': 'db'
+                }
+                return jsonify({'status':'success','invoice': inv})
+    except Exception:
+        pass
+    # 2) Try invoices/<id>.json
+    try:
+        inv_dir = 'invoices'
+        path = os.path.join(inv_dir, f'{sid}.json')
+        rec = None
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                rec = _json.load(f)
+        else:
+            # scan for invoice_name match
+            if os.path.isdir(inv_dir):
+                for name in os.listdir(inv_dir):
+                    if not name.endswith('.json'): continue
+                    try:
+                        with open(os.path.join(inv_dir, name), 'r', encoding='utf-8') as f:
+                            r = _json.load(f)
+                        if (r.get('invoice_name') or '') == sid:
+                            rec = r
+                            break
+                    except Exception:
+                        continue
+        if rec:
+            data_items = []
+            ids = []
+            for it in (rec.get('items') or []):
+                code = it.get('item_code') or it.get('code') or it.get('name')
+                data_items.append({
+                    'item_code': code,
+                    'item_name': it.get('item_name') or it.get('name') or code,
+                    'qty': it.get('qty') or 1,
+                    'rate': it.get('rate') or it.get('price') or 0,
+                    'image': None,
+                })
+                if code: ids.append(code)
+            # try images via DB
+            try:
+                conn = _db_connect()
+                if conn and ids:
+                    qs = ','.join(['?']*len(ids))
+                    for ir in conn.execute(f"SELECT item_id, image_url_effective FROM v_item_images WHERE item_id IN ({qs})", tuple(ids)):
+                        for it in data_items:
+                            if it['item_code'] == ir['item_id']:
+                                it['image'] = ir['image_url_effective']
+            except Exception:
+                pass
+            pays = []
+            for p in (rec.get('payments') or []):
+                pays.append({'method': p.get('mode_of_payment') or p.get('method') or 'Payment', 'amount': float(p.get('amount') or 0), 'ref': p.get('ref')})
+            inv = {
+                'id': rec.get('invoice_name') or sid,
+                'created_at': rec.get('created_at') or '',
+                'customer': rec.get('customer') or '',
+                    'cashier': (((rec.get('cashier') or {}).get('code','') + ' ' + (rec.get('cashier') or {}).get('name','')).strip()),
+                'cashier': '',
+                'total': float(rec.get('total') or 0),
+                'items': data_items,
+                'payments': pays,
+                'source': 'file'
+            }
+            return jsonify({'status':'success','invoice': inv})
+    except Exception:
+        pass
+    return jsonify({'status':'error','message':'Invoice not found'}), 404
+
+
+
 

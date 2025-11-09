@@ -1,4 +1,4 @@
-try{ console.log('[POS] JS loaded'); }catch(_){ }
+ï»¿try{ console.log('[POS] JS loaded'); }catch(_){ }
 // Clean rebuilt POS frontend
 // Debug logging helpers
 const DEBUG = true;
@@ -52,15 +52,155 @@ let currentTender = '';
 let cashInput = '';
 let denomSubtract = false;
 let vouchers = [];
+let appliedPayments = [];
 let barcodeFeedbackTimer = null;
+function displayNameFrom(baseName, attrs){
+  try{
+    const a = attrs || {};
+    const parts = [];
+    if(a.Color) parts.push(a.Color);
+    if(a.Width) parts.push(a.Width);
+    if(a.Size) parts.push(a.Size);
+    const suffix = parts.length ? (' - ' + parts.join(' - ')) : '';
+    const name = String(baseName||'');
+    if(suffix && name.endsWith(suffix)) return name;
+    return (name + suffix).trim();
+  }catch(_){ return String(baseName||''); }
+}
 // App settings and receipt state
-let settings = { till_number: '', dark_mode: false, auto_print: false };
+// App-wide persisted settings + simple Z-read aggregates
+let settings = {
+  till_number: '',
+  branch_name: '',
+  dark_mode: false,
+  auto_print: false,
+  opening_float: 0,
+  opening_date: '',
+  net_cash: 0,
+  net_card: 0,
+  net_voucher: 0,
+  vat_rate: 20,
+  vat_inclusive: true,
+  // Aggregates keyed by ISO date (YYYY-MM-DD).
+  // Minimal shape: { date: 'YYYY-MM-DD', totals:{...}, perCashier:{...}, perGroup:{...}, tenders:{...}, discounts:{...} }
+  z_agg: {}
+};
 let lastReceiptInfo = null;
 
 // Currency
 const CURRENCY = 'GBP';
 const fmt = new Intl.NumberFormat(undefined, { style: 'currency', currency: CURRENCY });
 const money = v => fmt.format(Number(v || 0));
+
+// Monetary keypad helpers: maintain cents and render as 0.00
+function _getCents(el){
+  try{
+    const raw = (el && el.dataset && el.dataset.cents) ? el.dataset.cents : '0';
+    const n = parseInt(String(raw).replace(/\D/g,''), 10);
+    return isNaN(n) ? 0 : Math.max(0, n);
+  }catch(_){ return 0; }
+}
+function _setFromCents(el, cents){
+  try{
+    const c = Math.max(0, Number.isFinite(cents)? Math.floor(cents) : 0);
+    if(el && el.dataset) el.dataset.cents = String(c);
+    const val = (c/100).toFixed(2);
+    if(el) el.value = val;
+    return val;
+  }catch(_){ return '0.00'; }
+}
+function applyMoneyKey(el, k){
+  if(!el) return '0.00';
+  let cents = _getCents(el);
+  if(k === 'C'){
+    cents = 0;
+  } else if(k === 'B'){
+    cents = Math.floor(cents / 10);
+  } else if(/^[0-9]$/.test(k||'')){
+    const digit = Number(k);
+    cents = cents * 10 + digit;
+  } else {
+    // ignore other keys e.g. '.'
+  }
+  return _setFromCents(el, cents);
+}
+
+// ----- Z-read aggregation helpers -----
+function _ensureZAggToday(){
+  const d = todayStr();
+  if(!settings.z_agg || typeof settings.z_agg !== 'object') settings.z_agg = {};
+  if(!settings.z_agg[d]){
+    settings.z_agg[d] = {
+      date: d,
+      totals: { gross:0, net:0, vat_sales:0, vat_returns:0, returns_amount:0, sale_count:0, return_count:0, items_qty:0 },
+      discounts: { sales:0, returns:0 },
+      tenders: { Cash:0, Card:0, Voucher:0, Other:0 },
+      perCashier: {},
+      perGroup: {}
+    };
+  }
+  return settings.z_agg[d];
+}
+function _vatPortion(amount){
+  const rate = Math.max(0, Number(settings.vat_rate||0));
+  if(rate<=0) return 0;
+  const amt = Number(amount||0);
+  if(settings.vat_inclusive){
+    return amt * (rate/(100+rate));
+  } else {
+    return amt * (rate/100);
+  }
+}
+function updateZAggWithSale(ctx){
+  // ctx: { net, lines:[{qty,rate,original_rate,refund,brand,item_group}], payments:[{mode_of_payment,amount}], cashier:{code,name} }
+  try{
+    const agg = _ensureZAggToday();
+    let gross = 0;
+    let itemsQty = 0;
+    let discSales = 0;
+    let discReturns = 0;
+    let vatSales = 0;
+    let vatReturns = 0;
+    const isReturn = Number(ctx.net||0) < 0;
+    (ctx.lines||[]).forEach(ln=>{
+      const qty = Math.abs(Number(ln.qty||0));
+      const rate = Number(ln.rate||0);
+      const orig = Number(ln.original_rate!=null?ln.original_rate:ln.rate||0);
+      const sign = ln.refund ? -1 : 1;
+      const lineNet = sign * qty * rate;
+      const lineGrossAbs = qty * rate;
+      const lineDisc = Math.max(0, (orig - rate) * qty);
+      if(ln.refund){ discReturns += lineDisc; vatReturns += _vatPortion(lineNet); }
+      else { discSales += lineDisc; vatSales += _vatPortion(lineNet); }
+      gross += Math.abs(lineGrossAbs) * (ln.refund?-1:1);
+      itemsQty += qty * (ln.refund?-1:1);
+      const groupKey = ln.item_group || ln.brand || 'Ungrouped';
+      const g = agg.perGroup[groupKey] || { qty:0, amount:0 };
+      g.qty += (ln.refund?-qty:qty);
+      g.amount += lineNet;
+      agg.perGroup[groupKey] = g;
+    });
+    agg.totals.gross += gross;
+    agg.totals.net += Number(ctx.net||0);
+    agg.totals.items_qty += itemsQty;
+    if(isReturn){ agg.totals.return_count += 1; agg.totals.returns_amount += Math.abs(Number(ctx.net||0)); }
+    else { agg.totals.sale_count += 1; }
+    agg.discounts.sales += discSales;
+    agg.discounts.returns += discReturns;
+    agg.totals.vat_sales += vatSales;
+    agg.totals.vat_returns += vatReturns;
+    // tenders
+    (ctx.payments||[]).forEach(p=>{
+      const m = (p.mode_of_payment||'Other');
+      const key = (/cash/i.test(m)?'Cash':/card/i.test(m)?'Card':/voucher/i.test(m)?'Voucher':'Other');
+      agg.tenders[key] = (agg.tenders[key]||0) + Number(p.amount||0);
+    });
+    // cashier totals by net
+    const cname = (ctx.cashier && (ctx.cashier.name||ctx.cashier.code)) || 'Unknown';
+    agg.perCashier[cname] = (agg.perCashier[cname]||0) + Number(ctx.net||0);
+    saveSettings();
+  }catch(e){ /* ignore aggregation errors */ }
+}
 
 // Demo cashiers
 const CASHIER_CODES = { '1111':'Alice','2222':'Bob','3333':'Charlie' };
@@ -92,7 +232,32 @@ document.addEventListener('DOMContentLoaded',()=>{
   window.addEventListener('error', e=>{ err('window error', e.message||e, e.error||null); });
   window.addEventListener('unhandledrejection', e=>{ err('unhandled rejection', e.reason||e); });
   focusBarcodeInput();
+  // Start sync status polling to show pending/failed counts
+  try { pollSyncStatus(); setInterval(pollSyncStatus, 30000); } catch(_){}
 });
+
+async function pollSyncStatus(){
+  try{
+    const r = await fetch('/api/sales/status');
+    if(!r.ok) return;
+    const d = await r.json();
+    if(!d || d.status!=='success') return;
+    const counts = d.counts||{};
+    const queued = Number(counts.queued||0);
+    const failed = Number(counts.failed||0);
+    const invoicesPending = Number(d.invoices_pending||0);
+    const pendingTotal = queued + invoicesPending;
+    const notif = document.getElementById('notifIcon')
+    if(notif){
+      const base = '\u{1F514}'; // bell icon
+      let txt = base;
+      const totalBadge = (failed>0? `${pendingTotal} (!${failed})` : String(pendingTotal));
+      if(pendingTotal>0){ txt = `${base} ${totalBadge}`; }
+      notif.textContent = txt;
+      notif.title = `Pending sync: ${pendingTotal} | Failed: ${failed}`;
+    }
+  }catch(e){ /* ignore */ }
+}
 
 async function loadItems(){
   try {
@@ -120,22 +285,8 @@ async function loadCustomers(){ try{ const r=await fetch('/api/customers'); cons
 function renderItems(list){ const grid=document.getElementById('itemsGrid'); if(!grid) return; grid.innerHTML=''; list.forEach(it=>{ const d=document.createElement('div'); d.className='col'; d.innerHTML=`<div class="card item-card h-100"><div class="card-body"><h5 class="card-title">${it.item_name}</h5><p class="card-text">${money(it.standard_rate)}</p><p class="card-text"><small>${it.stock_uom}</small></p></div></div>`; d.onclick=()=>openProduct(it); grid.appendChild(d); });}
 
 function addToCart(item) {
-  const existing = cart.find(ci => ci.item_code === item.name && !ci.refund);
-  if (existing) {
-    existing.qty += 1;
-    existing.amount = existing.qty * existing.rate;
-  } else {
-    cart.push({
-      item_code: item.name,
-      item_name: item.item_name,
-      qty: 1,
-      rate: item.standard_rate,
-      amount: item.standard_rate,
-      image: item.image || null,
-      refund: false
-    });
-  }
-  updateCartDisplay();
+  // Always open product overlay to choose a specific variant to ensure consistent IDs
+  try{ return openProduct(item); }catch(e){ /* fallback: no-op */ }
 }
 
 function updateQuantity(code, change) {
@@ -285,29 +436,32 @@ async function processBarcodeScan(rawValue) {
 async function tryAddVariantByBarcode(code){
   try{
     const r = await fetch(`/api/lookup-barcode?code=${encodeURIComponent(code)}`);
-    if (!r.ok) return false;
-    const d = await r.json();
-    if (!d || d.status!=='success' || !d.variant) return false;
-    const v = d.variant;
-    const existing = cart.find(ci => ci.item_code === v.item_id && !ci.refund);
-    const rate = Number(v.rate||0);
-    if (existing){
-      existing.qty += 1;
-      existing.amount = existing.qty * existing.rate;
-    } else {
-      cart.push({
-        item_code: v.item_id,
-        item_name: v.name,
-        qty: 1,
-        rate: rate,
-        amount: rate,
-        image: null,
-        variant: v.attributes || {},
-        refund: false
-      });
-    }
+  if (!r.ok) return false;
+  const d = await r.json();
+  if (!d || d.status!=='success' || !d.variant) return false;
+  const v = d.variant;
+  const existing = cart.find(ci => ci.item_code === v.item_id && !ci.refund);
+  const rate = Number(v.rate||0);
+  if (existing){
+    existing.qty += 1;
+    existing.amount = existing.qty * existing.rate;
+  } else {
+    cart.push({
+      item_code: v.item_id,
+      item_name: displayNameFrom(v.name, v.attributes||{}),
+      qty: 1,
+      rate: rate,
+      original_rate: rate,
+      amount: rate,
+      image: null,
+      variant: v.attributes || {},
+      brand: null,
+      item_group: null,
+      refund: false
+    });
+  }
     updateCartDisplay();
-    const feedbackName = v.name || code;
+    const feedbackName = displayNameFrom(v.name || code, v.attributes||{});
     showBarcodeFeedback(`Added ${feedbackName}`, false);
     const input = document.getElementById('barcodeInput');
     if (input){ input.value=''; input.classList.remove('is-invalid'); }
@@ -330,6 +484,13 @@ function bindEvents(){
   const settingsSaveBtn=document.getElementById('settingsSaveBtn');
   const settingsBackBtn=document.getElementById('settingsBackBtn');
   const reprintLastBtn=document.getElementById('reprintLastBtn');
+  // Cash management front menu
+  const openCashMenuBtn=document.getElementById('openCashMenuBtn');
+  const cashMenuOverlay=document.getElementById('cashMenuOverlay');
+  const cashMenuCloseBtn=document.getElementById('cashMenuCloseBtn');
+  const cashMenuOpenBtn=document.getElementById('cashMenuOpenBtn');
+  const cashMenuZReadBtn=document.getElementById('cashMenuZReadBtn');
+  const cashMenuFloatBtn=document.getElementById('cashMenuFloatBtn');
   // Return from receipt
   const returnBtn=document.getElementById('returnFromReceiptBtn');
   const returnOverlay=document.getElementById('returnOverlay');
@@ -348,8 +509,71 @@ function bindEvents(){
   if(openSettingsBtn){ openSettingsBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView){ settingsView.style.display='block'; populateSettingsForm(); } }); }
   if(settingsBackBtn){ settingsBackBtn.addEventListener('click',()=>{ if(settingsView) settingsView.style.display='none'; if(menuView) menuView.style.display='block'; }); }
   if(settingsSaveBtn){ settingsSaveBtn.addEventListener('click',()=>{ saveSettingsFromForm(); applySettings(); if(settingsView) settingsView.style.display='none'; if(menuView) menuView.style.display='block'; }); }
+  if(openCashMenuBtn){ openCashMenuBtn.addEventListener('click', ()=>{ if(cashMenuOverlay){ cashMenuOverlay.style.display='flex'; cashMenuOverlay.style.visibility='visible'; cashMenuOverlay.style.opacity='1'; } }); }
+  if(cashMenuCloseBtn){ cashMenuCloseBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; }); }
+  if(cashMenuOverlay){ cashMenuOverlay.addEventListener('click', e=>{ if(e.target===cashMenuOverlay) cashMenuOverlay.style.display='none'; }); }
+  if(cashMenuOpenBtn){ cashMenuOpenBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; showOpeningOverlay(); }); }
+  if(cashMenuZReadBtn){ cashMenuZReadBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; printZRead(); }); }
+  const cashMenuXReadBtn=document.getElementById('cashMenuXReadBtn');
+  if(cashMenuXReadBtn){ cashMenuXReadBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; printXRead(); }); }
+  if(cashMenuFloatBtn){ cashMenuFloatBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; showClosingOverlay(); }); }
   if(openAdminBtn){ openAdminBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView) settingsView.style.display='none'; if(adminView) adminView.style.display='block'; }); }
   if(adminBackBtn){ adminBackBtn.addEventListener('click',()=>{ if(adminView) adminView.style.display='none'; if(menuView) menuView.style.display='block'; }); }
+  // Opening/Closing overlays
+  const openingOverlay=document.getElementById('openingOverlay');
+  const openingCloseBtn=document.getElementById('openingCloseBtn');
+  const openingSaveBtn=document.getElementById('openingSaveBtn');
+  const openingKeypad=document.getElementById('openingKeypad');
+  const openingInput=document.getElementById('openingFloatInput');
+  if(openingCloseBtn){ openingCloseBtn.addEventListener('click', ()=>{ if(openingOverlay) openingOverlay.style.display='none'; }); }
+  if(openingOverlay){ openingOverlay.addEventListener('click', e=>{ if(e.target===openingOverlay) openingOverlay.style.display='none'; }); }
+  if(openingSaveBtn){ openingSaveBtn.addEventListener('click', saveOpeningFloat); }
+  if(openingKeypad){
+    openingKeypad.querySelectorAll('.key-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const k = btn.getAttribute('data-k');
+        if(k==='C'){ openingDigits=''; }
+        else if(k==='B'){ backspaceOpeningDigit(); }
+        else if(k && k.length===1 && k>='0' && k<='9'){ appendOpeningDigit(k); }
+        setOpeningFromDigits();
+      });
+    });
+  }
+  if(openingInput){
+    openingInput.addEventListener('keydown', (e)=>{
+      const k = e.key;
+      if(k>='0' && k<='9'){ e.preventDefault(); appendOpeningDigit(k); setOpeningFromDigits(); }
+      else if(k==='Backspace'){ e.preventDefault(); backspaceOpeningDigit(); setOpeningFromDigits(); }
+      else if(k==='Delete'){ e.preventDefault(); openingDigits=''; setOpeningFromDigits(); }
+      else if(k==='Enter'){ e.preventDefault(); saveOpeningFloat(); }
+    });
+  }
+  const closingOverlay=document.getElementById('closingOverlay');
+  const closingCloseBtn=document.getElementById('closingCloseBtn');
+  const reconcileBtn=document.getElementById('reconcileBtn');
+  const reconConfirmBtn=document.getElementById('reconConfirmBtn');
+  const reconSummary=document.getElementById('reconSummary');
+  const reconResult=document.getElementById('reconResult');
+  const sumPayoutsInput=document.getElementById('sumPayoutsInput');
+  // Denomination +/- buttons
+  document.querySelectorAll('#denomsGrid .add-denom').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ const d=btn.getAttribute('data-denom'); const inp = document.querySelector(`#denomsGrid .denom-qty[data-denom="${CSS.escape(d)}"]`); if(!inp) return; const v = Number(inp.value||0); inp.value = String(v+1); });
+  });
+  document.querySelectorAll('#denomsGrid .sub-denom').forEach(btn=>{
+    btn.addEventListener('click', ()=>{ const d=btn.getAttribute('data-denom'); const inp = document.querySelector(`#denomsGrid .denom-qty[data-denom="${CSS.escape(d)}"]`); if(!inp) return; const v = Number(inp.value||0); inp.value = String(Math.max(0, v-1)); });
+  });
+  if(closingCloseBtn){ closingCloseBtn.addEventListener('click', ()=>{ if(closingOverlay) closingOverlay.style.display='none'; }); }
+  if(closingOverlay){ closingOverlay.addEventListener('click', e=>{ if(e.target===closingOverlay) closingOverlay.style.display='none'; }); }
+  if(reconcileBtn){ reconcileBtn.addEventListener('click', ()=>{ computeReconciliation(true); }); }
+  if(reconConfirmBtn){ reconConfirmBtn.addEventListener('click', printReconciliation); }
+  if(sumPayoutsInput){ sumPayoutsInput.addEventListener('input', computeReconciliation); }
+  // Closing menu overlay wiring
+  const closingMenuOverlay=document.getElementById('closingMenuOverlay');
+  const closingMenuCloseBtn=document.getElementById('closingMenuCloseBtn');
+  const closingMenuReprintBtn=document.getElementById('closingMenuReprintBtn');
+  if(closingMenuOverlay){ closingMenuOverlay.addEventListener('click', e=>{ if(e.target===closingMenuOverlay) closingMenuOverlay.style.display='none'; }); }
+  if(closingMenuCloseBtn){ closingMenuCloseBtn.addEventListener('click', ()=>{ if(closingMenuOverlay) closingMenuOverlay.style.display='none'; }); }
+  if(closingMenuReprintBtn){ closingMenuReprintBtn.addEventListener('click', ()=>{ try{ printReconciliation(); }catch(_){} }); }
 
   // Admin actions
   const adminInitDbBtn=document.getElementById('adminInitDbBtn');
@@ -441,12 +665,76 @@ function bindEvents(){
   const po=document.getElementById('productOverlay'), pc=document.getElementById('productCloseBtn'); if(po){ if(pc) pc.addEventListener('click',hideProductOverlay); po.addEventListener('click',e=>{ if(e.target===po) hideProductOverlay(); }); document.addEventListener('keydown',e=>{ if(e.key==='Escape') hideProductOverlay(); }); }
   // checkout overlay
   const co=document.getElementById('checkoutOverlay'), cc=document.getElementById('checkoutCloseBtn'), cs=document.getElementById('completeSaleBtn');
-  if(co){ if(cc) cc.addEventListener('click',hideCheckoutOverlay); co.addEventListener('click',e=>{ if(e.target===co) hideCheckoutOverlay(); }); document.querySelectorAll('.tender-btn').forEach(b=>b.addEventListener('click',()=>selectTender(b.getAttribute('data-tender')))); co.querySelectorAll('.denom-btn').forEach(b=>b.addEventListener('click',()=>{ const a=Number(b.getAttribute('data-amount'))||0; addCashAmount(denomSubtract?-a:a); })); const sub=document.getElementById('toggleSubtractBtn'); if(sub){ sub.addEventListener('click',()=>{ denomSubtract=!denomSubtract; sub.classList.toggle('active',denomSubtract); sub.textContent = denomSubtract ? '- Mode (On)' : '- Mode'; }); } if(cs) cs.addEventListener('click',completeSaleFromOverlay); }
+  if(co){
+    if(cc) cc.addEventListener('click',hideCheckoutOverlay);
+    co.addEventListener('click',e=>{ if(e.target===co) hideCheckoutOverlay(); });
+    document.querySelectorAll('.tender-btn').forEach(b=>b.addEventListener('click',()=>selectTender(b.getAttribute('data-tender'))));
+    co.querySelectorAll('.denom-btn').forEach(b=>b.addEventListener('click',()=>{ const a=Number(b.getAttribute('data-amount'))||0; addCashAmount(denomSubtract?-a:a); }));
+    const sub=document.getElementById('toggleSubtractBtn');
+    if(sub){ sub.addEventListener('click',()=>{ denomSubtract=!denomSubtract; sub.classList.toggle('active',denomSubtract); sub.textContent = denomSubtract ? '- Mode (On)' : '- Mode'; }); }
+    const applyCashBtn = document.getElementById('applyCashBtn');
+    if(applyCashBtn){ applyCashBtn.addEventListener('click', ()=>{ const cashField=document.getElementById('cashInputField'); const val = Number((cashField && cashField.value) || cashInput || 0) || 0; if(val>0){ appliedPayments.push({ mode_of_payment:'Cash', amount: val }); cashInput=''; if(cashField) cashField.value=''; updateCashSection(); } }); }
+    const applyOtherBtn = document.getElementById('applyOtherBtn');
+    if(applyOtherBtn){ applyOtherBtn.addEventListener('click', ()=>{ const amtEl=document.getElementById('otherAmountInput'); const val=Number(amtEl && amtEl.value) || 0; if(val>0){ const mode = (currentTender==='card')?'Card':'Other'; appliedPayments.push({ mode_of_payment: mode, amount: val }); if(amtEl) amtEl.value=''; updateCashSection(); } }); }
+    if(cs) cs.addEventListener('click',completeSaleFromOverlay);
+  }
+  // discount overlay wiring
+  const openDiscountBtn = document.getElementById('openDiscountBtn');
+  const discountOverlay = document.getElementById('discountOverlay');
+  const discountCloseBtn = document.getElementById('discountCloseBtn');
+  const discountItemsList = document.getElementById('discountItemsList');
+  const discountSelectAllBtn = document.getElementById('discountSelectAllBtn');
+  const discountDeselectAllBtn = document.getElementById('discountDeselectAllBtn');
+  const applyDiscountBtn = document.getElementById('applyDiscountBtn');
+  const discModeAmount = document.getElementById('discModeAmount');
+  const discModePercent = document.getElementById('discModePercent');
+  const discModeSet = document.getElementById('discModeSet');
+  const discountValueLabel = document.getElementById('discountValueLabel');
+  const discountKeypad = document.getElementById('discountKeypad');
+  if(openDiscountBtn){ openDiscountBtn.addEventListener('click', openDiscountOverlay); }
+  if(discountCloseBtn){ discountCloseBtn.addEventListener('click', commitDiscountsAndClose); }
+  if(discountOverlay){ discountOverlay.addEventListener('click', e=>{ if(e.target===discountOverlay) hideDiscountOverlay(); }); document.addEventListener('keydown', e=>{ if(e.key==='Escape') hideDiscountOverlay(); }); }
+  if(discountSelectAllBtn){ discountSelectAllBtn.addEventListener('click', ()=>{ discountItemsList?.querySelectorAll('input[type="checkbox"]').forEach(cb=>cb.checked=true); }); }
+  if(discountDeselectAllBtn){ discountDeselectAllBtn.addEventListener('click', ()=>{ discountItemsList?.querySelectorAll('input[type="checkbox"]').forEach(cb=>cb.checked=false); }); }
+  if(applyDiscountBtn){ applyDiscountBtn.addEventListener('click', applyDiscountsToSelected); }
+  const updateValueLabel=()=>{
+    if(!discountValueLabel) return;
+    if(discModeAmount && discModeAmount.checked){ discountValueLabel.textContent = 'Amount off'; return; }
+    if(discModePercent && discModePercent.checked){ discountValueLabel.textContent = 'Percent'; return; }
+    if(discModeSet && discModeSet.checked){ discountValueLabel.textContent = 'Set price'; return; }
+    discountValueLabel.textContent = 'Value';
+  };
+  [discModeAmount, discModePercent, discModeSet].forEach(el=>{ if(el) el.addEventListener('change', updateValueLabel); });
+  updateValueLabel();
+  if(discountKeypad){
+    const valEl = document.getElementById('discountValueInput');
+    discountKeypad.querySelectorAll('.key-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        if(!valEl) return;
+        const k = btn.getAttribute('data-k');
+        let cur = (valEl.value||'').toString();
+        if(k==='C') cur='';
+        else if(k==='B' || k==='?') cur = cur.slice(0,-1);
+        else if(k==='.' && cur.includes('.')){ /* ignore extra dot */ }
+        else cur += k;
+        valEl.value = cur;
+      });
+    });
+  }
   layoutCashPanel();
   window.addEventListener('resize', layoutCashPanel);
   // cash input typing and keypad toggle
   const cashInputField = document.getElementById('cashInputField');
-  if (cashInputField) cashInputField.addEventListener('input', ()=> { cashInput = (cashInputField.value || '').toString(); updateCashSection(); });
+  if (cashInputField) cashInputField.addEventListener('input', ()=> {
+    const raw = (cashInputField.value || '').toString();
+    const n = Number(raw);
+    if(Number.isFinite(n)){
+      const cents = Math.max(0, Math.round(n*100));
+      if(cashInputField.dataset) cashInputField.dataset.cents = String(cents);
+    }
+    cashInput = raw;
+    updateCashSection();
+  });
   const toggleKeypadBtn = document.getElementById('toggleKeypadBtn');
   const cashKeypad = document.getElementById('cashKeypad');
   const cashSection = document.getElementById('cashSection');
@@ -460,10 +748,21 @@ function bindEvents(){
     cashKeypad.querySelectorAll('.key-btn').forEach(btn => {
       btn.addEventListener('click', ()=>{
         const k = btn.getAttribute('data-k');
-        if (k === 'C') { cashInput = ''; }
-        else if (k === 'B') { cashInput = (cashInput || '').toString().slice(0,-1); }
-        else { cashInput = (cashInput || '').toString() + k; }
-        if (cashInputField) cashInputField.value = cashInput;
+        const target = document.getElementById('cashInputField');
+        const v = applyMoneyKey(target, k);
+        cashInput = v;
+        updateCashSection();
+      });
+    });
+  }
+  // Other/Card keypad wiring (right-to-left cents entry)
+  const otherKeypad = document.getElementById('otherKeypad');
+  if (otherKeypad){
+    otherKeypad.querySelectorAll('.key-btn').forEach(btn => {
+      btn.addEventListener('click', ()=>{
+        const k = btn.getAttribute('data-k');
+        const target = document.getElementById('otherAmountInput');
+        applyMoneyKey(target, k);
         updateCashSection();
       });
     });
@@ -487,10 +786,58 @@ function showMenu(){ const o=document.getElementById('menuOverlay'); const mv=do
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} }
-function loadSettings(){ try{ const raw=localStorage.getItem('pos_settings'); if(raw){ const s=JSON.parse(raw); settings = Object.assign({ till_number:'', dark_mode:false, auto_print:false }, s); } }catch(e){} }
+function loadSettings(){
+  try{
+    const raw=localStorage.getItem('pos_settings');
+    if(raw){
+      const s=JSON.parse(raw);
+      settings = Object.assign({
+        till_number:'',
+        branch_name:'',
+        dark_mode:false,
+        auto_print:false,
+        opening_float:0,
+        opening_date:'',
+        net_cash:0,
+        net_card:0,
+        net_voucher:0,
+        vat_rate:20,
+        vat_inclusive:true,
+        z_agg:{}
+      }, s);
+    }
+  }catch(e){}
+}
 function saveSettings(){ try{ localStorage.setItem('pos_settings', JSON.stringify(settings)); }catch(e){} }
-function populateSettingsForm(){ const till=document.getElementById('tillNumberInput'); const dark=document.getElementById('darkModeSwitch'); const auto=document.getElementById('autoPrintSwitch'); if(till) till.value = settings.till_number || ''; if(dark) dark.checked = !!settings.dark_mode; if(auto) auto.checked = !!settings.auto_print; }
-function saveSettingsFromForm(){ const till=document.getElementById('tillNumberInput'); const dark=document.getElementById('darkModeSwitch'); const auto=document.getElementById('autoPrintSwitch'); settings.till_number = till ? till.value.trim() : ''; settings.dark_mode = dark ? !!dark.checked : false; settings.auto_print = auto ? !!auto.checked : false; saveSettings(); }
+function populateSettingsForm(){
+  const till=document.getElementById('tillNumberInput');
+  const branch=document.getElementById('branchNameInput');
+  const vat=document.getElementById('vatRateInput');
+  const vatInc=document.getElementById('vatInclusiveSwitch');
+  const dark=document.getElementById('darkModeSwitch');
+  const auto=document.getElementById('autoPrintSwitch');
+  if(till) till.value = settings.till_number || '';
+  if(branch) branch.value = settings.branch_name || '';
+  if(vat) vat.value = (settings.vat_rate!=null?settings.vat_rate:20);
+  if(vatInc) vatInc.checked = !!settings.vat_inclusive;
+  if(dark) dark.checked = !!settings.dark_mode;
+  if(auto) auto.checked = !!settings.auto_print;
+}
+function saveSettingsFromForm(){
+  const till=document.getElementById('tillNumberInput');
+  const branch=document.getElementById('branchNameInput');
+  const vat=document.getElementById('vatRateInput');
+  const vatInc=document.getElementById('vatInclusiveSwitch');
+  const dark=document.getElementById('darkModeSwitch');
+  const auto=document.getElementById('autoPrintSwitch');
+  settings.till_number = till ? till.value.trim() : '';
+  settings.branch_name = branch ? branch.value.trim() : '';
+  settings.vat_rate = vat ? Math.max(0, Number(vat.value||0)) : 20;
+  settings.vat_inclusive = vatInc ? !!vatInc.checked : true;
+  settings.dark_mode = dark ? !!dark.checked : false;
+  settings.auto_print = auto ? !!auto.checked : false;
+  saveSettings();
+}
 function applySettings(){ document.body.classList.toggle('dark-mode', !!settings.dark_mode); }
 
 // Search overlay
@@ -512,7 +859,7 @@ async function openProduct(item){ currentProduct=item; const o=document.getEleme
 function hideProductOverlay(){ const o=document.getElementById('productOverlay'); if(o) o.style.display='none'; }
 function renderVariantMatrix(item,m){ const h=document.getElementById('matrixHead'), b=document.getElementById('matrixBody'); if(!h||!b) return; h.innerHTML=''; const tr=document.createElement('tr'); ['Colour','Width',...(m.sizes||[])].forEach(x=>{ const th=document.createElement('th'); th.textContent=x; tr.appendChild(th);}); h.appendChild(tr); b.innerHTML=''; (m.colors||[]).forEach(color=>{ (m.widths||[]).forEach(width=>{ const row=document.createElement('tr'); const tc=document.createElement('th'); tc.textContent=color; row.appendChild(tc); const tw=document.createElement('th'); tw.textContent=width; row.appendChild(tw); (m.sizes||[]).forEach(sz=>{ const key=`${color}|${width}|${sz}`; const qty=(m.stock&&m.stock[key])||0; const td=document.createElement('td'); td.className='variant-cell'+(qty<=0?' disabled':''); td.textContent=qty; if(qty>0){ const vrec=(m.variants&&m.variants[key])||null; td.addEventListener('click',()=>addVariantToCart(item,{color,width,size:sz,qtyAvailable:qty}, td, vrec)); } row.appendChild(td); }); b.appendChild(row); }); }); }
 function addVariantToCart(item, variant, cellEl, variantRec){
-  const name = `${item.item_name} - ${variant.color} - ${variant.width} - ${variant.size}`;
+  const name = displayNameFrom(item.item_name, { Color: variant.color, Width: variant.width, Size: variant.size });
   const code = (variantRec && (variantRec.item_id||variantRec.name)) || `${item.name}-${variant.color}-${variant.width}-${variant.size}`;
   const existing = cart.find(ci => ci.item_code === code && !ci.refund);
   const rate = (variantRec && variantRec.rate!=null) ? Number(variantRec.rate) : item.standard_rate;
@@ -525,8 +872,10 @@ function addVariantToCart(item, variant, cellEl, variantRec){
       item_name: name,
       qty: 1,
       rate,
+      original_rate: rate,
       amount: rate,
       image: item.image || null,
+      brand: item.brand || null,
       variant,
       refund: false
     });
@@ -543,6 +892,11 @@ function openCheckoutOverlay(){
   if(!o||!c) return;
   // reset tender selection; user must choose
   currentTender = '';
+  // fresh split payments state
+  appliedPayments = [];
+  vouchers = [];
+  cashInput = '';
+  const vbtn = document.getElementById('tenderVoucherBtn'); if(vbtn) vbtn.textContent = 'Voucher';
   document.querySelectorAll('.tender-btn').forEach(b=>b.classList.remove('active'));
   const cashSection = document.getElementById('cashSection');
   if (cashSection) { cashSection.style.display = 'none'; cashSection.classList.remove('show-keypad'); }
@@ -574,7 +928,10 @@ function renderCheckoutCart() {
     name.textContent = item.item_name;
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = `${item.qty} x ${money(item.rate)}${isRefund ? ' (refund)' : ''}`;
+    const base = (item.original_rate!=null)? Number(item.original_rate) : Number(item.rate);
+    const perDisc = Math.max(0, base - Number(item.rate||0));
+    const perPct = base>0 ? (perDisc/base*100) : 0;
+    meta.textContent = `${item.qty} x ${money(item.rate)}${isRefund ? ' (refund)' : ''}` + (perDisc>0 ? ` (was ${money(base)}, -${perPct.toFixed(1)}%)` : '');
     details.appendChild(name);
     details.appendChild(meta);
     const price = document.createElement('div');
@@ -588,23 +945,73 @@ function renderCheckoutCart() {
   updateCashSection();
 }
 
+function getCartTotal(){
+  return cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
+}
+function renderAppliedPayments(){
+  const list = document.getElementById('appliedPaymentsList');
+  const totalEl = document.getElementById('paymentsTotal');
+  if(list){
+    list.innerHTML = '';
+    appliedPayments.forEach((p, idx)=>{
+      const row = document.createElement('div');
+      row.className = 'd-flex justify-content-between align-items-center py-1 border-bottom';
+      const left = document.createElement('div');
+      left.textContent = `${p.mode_of_payment}${p.reference_no? ' ('+p.reference_no+')':''}`;
+      const right = document.createElement('div');
+      const amt = document.createElement('span');
+      amt.className = 'me-2';
+      amt.textContent = money(Number(p.amount||0));
+      const rm = document.createElement('button');
+      rm.className = 'btn btn-sm btn-outline-danger';
+      rm.textContent = 'Remove';
+      rm.addEventListener('click', ()=>{
+        if(p.mode_of_payment === 'Voucher' && p.reference_no){
+          const i = vouchers.findIndex(v=> (v.code===p.reference_no) && Number(v.amount||0)===Number(p.amount||0));
+          if(i>=0) vouchers.splice(i,1);
+        }
+        appliedPayments.splice(idx,1);
+        renderAppliedPayments();
+        updateCashSection();
+        const btn = document.getElementById('tenderVoucherBtn');
+        if(btn){ const count = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length; btn.textContent = count>0? `Voucher (${count})` : 'Voucher'; }
+      });
+      right.appendChild(amt);
+      right.appendChild(rm);
+      row.appendChild(left);
+      row.appendChild(right);
+      list.appendChild(row);
+    });
+  }
+  if(totalEl){
+    const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+    totalEl.textContent = paid>0 ? money(paid) : '';
+  }
+}
 function updateCashSection() {
   const due = document.getElementById('amountDue');
+  const tenderDueEl = document.getElementById('tenderDue');
   const cashEl = document.getElementById('amountCash');
+  const cashEnteredEl = document.getElementById('amountCashEntered');
   const changeEl = document.getElementById('amountChange');
   const cashBtn = document.getElementById('tenderCashBtn');
   const clear = document.getElementById('clearCashBtn');
-  const voucherList = Array.isArray(vouchers) ? vouchers : [];
-  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
-  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
-  const net = total - voucherTotal;
-  if (due) due.textContent = money(net);
+  const total = getCartTotal();
+  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+  const paidCash = appliedPayments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
+  const remaining = total - paid;
+  if (due) due.textContent = money(total);
+  if (tenderDueEl) tenderDueEl.textContent = money(remaining);
+  if (cashEl) cashEl.textContent = money(paidCash);
+  if (cashEnteredEl) cashEnteredEl.textContent = money(Number(cashInput||0));
+  const dueOther = document.getElementById('amountDueOther');
+  if (dueOther) dueOther.textContent = money(remaining);
+  const changeVal = Math.max(0, paid - total);
+  if (changeEl) changeEl.textContent = money(changeVal);
   const cashVal = Number(cashInput || 0);
-  if (cashEl) cashEl.textContent = money(cashVal);
-  const amountToCollect = net > 0 ? net : 0;
-  if (changeEl) changeEl.textContent = money(Math.max(0, cashVal - amountToCollect));
   if (cashBtn) cashBtn.textContent = `${money(cashVal)} Cash`;
-  if (clear) clear.onclick = () => { cashInput = ''; updateCashSection(); };
+  if (clear) clear.onclick = () => { cashInput = ''; const f=document.getElementById('cashInputField'); if(f){ f.value=''; if(f.dataset) f.dataset.cents='0'; } updateCashSection(); };
+  renderAppliedPayments();
 }
 
 // Select tender type (Cash / Card / Voucher / Other)
@@ -627,6 +1034,17 @@ function selectTender(t){
       }
     }
 
+    // Show/hide other (Card/Other) section
+    const otherSection = document.getElementById('otherSection');
+    const otherLabel = document.getElementById('otherLabel');
+    if (otherSection){
+      const isOther = (t === 'card' || t === 'other');
+      otherSection.style.display = isOther ? 'block' : 'none';
+      if (otherLabel){
+        otherLabel.textContent = (t === 'card') ? 'Card Amount' : 'Amount';
+      }
+    }
+
     // If voucher selected, open voucher overlay
     if (t === 'voucher') {
       openVoucherOverlay();
@@ -646,47 +1064,16 @@ async function completeSaleFromOverlay() {
   if (!customer) customer = getDefaultCustomerValue();
   if (cart.length === 0) { alert('Cart is empty'); return; }
 
-  const voucherList = Array.isArray(vouchers) ? vouchers : [];
-  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
-  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
-  const net = total - voucherTotal;
-  const amountToCollect = net > 0 ? net : 0;
-  const isRefund = net < 0;
+  const total = getCartTotal();
+  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+  const isRefund = total < 0;
+  if (!isRefund && paid + 1e-9 < total) { alert('Please apply full payment before completing the sale.'); return; }
 
-  let payments = [];
-  voucherList.forEach(v => {
-    payments.push({ mode_of_payment: 'Voucher', amount: Number(v.amount), reference_no: v.code });
-  });
-
-  let tender = currentTender;
-  if (!tender) {
-    if (isRefund) {
-      tender = 'cash';
-    } else {
-      alert('Please select a tender type.');
-      return;
-    }
-  }
-
-  if (tender === 'cash') {
-    const cashVal = Number(cashInput || 0);
-    if (amountToCollect > 0 && cashVal < amountToCollect) {
-      alert('Cash is less than remaining due');
-      return;
-    }
-    if (amountToCollect > 0) {
-      payments.push({ mode_of_payment: 'Cash', amount: amountToCollect });
-    }
-  } else if (tender === 'card') {
-    if (amountToCollect > 0) payments.push({ mode_of_payment: 'Card', amount: amountToCollect });
-  } else if (tender === 'other') {
-    if (amountToCollect > 0) payments.push({ mode_of_payment: 'Other', amount: amountToCollect });
-  } else if (tender === 'voucher') {
-    if (amountToCollect > 0) {
-      alert('Remaining due after vouchers. Select Cash or Card for the remainder.');
-      return;
-    }
-  }
+  const payments = appliedPayments.map(p=>({ mode_of_payment: p.mode_of_payment, amount: Number(p.amount||0), reference_no: p.reference_no || undefined }));
+  const voucherList = appliedPayments.filter(p=>p.mode_of_payment==='Voucher').map(p=>({ code: p.reference_no||'', amount: Number(p.amount||0) }));
+  const tender = (payments.length>1) ? 'split' : (payments[0]?.mode_of_payment||currentTender||'');
+  const cashGiven = payments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
+  const changeVal = Math.max(0, paid - Math.max(0,total));
 
   const payload = {
     customer,
@@ -697,13 +1084,12 @@ async function completeSaleFromOverlay() {
     })),
     payments,
     tender,
-    cash_given: tender === 'cash' ? Number(cashInput || 0) : null,
-    change: tender === 'cash'
-      ? (amountToCollect > 0 ? Number(cashInput || 0) - amountToCollect : Math.abs(net))
-      : 0,
-    total: net,
-    vouchers,
-    till_number: settings.till_number
+    cash_given: cashGiven,
+    change: isRefund ? Math.abs(total) : changeVal,
+    total: total,
+    vouchers: voucherList,
+    till_number: settings.till_number,
+    cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null
   };
 
   try {
@@ -713,12 +1099,38 @@ async function completeSaleFromOverlay() {
       body: JSON.stringify(payload)
     });
     const data = await response.json();
-    if (data.status === 'success') {
-      const cashVal = Number(cashInput || 0);
-      const changeVal = tender === 'cash'
-        ? (amountToCollect > 0 ? cashVal - amountToCollect : Math.abs(net))
-        : 0;
-      const info = { invoice: data.invoice_name || 'N/A', change: changeVal };
+  if (data.status === 'success') {
+    try {
+      if (!settings) settings = {};
+      if (settings.net_cash == null) settings.net_cash = 0;
+      if (settings.net_card == null) settings.net_card = 0;
+      if (settings.net_voucher == null) settings.net_voucher = 0;
+      (payments||[]).forEach(p=>{
+        const m = (p.mode_of_payment||'').toString();
+        if(/cash/i.test(m)) settings.net_cash += Number(p.amount||0);
+        else if(/card/i.test(m)) settings.net_card += Number(p.amount||0);
+        else if(/voucher/i.test(m)) settings.net_voucher += Number(p.amount||0);
+      });
+      saveSettings();
+    } catch(_){}
+    // Update Z-read aggregates for today
+    try{
+      const saleCtx = {
+        net: total,
+        payments: payments,
+        cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
+        lines: cart.map(i=>({
+          qty: i.qty,
+          rate: i.rate,
+          original_rate: (i.original_rate!=null?i.original_rate:i.rate),
+          refund: !!i.refund,
+          brand: i.brand || null,
+          item_group: i.item_group || null
+        }))
+      };
+      updateZAggWithSale(saleCtx);
+    }catch(_){ }
+    const info = { invoice: data.invoice_name || 'N/A', change: changeVal };
       lastReceiptInfo = info;
       showReceiptOverlay(info);
       if (settings.auto_print) {
@@ -810,11 +1222,10 @@ function openVoucherOverlay(){
   const amountInput = document.getElementById('voucherAmountInput');
   if (!overlay) { err('loginOverlay element missing'); return; }
   neutralizeForeignOverlays();
-  const voucherList = Array.isArray(vouchers) ? vouchers : [];
-  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
-  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
-  const net = total - voucherTotal;
-  const suggested = Math.max(0, net);
+  const total = getCartTotal();
+  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+  const remaining = Math.max(0, total - paid);
+  const suggested = remaining;
   overlay.style.display = 'flex';
   overlay.style.visibility = 'visible';
   overlay.style.opacity = '1';
@@ -840,15 +1251,223 @@ function submitVoucher(){
   const amount = Number(amountEl && amountEl.value) || 0;
   if (!code) return alert('Please enter or scan a voucher code.');
   if (amount <= 0) return alert('Please enter a voucher amount greater than 0.');
-  const voucherList = Array.isArray(vouchers) ? vouchers : [];
-  const total = cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
-  const voucherTotal = voucherList.reduce((sum, v) => sum + Number(v.amount || 0), 0);
-  const remaining = Math.max(0, total - voucherTotal);
-  const applied = Math.min(amount, remaining);
+  const total = getCartTotal();
+  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+  const remaining = Math.max(0, total - paid);
+  const applied = Math.min(amount, remaining>0?remaining:amount);
+  appliedPayments.push({ mode_of_payment: 'Voucher', amount: applied, reference_no: code });
   vouchers.push({ code, amount: applied });
-  if (btn) btn.textContent = `Voucher (${vouchers.length})`;
+  if (btn){ const count = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length; btn.textContent = count>0? `Voucher (${count})` : 'Voucher'; }
   hideVoucherOverlay();
   updateCashSection();
+}
+
+// Opening/Closing helpers
+function todayStr(){ const d=new Date(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${d.getFullYear()}-${m}-${day}`; }
+function showOpeningOverlay(){ const o=document.getElementById('openingOverlay'); const input=document.getElementById('openingFloatInput'); if(!o) return; neutralizeForeignOverlays();
+  const amt = Number(settings.opening_float||0); openingDigits = amt>0 ? String(Math.round(amt*100)) : '';
+  if(input){ input.value = (openingDigits? (parseInt(openingDigits,10)/100).toFixed(2) : '0.00'); setTimeout(()=>input.focus(),0); }
+  o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1'; }
+function digitsToAmountStr(d){ if(!d) return '0.00'; const n = Math.max(0, parseInt(d,10)||0); const v = (n/100).toFixed(2); return v; }
+function setOpeningFromDigits(){ const input=document.getElementById('openingFloatInput'); if(input){ input.value = digitsToAmountStr(openingDigits); } }
+function appendOpeningDigit(k){ openingDigits = (openingDigits||''); if(k>='0'&&k<='9'){ if(openingDigits.length>12) return; openingDigits = openingDigits + k; } }
+function backspaceOpeningDigit(){ openingDigits = (openingDigits||''); if(openingDigits.length>0) openingDigits = openingDigits.slice(0,-1); }
+function saveOpeningFloat(){ const input=document.getElementById('openingFloatInput'); let v=0; if(openingDigits && openingDigits.length){ v=(parseInt(openingDigits,10)||0)/100; } else { v=Number(input && input.value || 0) || 0; } settings.opening_float = isNaN(v)?0:v; settings.opening_date = todayStr(); settings.net_cash = 0; saveSettings(); openingDigits=''; const o=document.getElementById('openingOverlay'); if(o) o.style.display='none'; alert('Opening float saved for today.'); }
+function showClosingOverlay(){ const o=document.getElementById('closingOverlay'); if(!o) return; neutralizeForeignOverlays();
+  document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{ el.value=''; });
+  const sumBox=document.getElementById('reconSummary'); if(sumBox) sumBox.style.display='none';
+  const resBox=document.getElementById('reconResult'); if(resBox){ resBox.style.display='none'; resBox.textContent=''; }
+  const confirm=document.getElementById('reconConfirmBtn'); if(confirm) confirm.style.display='none';
+  o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1';
+}
+function computeReconciliation(reveal){
+  const payouts = Number(document.getElementById('sumPayoutsInput')?.value||0) || 0;
+  let counted = 0;
+  document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{
+    const qty = Number(el.value||0) || 0;
+    const denom = Number(el.getAttribute('data-denom')||0) || 0;
+    counted += qty * denom;
+  });
+  const opening = Number(settings.opening_float||0);
+  const cashSales = Number(settings.net_cash||0);
+  const cardSales = Number(settings.net_card||0);
+  const expected = opening + cashSales - payouts;
+  const variance = counted - expected;
+  const setText = (id, val)=>{ const el=document.getElementById(id); if(el) el.textContent = money(val); };
+  setText('sumOpening', opening);
+  setText('sumCashSales', cashSales);
+  setText('sumCardSales', cardSales);
+  setText('sumExpected', expected);
+  setText('sumCounted', counted);
+  setText('sumVariance', variance);
+  const sumBox=document.getElementById('reconSummary'); if(reveal && sumBox) sumBox.style.display='block';
+  const resBox=document.getElementById('reconResult');
+  const confirm=document.getElementById('reconConfirmBtn');
+  if(resBox){
+    resBox.style.display='block';
+    if(Math.abs(variance) < 0.005){
+      resBox.innerHTML = '<div class="text-success">Till matches expected. Well done.</div>';
+      if(confirm) confirm.style.display='block';
+    } else {
+      const dir = variance>0 ? 'over' : 'short';
+      const diff = Math.abs(variance);
+      const denoms = [50,20,10,5,2,1,0.5,0.2,0.1,0.05,0.02,0.01];
+      let remain = Math.round(diff*100)/100; const parts = [];
+      for(const d of denoms){ const c = Math.floor((remain + 1e-9) / d); if(c>0){ parts.push(`${c} ? ${money(d)}`); remain = Math.round((remain - c*d)*100)/100; } }
+      resBox.innerHTML = `<div class="text-danger">Till is ${dir} by <strong>${money(diff)}</strong>.</div>` + (parts.length? `<div class="small text-muted">Suggestions: ${parts.join(', ')}</div>` : '');
+      if(confirm) confirm.style.display='block';
+    }
+  }
+}
+function printReconciliation(){
+  try{
+    const opening = Number(settings.opening_float||0);
+    const cashSales = Number(settings.net_cash||0);
+    const cardSales = Number(settings.net_card||0);
+    const payouts = Number(document.getElementById('sumPayoutsInput')?.value||0) || 0;
+    const expected = opening + cashSales - payouts;
+    let counted = 0; const lines=[];
+    document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{ const qty = Number(el.value||0) || 0; const denom = Number(el.getAttribute('data-denom')||0) || 0; if(qty>0){ lines.push({denom, qty, total: qty*denom}); counted += qty*denom; } });
+    const variance = counted - expected;
+    const fmtLine = l => `${l.qty} ? ${money(l.denom)} = ${money(l.total)}`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Reconciliation</title><style>body{font-family:system-ui,Segoe UI,Arial;font-size:12px;padding:16px} h2{margin:0 0 8px 0} .muted{color:#666} .line{display:flex;justify-content:space-between} .mt{margin-top:8px}</style></head><body>
+      <h2>End of Day Reconciliation</h2>
+      <div class="line"><div>Date</div><div>${new Date().toLocaleString()}</div></div>
+      <div class="line"><div>Till</div><div>${settings.till_number||''}</div></div>
+      <hr>
+      <div class="line"><div>Opening Float</div><div>${money(opening)}</div></div>
+      <div class="line"><div>Cash Sales (net)</div><div>${money(cashSales)}</div></div>
+      <div class="line"><div>Card Sales (net)</div><div>${money(cardSales)}</div></div>
+      <div class="line"><div>Payouts</div><div>${money(payouts)}</div></div>
+      <div class="line"><div>Expected Till</div><div>${money(expected)}</div></div>
+      <div class="mt"><strong>Denominations</strong></div>
+      ${lines.map(fmtLine).join('<br>')}
+      <div class="mt line"><div>Counted</div><div>${money(counted)}</div></div>
+      <div class="line"><div>Variance</div><div>${money(variance)}</div></div>
+      <hr>
+      <div class="line"><div>Card to check</div><div>${money(cardSales)}</div></div>
+    </body></html>`;
+    const w = window.open('', 'recon-print'); w.document.write(html); w.document.close(); w.focus(); w.print(); setTimeout(()=>{ try{ w.close(); }catch(_){} }, 100);
+    const closingOverlayEl = document.getElementById('closingOverlay'); if(closingOverlayEl) closingOverlayEl.style.display='none';
+  }catch(e){ alert('Failed to print reconciliation'); }
+}
+
+// Discount overlay API
+let __discountWork = null;
+let __discountSummaryEl = null;
+function openDiscountOverlay(){
+  const o=document.getElementById('discountOverlay');
+  const list=document.getElementById('discountItemsList');
+  const val=document.getElementById('discountValueInput');
+  if(!o||!list) return;
+  neutralizeForeignOverlays();
+  // Build working copy from current cart
+  __discountWork = cart.map(it=>({
+    code: it.item_code,
+    name: it.item_name,
+    qty: Number(it.qty||0),
+    orig: Number(it.rate||0),
+    // if original_rate exists, use that as baseline for display/percent
+    base: Number((it.original_rate!=null?it.original_rate:it.rate)||0),
+    curr: Number(it.rate||0),
+    refund: !!it.refund
+  }));
+  renderDiscountItems();
+  if(val){ val.value=''; }
+  o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1';
+}
+function hideDiscountOverlay(){ const o=document.getElementById('discountOverlay'); if(o) o.style.display='none'; }
+function renderDiscountItems(){
+  const list=document.getElementById('discountItemsList');
+  if(!list) return;
+  list.innerHTML='';
+  // Ensure summary element exists
+  if(!__discountSummaryEl){
+    const rightCard = document.getElementById('discountValueInput')?.closest('.card');
+    if(rightCard){
+      __discountSummaryEl = document.createElement('div');
+      __discountSummaryEl.id = 'discountSummary';
+      __discountSummaryEl.className = 'mt-2 small text-muted';
+      rightCard.appendChild(__discountSummaryEl);
+    }
+  }
+  const rows = Array.isArray(__discountWork)?__discountWork:[];
+  rows.forEach((it, idx)=>{
+    const id = `disc_${idx}`;
+    const disabled = !!it.refund;
+    const row = document.createElement('label');
+    row.className = 'list-group-item d-flex justify-content-between align-items-center' + (disabled?' text-muted':'');
+    const base = Number(it.base||it.orig||0);
+    const curr = Number(it.curr||0);
+    const perAmt = Math.max(0, (base - curr) * it.qty);
+    const perPct = base>0 ? ((base - curr)/base*100) : 0;
+    row.innerHTML = `
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" id="${id}" data-code="${it.code}" ${disabled?'disabled checked':''}>
+        <span class="ms-2">${it.name}${disabled?' (refund)': ''}</span>
+      </div>
+      <div class="text-end small ${perAmt>0?'text-danger':'text-muted'}">
+        <div>${it.qty} ? ${money(curr)}${perAmt>0?` (was ${money(base)})`:''}</div>
+        ${perAmt>0?`<div class="fw-semibold">-${money(perAmt)} (${perPct.toFixed(1)}%)</div>`:`<div class="fw-semibold">${money(it.qty*curr)}</div>`}
+      </div>`;
+    list.appendChild(row);
+  });
+  // Summary totals
+  if(__discountSummaryEl){
+    const totBase = rows.filter(r=>!r.refund).reduce((s,r)=>s + r.qty * Number(r.base||r.orig||0), 0);
+    const totCurr = rows.filter(r=>!r.refund).reduce((s,r)=>s + r.qty * Number(r.curr||0), 0);
+    const discAmt = Math.max(0, totBase - totCurr);
+    const discPct = totBase>0 ? (discAmt/totBase*100) : 0;
+    __discountSummaryEl.innerHTML = discAmt>0
+      ? `Discount total: <span class="fw-semibold">-${money(discAmt)}</span> (${discPct.toFixed(1)}%)`
+      : 'No discounts applied';
+  }
+}
+function applyDiscountsToSelected(){
+  const list=document.getElementById('discountItemsList');
+  const modeAmt = document.getElementById('discModeAmount');
+  const modePct = document.getElementById('discModePercent');
+  const modeSet = document.getElementById('discModeSet');
+  const valEl = document.getElementById('discountValueInput');
+  if(!list||!valEl) return;
+  const raw = Number(valEl.value||0);
+  const mode = (modeSet&&modeSet.checked)?'set':(modePct&&modePct.checked)?'percent':'amount';
+  if(!(raw>0) && mode!=='set'){ alert('Enter a discount value greater than 0'); return; }
+  if(mode==='set' && !(raw>=0)){ alert('Enter a set price (>= 0)'); return; }
+  const chosen = Array.from(list.querySelectorAll('input.form-check-input[type="checkbox"]:checked'))
+    .map(cb=>cb.getAttribute('data-code'))
+    .filter(Boolean);
+  if(!chosen.length){ alert('Select at least one item'); return; }
+  (__discountWork||[]).forEach(it=>{
+    if(it.refund) return;
+    if(!chosen.includes(it.code)) return;
+    let newRate = Number(it.curr||0);
+    if(mode==='amount') newRate = Math.max(0, newRate - raw);
+    else if(mode==='percent') newRate = Math.max(0, newRate * (1 - (raw/100)));
+    else if(mode==='set') newRate = Math.max(0, raw);
+    it.curr = Number(newRate.toFixed(2));
+  });
+  renderDiscountItems();
+}
+
+function commitDiscountsAndClose(){
+  if(!Array.isArray(__discountWork)) { hideDiscountOverlay(); return; }
+  // Apply working rates to cart and persist original_rate if not recorded
+  const map = new Map(__discountWork.map(r=>[r.code, r]));
+  cart.forEach(it=>{
+    if(it.refund) return;
+    const w = map.get(it.item_code);
+    if(!w) return;
+    const newRate = Number(w.curr||it.rate||0);
+    if(it.original_rate==null) it.original_rate = Number(it.rate||0);
+    it.rate = newRate;
+    it.amount = it.rate * it.qty;
+  });
+  updateCartDisplay();
+  // If checkout overlay is open, refresh its contents and totals
+  renderCheckoutCart();
+  updateCashSection();
+  hideDiscountOverlay();
 }
 
 // Return from receipt overlay
@@ -928,7 +1547,7 @@ function renderReturnResult(sale){
     const rate = Number(ln.rate||0);
     const total = qty*rate;
     const row = make('label','list-group-item d-flex justify-content-between align-items-center');
-    row.innerHTML = `<div class=\"form-check\">\n        <input class=\"form-check-input\" type=\"checkbox\" id=\"${id}\" data-code=\"${ln.item_code}\" data-name=\"${ln.item_name}\" data-qty=\"${qty}\" data-rate=\"${rate}\" checked>\n        <span class=\"ms-2\">${ln.item_name}</span>\n      </div>\n      <div class=\"text-end small text-muted\">\n        <div>${qty} × ${money(rate)}</div>\n        <div class=\"fw-semibold\">${money(total)}</div>\n      </div>`;
+    row.innerHTML = `<div class=\"form-check\">\n        <input class=\"form-check-input\" type=\"checkbox\" id=\"${id}\" data-code=\"${ln.item_code}\" data-name=\"${ln.item_name}\" data-qty=\"${qty}\" data-rate=\"${rate}\" checked>\n        <span class=\"ms-2\">${ln.item_name}</span>\n      </div>\n      <div class=\"text-end small text-muted\">\n        <div>${qty} ? ${money(rate)}</div>\n        <div class=\"fw-semibold\">${money(total)}</div>\n      </div>`;
     list.appendChild(row);
   });
   wrap.appendChild(list);
@@ -1033,6 +1652,7 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
   const printBtn=document.getElementById('printReceiptBtn'); const doneBtn=document.getElementById('receiptDoneBtn'); const closeBtn=document.getElementById('receiptCloseBtn');
+  const returnBtn=document.getElementById('receiptReturnBtn');
   if(printBtn) printBtn.onclick = ()=>{
     const giftEl = document.getElementById('giftReceiptCheckbox');
     const wantsGift = giftEl && giftEl.checked;
@@ -1040,6 +1660,15 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
     document.body.classList.add('gift-receipt');
     window.print();
     setTimeout(()=>{ document.body.classList.remove('gift-receipt'); window.print(); }, 400);
+  };
+  if(returnBtn) returnBtn.onclick = ()=>{
+    try{
+      o.style.display='none';
+      openReturnOverlay();
+      const scan = document.getElementById('returnScanInput');
+      const invEl = document.getElementById('receiptInvoice');
+      if(invEl && scan){ scan.value = invEl.textContent || ''; findReturnSale(); }
+    }catch(_){ openReturnOverlay(); }
   };
   const finish = ()=>{ o.style.display='none'; hideCheckoutOverlay(); cart=[]; updateCartDisplay(); logoutToLogin(); };
   if(doneBtn) doneBtn.onclick = finish; if(closeBtn) closeBtn.onclick = finish;
@@ -1100,19 +1729,364 @@ async function enrichSaleItems(sale){
     const out = { ...sale, items: lines.map(ln=>{
       const vi = map[ln.item_code];
       if(!vi) return ln;
-      let display = vi.name || ln.item_name || ln.item_code;
-      const attrs = vi.attributes || {};
-      const parts = [];
-      if(attrs.Color) parts.push(attrs.Color);
-      if(attrs.Width) parts.push(attrs.Width);
-      if(attrs.Size) parts.push(attrs.Size);
-      if(parts.length){
-        const suffix = ' - ' + parts.join(' - ');
-        if(!display.includes(suffix)) display = display + suffix;
-      }
+      const display = displayNameFrom(vi.name || ln.item_name || ln.item_code, vi.attributes||{});
       return { ...ln, item_name: display };
     }) };
     return out;
   }catch(_){ return sale; }
 }
+
+
+
+
+
+function printZRead(){
+  try{
+    const opening = Number(settings.opening_float||0);
+    const cashSales = Number(settings.net_cash||0);
+    const cardSales = Number(settings.net_card||0);
+    const voucher = Number(settings.net_voucher||0);
+    const branch = settings.branch_name || '';
+    const today = todayStr();
+    const agg = (settings.z_agg && settings.z_agg[today]) || { totals:{}, discounts:{}, tenders:{}, perCashier:{}, perGroup:{} };
+    const totals = Object.assign({gross:0, net:0, vat_sales:0, vat_returns:0, returns_amount:0, sale_count:0, return_count:0, items_qty:0}, agg.totals||{});
+    const discounts = Object.assign({sales:0, returns:0}, agg.discounts||{});
+    const tenders = Object.assign({Cash:cashSales, Card:cardSales, Voucher:voucher, Other:0}, agg.tenders||{});
+    const perCashier = agg.perCashier || {};
+    const perGroup = agg.perGroup || {};
+
+    const listPairs = (obj) => Object.entries(obj)
+      .filter(([k,v])=>Math.abs(Number(v||0))>0.0001)
+      .map(([k,v])=>`<div class="line"><div>${k}</div><div>${money(v)}</div></div>`)
+      .join('');
+    const listPairsQty = (obj) => Object.entries(obj)
+      .filter(([k,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
+      .map(([k,v])=>`<div class="line"><div>${k} (qty ${Number(v.qty||0)})</div><div>${money(Number(v.amount||0))}</div></div>`)
+      .join('');
+
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Z-Read</title><style>
+      body{font-family:system-ui,Segoe UI,Arial;font-size:12px;padding:16px}
+      h2{margin:0 0 8px 0}
+      h3{margin:12px 0 6px 0;font-size:13px}
+      .line{display:flex;justify-content:space-between}
+      .muted{color:#666}
+      .mt{margin-top:8px}
+      </style></head><body>
+      <h2>Z-Read Summary</h2>
+      <div class="line"><div>Date</div><div>${new Date().toLocaleString()}</div></div>
+      <div class="line"><div>Branch</div><div>${branch}</div></div>
+      <div class="line"><div>Till</div><div>${settings.till_number||''}</div></div>
+      <hr>
+      <h3>Session Totals</h3>
+      <div class="line"><div>Opening Float</div><div>${money(opening)}</div></div>
+      <div class="line"><div>Cash (net)</div><div>${money(cashSales)}</div></div>
+      <div class="line"><div>Card (net)</div><div>${money(cardSales)}</div></div>
+      <div class="line"><div>Vouchers Redeemed</div><div>${money(voucher)}</div></div>
+      <div class="line"><div>Gross Sales</div><div>${money(totals.gross)}</div></div>
+      <div class="line"><div>Net Sales</div><div>${money(totals.net)}</div></div>
+      <div class="line"><div>VAT on Sales</div><div>${money(totals.vat_sales)}</div></div>
+      <div class="line"><div>VAT on Returns</div><div>${money(totals.vat_returns)}</div></div>
+      <div class="line"><div>Returns (amount)</div><div>${money(totals.returns_amount)}</div></div>
+      <div class="line"><div>Transactions</div><div>${totals.sale_count} sales, ${totals.return_count} returns</div></div>
+      <div class="line"><div>Items Sold (net)</div><div>${Number(totals.items_qty||0)}</div></div>
+      <div class="line"><div>Discounts on Sales</div><div>${money(discounts.sales)}</div></div>
+      <div class="line"><div>Discounts on Returns</div><div>${money(discounts.returns)}</div></div>
+
+      <h3 class="mt">By Tender</h3>
+      ${listPairs(tenders)}
+
+      <h3 class="mt">By Cashier</h3>
+      ${listPairs(perCashier) || '<div class="muted">No data</div>'}
+
+      <h3 class="mt">By Item Group</h3>
+      ${listPairsQty(perGroup) || '<div class="muted">No data</div>'}
+    </body></html>`;
+    const w = window.open('', 'zread-print');
+    w.document.write(html); w.document.close(); w.focus(); w.print(); setTimeout(()=>{ try{ w.close(); }catch(_){} }, 100);
+
+    // After printing, clear current session totals and push to Opening Float
+    try{
+      settings.opening_float = 0;
+      settings.opening_date = '';
+      settings.net_cash = 0;
+      settings.net_card = 0;
+      settings.net_voucher = 0;
+      // Reset today's aggregates
+      try{
+        const d=todayStr();
+        if(settings.z_agg && settings.z_agg[d]) delete settings.z_agg[d];
+      }catch(_){ }
+      saveSettings();
+    }catch(_){ }
+
+    // Close any cash/reconciliation overlays and show opening float
+    try{
+      const cashMenu = document.getElementById('cashMenuOverlay'); if(cashMenu) cashMenu.style.display='none';
+      const closingOverlay = document.getElementById('closingOverlay'); if(closingOverlay) closingOverlay.style.display='none';
+      const closingMenu = document.getElementById('closingMenuOverlay'); if(closingMenu) closingMenu.style.display='none';
+    }catch(_){ }
+    showOpeningOverlay();
+  }catch(e){ alert('Failed to print Z-read'); }
+}
+
+function printXRead(){
+  try{
+    const opening = Number(settings.opening_float||0);
+    const cashSales = Number(settings.net_cash||0);
+    const cardSales = Number(settings.net_card||0);
+    const voucher = Number(settings.net_voucher||0);
+    const branch = settings.branch_name || '';
+    const today = todayStr();
+    const agg = (settings.z_agg && settings.z_agg[today]) || { totals:{}, discounts:{}, tenders:{}, perCashier:{}, perGroup:{} };
+    const totals = Object.assign({gross:0, net:0, vat_sales:0, vat_returns:0, returns_amount:0, sale_count:0, return_count:0, items_qty:0}, agg.totals||{});
+    const discounts = Object.assign({sales:0, returns:0}, agg.discounts||{});
+    const tenders = Object.assign({Cash:cashSales, Card:cardSales, Voucher:voucher, Other:0}, agg.tenders||{});
+    const perCashier = agg.perCashier || {};
+    const perGroup = agg.perGroup || {};
+    const listPairs = (obj) => Object.entries(obj)
+      .filter(([k,v])=>Math.abs(Number(v||0))>0.0001)
+      .map(([k,v])=>`<div class="line"><div>${k}</div><div>${money(v)}</div></div>`)
+      .join('');
+    const listPairsQty = (obj) => Object.entries(obj)
+      .filter(([k,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
+      .map(([k,v])=>`<div class="line"><div>${k} (qty ${Number(v.qty||0)})</div><div>${money(Number(v.amount||0))}</div></div>`)
+      .join('');
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>X-Read</title><style>
+      body{font-family:system-ui,Segoe UI,Arial;font-size:12px;padding:16px}
+      h2{margin:0 0 8px 0}
+      h3{margin:12px 0 6px 0;font-size:13px}
+      .line{display:flex;justify-content:space-between}
+      .muted{color:#666}
+      .mt{margin-top:8px}
+      </style></head><body>
+      <h2>X-Read (Preview)</h2>
+      <div class="line"><div>Date</div><div>${new Date().toLocaleString()}</div></div>
+      <div class="line"><div>Branch</div><div>${branch}</div></div>
+      <div class="line"><div>Till</div><div>${settings.till_number||''}</div></div>
+      <hr>
+      <h3>Session Totals</h3>
+      <div class="line"><div>Opening Float</div><div>${money(opening)}</div></div>
+      <div class="line"><div>Cash (net)</div><div>${money(cashSales)}</div></div>
+      <div class="line"><div>Card (net)</div><div>${money(cardSales)}</div></div>
+      <div class="line"><div>Vouchers Redeemed</div><div>${money(voucher)}</div></div>
+      <div class="line"><div>Gross Sales</div><div>${money(totals.gross)}</div></div>
+      <div class="line"><div>Net Sales</div><div>${money(totals.net)}</div></div>
+      <div class="line"><div>VAT on Sales</div><div>${money(totals.vat_sales)}</div></div>
+      <div class="line"><div>VAT on Returns</div><div>${money(totals.vat_returns)}</div></div>
+      <div class="line"><div>Returns (amount)</div><div>${money(totals.returns_amount)}</div></div>
+      <div class="line"><div>Transactions</div><div>${totals.sale_count} sales, ${totals.return_count} returns</div></div>
+      <div class="line"><div>Items Sold (net)</div><div>${Number(totals.items_qty||0)}</div></div>
+      <div class="line"><div>Discounts on Sales</div><div>${money(discounts.sales)}</div></div>
+      <div class="line"><div>Discounts on Returns</div><div>${money(discounts.returns)}</div></div>
+
+      <h3 class="mt">By Tender</h3>
+      ${listPairs(tenders)}
+
+      <h3 class="mt">By Cashier</h3>
+      ${listPairs(perCashier) || '<div class="muted">No data</div>'}
+
+      <h3 class="mt">By Item Group</h3>
+      ${listPairsQty(perGroup) || '<div class="muted">No data</div>'}
+      <div class="mt muted">Use browser print (Ctrl+P) to print this preview.</div>
+    </body></html>`;
+    const w = window.open('', 'xread-view');
+    w.document.write(html); w.document.close(); w.focus();
+  }catch(e){ alert('Failed to open X-read'); }
+}
+
+// Invoices overlay
+function hideInvoicesOverlay(){ const o=document.getElementById("invoicesOverlay"); if(o){ o.style.display="none"; o.style.visibility="hidden"; o.style.opacity="0"; } }
+async function openInvoicesOverlay(){
+  const o=document.getElementById('invoicesOverlay');
+  if(!o) return;
+  const inp = document.getElementById('invoiceDateInput');
+  if(inp){
+    const today = todayStr();
+    if(!inp.value) inp.value = today;
+    await loadInvoicesForDate(inp.value || today);
+    inp.addEventListener('change', async ()=>{ await loadInvoicesForDate(inp.value); });
+  } else {
+    await loadInvoicesForDate(todayStr());
+  }
+  o.style.display='flex';
+  o.style.visibility='visible';
+  o.style.opacity='1';
+}
+async function loadInvoicesForDate(isoDate){
+  try{
+    const r = await fetch('/api/invoices?date=' + encodeURIComponent(isoDate||''));
+    const d = await r.json();
+    if(d && d.status==='success') renderInvoicesList(d.rows||[]);
+    else renderInvoicesList([]);
+  }catch(e){ err('failed to load invoices', e); renderInvoicesList([]); }
+}
+function renderInvoicesList(rows){
+  const body = document.getElementById('invoicesListBody');
+  if(!body) return;
+  body.innerHTML = '';
+  const mk = (tag, cls, txt)=>{ const el=document.createElement(tag); if(cls) el.className=cls; if(txt!=null) el.textContent=txt; return el; };
+  (rows||[]).forEach(rec=>{
+    const tr = document.createElement('tr');
+    // Time
+    let t = '';
+    try{
+      if(rec.created_at){
+        const dt = new Date(rec.created_at);
+        t = isNaN(dt.getTime()) ? ((rec.created_at.split('T')[1]||rec.created_at)) : dt.toLocaleTimeString();
+      }
+    }catch(_){ }
+    tr.appendChild(mk('td','', t));
+    tr.appendChild(mk('td','', rec.source||''));
+    tr.appendChild(mk('td','', rec.status||''));
+    tr.appendChild(mk('td','', rec.id||''));
+    tr.appendChild(mk('td','', rec.customer||''));
+    tr.appendChild(mk('td','', rec.cashier||''));
+    tr.appendChild(mk('td','text-end', money(rec.total||0)));
+    const tdAct = mk('td');
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm btn-primary';
+    btn.textContent = 'View';
+    btn.addEventListener('click', ()=>{ openInvoiceDetail(rec.id); });
+    tdAct.appendChild(btn);
+    tr.appendChild(tdAct);
+    body.appendChild(tr);
+  });
+}
+
+// Wire buttons after DOM load
+(function(){
+  window.addEventListener('DOMContentLoaded', ()=>{
+    const btn = document.getElementById('viewInvoicesBtn');
+    if(btn){ btn.addEventListener('click', ()=>{ const mv=document.getElementById('menuOverlay'); if(mv) mv.style.display='none'; openInvoicesOverlay(); }); }
+    const c = document.getElementById('invoicesCloseBtn');
+    if(c) c.addEventListener('click', hideInvoicesOverlay);
+  });
+})();
+(function(){
+  window.addEventListener('DOMContentLoaded', ()=>{
+    const btn = document.getElementById('viewInvoicesBtn');
+    const menu = document.getElementById('cashierMenu');
+    if(btn){ btn.addEventListener('click', e=>{ e.stopPropagation(); if(menu) menu.classList.remove('open'); openInvoicesOverlay(); }); }
+  });
+})();
+(function(){
+  window.addEventListener('DOMContentLoaded', ()=>{
+    const ov = document.getElementById('invoicesOverlay');
+    if(ov){ ov.addEventListener('click', (e)=>{ if(e.target===ov) hideInvoicesOverlay(); }); document.addEventListener('keydown', e=>{ if(e.key==='Escape') hideInvoicesOverlay(); }); }
+  });
+})();
+
+
+
+// Invoice detail overlay
+function hideInvoiceDetail(){ const o=document.getElementById("invoiceDetailOverlay"); if(o){ o.style.display='none'; o.style.visibility='hidden'; o.style.opacity='0'; } }
+async function openInvoiceDetail(invId){
+  try{
+    const r = await fetch('/api/invoices/' + encodeURIComponent(invId));
+    const d = await r.json();
+    let inv = (d && d.status==='success') ? d.invoice : null;
+    if(inv){
+      try{
+        const ids = Array.from(new Set((inv.items||[]).map(it=>it.item_code).filter(Boolean)));
+        if(ids.length){
+          const r2 = await fetch('/api/variant-info?ids=' + encodeURIComponent(ids.join(',')));
+          const dj = await r2.json();
+          if(dj && dj.status==='success'){
+            const vmap = dj.variants || {};
+            (inv.items||[]).forEach(it=>{
+              const v = vmap[it.item_code];
+              if(v && v.attributes){ it.attributes = Object.assign({}, it.attributes||{}, v.attributes); }
+              // Always derive a consistent display name for the line
+              const base = (v && v.name) || it.item_name || it.item_code;
+              it.display_name = displayNameFrom(base, (v && v.attributes) || it.attributes || {});
+              // Also set a fallback item_name if missing
+              if((!it.item_name || it.item_name==='') && v && v.name){ it.item_name = v.name; }
+            });
+          }
+        }
+      }catch(_){ }
+      renderInvoiceDetail(inv);
+      const o=document.getElementById('invoiceDetailOverlay');
+      if(o){ o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1'; }
+    }
+  }catch(e){ err('load invoice detail failed', e); }
+}
+function renderInvoiceDetail(inv){
+  try{
+    const title = document.getElementById('invDetailTitle');
+    const meta = document.getElementById('invDetailMeta');
+    const itemsBox = document.getElementById('invDetailItems');
+    const paysBox = document.getElementById('invDetailPayments');
+    const totalBox = document.getElementById('invDetailTotal');
+    if(title) title.textContent = `Receipt ${inv.id||''}`;
+    const when = inv.created_at ? new Date(inv.created_at) : null;
+    const whenTxt = when ? when.toLocaleString() : (inv.created_at||'');
+    if(meta) meta.textContent = `Time: ${whenTxt} | Customer: ${inv.customer||''} | Cashier: ${inv.cashier||''}`;
+    if(itemsBox){
+      itemsBox.innerHTML = '';
+      (inv.items||[]).forEach(it=>{
+        const row = document.createElement('div');
+        row.className = 'list-group-item';
+        const wrap = document.createElement('div');
+        wrap.style.display='grid';
+        wrap.style.gridTemplateColumns='48px 1fr auto';
+        wrap.style.gap='10px';
+        const img = document.createElement('div');
+        img.className='img';
+        img.style.width='48px'; img.style.height='48px'; img.style.borderRadius='8px'; img.style.background='#f1f3f5';
+        if(it.image){ img.style.backgroundImage = `url(${it.image})`; img.style.backgroundSize='cover'; img.style.backgroundPosition='center'; }
+        const name = document.createElement('div');
+        const attrs = it.attributes || {};
+        const colour = attrs.Colour || attrs.Color || '';
+        const size = attrs.Size || '';
+        const attrLine = (colour || size) ? ("Colour: " + (colour || '-') + "  Size: " + (size || '-')) : '';
+        const brandLine = (it.brand && it.brand!=="null" && it.brand!=='') ? ("<div class='text-muted small'>" + it.brand + "</div>") : '';
+        const disp = it.display_name || displayNameFrom(it.item_name||it.item_code||'', attrs);
+        name.innerHTML = "<div class='fw-semibold'>" + disp + "</div>" + brandLine + (attrLine?("<div class='small text-muted'>"+attrLine+"</div>"):'') + "<div class='small text-muted'>x" + (it.qty||1) + " @ " + money(it.rate||0) + "</div>";
+        const amt = document.createElement('div');
+        amt.className='fw-semibold';
+        const lineTotal = (Number(it.qty||0)*Number(it.rate||0)) || 0;
+        amt.textContent = money(lineTotal);
+        wrap.appendChild(img); wrap.appendChild(name); wrap.appendChild(amt);
+        row.appendChild(wrap);
+        itemsBox.appendChild(row);
+      });
+    }
+    if(paysBox){
+      paysBox.innerHTML='';
+      (inv.payments||[]).forEach(p=>{
+        const div = document.createElement('div');
+        div.textContent = `${p.method||p.mode_of_payment||'Payment'}: ${money(p.amount||0)}`;
+        paysBox.appendChild(div);
+      });
+    }
+    if(totalBox){ totalBox.textContent = money(inv.total||0); }
+    // Wire return button in this overlay
+    try{
+      const btn = document.getElementById('invDetailReturnBtn');
+      if(btn){
+        btn.onclick = ()=>{
+          const ov = document.getElementById('invoiceDetailOverlay'); if(ov) ov.style.display='none';
+          openReturnOverlay();
+          const scan = document.getElementById('returnScanInput');
+          if(scan){ scan.value = inv.id||''; findReturnSale(); }
+        };
+      }
+    }catch(_){ }
+  }catch(e){ err('renderInvoiceDetail failed', e); }
+}
+(function(){
+  window.addEventListener('DOMContentLoaded', ()=>{
+    const closeBtn = document.getElementById('invDetailCloseBtn');
+    const ov = document.getElementById('invoiceDetailOverlay');
+    if(closeBtn) closeBtn.addEventListener('click', hideInvoiceDetail);
+    if(ov){ ov.addEventListener('click', e=>{ if(e.target===ov) hideInvoiceDetail(); }); document.addEventListener('keydown', e=>{ if(e.key==='Escape') hideInvoiceDetail(); }); }
+  });
+})();
+
+
+
+
+
+
 
