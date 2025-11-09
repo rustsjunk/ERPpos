@@ -2085,6 +2085,96 @@ function renderInvoiceDetail(inv){
 })();
 
 
+// Global barcode-like scan catcher: collects fast key bursts and routes
+// them to the appropriate input/handler (works even if no field is focused).
+let __scanBuffer = "";
+let __scanLastTs = 0;
+
+function __isOverlayVisible(id){
+  const el = document.getElementById(id);
+  return !!(el && el.style && el.style.display !== 'none');
+}
+
+function handleGlobalScan(code){
+  try{
+    const value = String(code||'').trim();
+    if(!value) return;
+
+    // 1) If Return overlay is open, populate and search immediately
+    if(__isOverlayVisible('returnOverlay')){
+      const input = document.getElementById('returnScanInput');
+      if(input){
+        input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles:true }));
+        try{ findReturnSale(); }catch(_){ /* no-op */ }
+      }
+      return;
+    }
+
+    // 2) If Voucher overlay is open, populate its code field
+    if(__isOverlayVisible('voucherOverlay')){
+      const v = document.getElementById('voucherCodeInput');
+      if(v){
+        v.value = value;
+        v.dispatchEvent(new Event('input', { bubbles:true }));
+      }
+      return;
+    }
+
+    // 3) Default: route to the barcode input for adding items
+    const scanInput = document.getElementById('barcodeInput');
+    if(scanInput){
+      scanInput.value = value;
+      try{ processBarcodeScan(value); }catch(_){ /* ignore */ }
+      return;
+    }
+
+    // 4) Fallback: push into the small search field + open overlay
+    const search = document.getElementById('itemSearch');
+    if(search){
+      search.value = value;
+      search.dispatchEvent(new Event('input', { bubbles:true }));
+      try{ showSearchOverlay(value); }catch(_){ /* ignore */ }
+    }
+  }catch(e){ /* ignore scan errors */ }
+}
+
+// Install global keydown listener to capture scan-like bursts
+document.addEventListener('keydown', (e)=>{
+  try{
+    // Ignore modified keys
+    if(e.ctrlKey || e.altKey || e.metaKey) return;
+
+    // If the user is typing into a normal input, don't hijack Enter
+    const active = document.activeElement;
+    const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+    const allowedWhenFocused = new Set(['barcodeInput','returnScanInput','voucherCodeInput']);
+    const inEditableNonScan = isInput && (!active || !allowedWhenFocused.has(active.id));
+
+    const now = Date.now();
+    if(now - __scanLastTs > 100) __scanBuffer = ""; // gap too large => new scan
+    __scanLastTs = now;
+
+    if(e.key === 'Enter'){
+      if(__scanBuffer.length >= 5 && !inEditableNonScan){
+        handleGlobalScan(__scanBuffer);
+        __scanBuffer = "";
+        if(!isInput) e.preventDefault();
+      } else {
+        __scanBuffer = "";
+      }
+      return;
+    }
+
+    // Only collect printable characters when not typing in regular inputs
+    if(inEditableNonScan) return;
+    if(e.key && e.key.length === 1){
+      __scanBuffer += e.key;
+    }
+  }catch(_){ /* ignore */ }
+});
+
+
 
 
 
