@@ -408,6 +408,11 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
 .denom-row { display: none !important; }
 #toggleKeypadBtn, #cashInputField, #toggleSubtractBtn { display: none !important; }
 #cashKeypad { display: grid !important; }
+#otherKeypad { display: grid !important; }
+/* Reorder Card/Other keypad above input group */
+#otherSection { display: flex; flex-direction: column; }
+#otherKeypad { order: 2; }
+#otherSection .input-group { order: 3; }
 /* Keep tender actions visible */
 .tender-actions { margin-top: auto; }
 /* Prevent text overlapping modal edges */

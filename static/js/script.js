@@ -745,6 +745,8 @@ function bindEvents(){
       toggleKeypadBtn.textContent = willShow ? 'Hide Keypad' : 'Show Keypad';
       layoutCashPanel();
     });
+    // Normalize backspace label
+    try{ const bk = cashKeypad.querySelector('[data-k="B"]'); if(bk) bk.textContent = '⌫'; }catch(_){ }
     cashKeypad.querySelectorAll('.key-btn').forEach(btn => {
       btn.addEventListener('click', ()=>{
         const k = btn.getAttribute('data-k');
@@ -758,6 +760,7 @@ function bindEvents(){
   // Other/Card keypad wiring (right-to-left cents entry)
   const otherKeypad = document.getElementById('otherKeypad');
   if (otherKeypad){
+    try{ const bk = otherKeypad.querySelector('[data-k="B"]'); if(bk) bk.textContent = '⌫'; }catch(_){ }
     otherKeypad.querySelectorAll('.key-btn').forEach(btn => {
       btn.addEventListener('click', ()=>{
         const k = btn.getAttribute('data-k');
@@ -765,6 +768,19 @@ function bindEvents(){
         applyMoneyKey(target, k);
         updateCashSection();
       });
+    });
+  }
+  // Card: Full Amount button
+  const otherFullBtn = document.getElementById('otherFullAmountBtn');
+  if (otherFullBtn){
+    otherFullBtn.addEventListener('click', ()=>{
+      const amtEl = document.getElementById('otherAmountInput');
+      if(!amtEl) return;
+      const total = getCartTotal();
+      const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+      const remaining = Math.max(0, total - paid);
+      _setFromCents(amtEl, Math.round(remaining * 100));
+      updateCashSection();
     });
   }
   // voucher overlay
@@ -1037,11 +1053,15 @@ function selectTender(t){
     // Show/hide other (Card/Other) section
     const otherSection = document.getElementById('otherSection');
     const otherLabel = document.getElementById('otherLabel');
+    const otherFullBtn = document.getElementById('otherFullAmountBtn');
     if (otherSection){
       const isOther = (t === 'card' || t === 'other');
       otherSection.style.display = isOther ? 'block' : 'none';
       if (otherLabel){
         otherLabel.textContent = (t === 'card') ? 'Card Amount' : 'Amount';
+      }
+      if (otherFullBtn){
+        otherFullBtn.style.display = (t === 'card') ? 'inline-block' : 'none';
       }
     }
 

@@ -152,7 +152,7 @@
                                 <button class="key-btn" data-k="3">3</button>
                                 <button class="key-btn key-action" data-k="C">C</button>
                                 <button class="key-btn" data-k="0">0</button>
-                                <button class="key-btn key-action" data-k="B">âŒ«</button>
+                                <button class="key-btn key-action" data-k="B">&#x232B;</button>
                             </div>
                             <!-- <div class="denom-row mt-2 d-flex flex-wrap gap-2">
                                 <button class="btn btn-outline-secondary denom-btn" data-amount="100">Â£100</button>
@@ -198,9 +198,10 @@
                                 <div>Due</div>
                                 <div id="amountDueOther" class="fw-semibold"></div>
                             </div>
-                            <div class="input-group mt-2" style="max-width: 260px; margin-left:auto;">
+                            <div class="input-group mt-2" style="max-width: 420px; margin-left:auto;">
                                 <span id="otherLabel" class="input-group-text">Amount</span>
                                 <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
+                                <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining Amount</button>
                                 <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
                             </div>
                             <!-- Keypad for Card/Other tender input -->
@@ -216,7 +217,7 @@
                                 <button class="key-btn" data-k="3">3</button>
                                 <button class="key-btn key-action" data-k="C">C</button>
                                 <button class="key-btn" data-k="0">0</button>
-                                <button class="key-btn key-action" data-k="B">B</button>
+                                <button class="key-btn key-action" data-k="B">&#x232B;</button>
                             </div>
                         </div>
                         <div class="d-grid gap-2 tender-actions">
@@ -375,7 +376,7 @@
                 <button class="key-btn" data-k="3">3</button>
                 <button class="key-btn key-action" data-k="C">C</button>
                 <button class="key-btn" data-k="0">0</button>
-                <button class="key-btn key-action" data-k="B">Back</button>
+                <button class="key-btn key-action" data-k="B">&#x232B;</button>
             </div>
             <div class="d-flex justify-content-end gap-2">
                 <button id="openingSaveBtn" class="btn btn-primary">Save Opening</button>
@@ -679,6 +680,7 @@
     <script src="{{ url_for('static', filename='js/bootstrap_fix.js', v='1') }}"></script>
 </body>
 </html>
+
 
 
 
