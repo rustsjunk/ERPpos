@@ -1292,7 +1292,72 @@ function digitsToAmountStr(d){ if(!d) return '0.00'; const n = Math.max(0, parse
 function setOpeningFromDigits(){ const input=document.getElementById('openingFloatInput'); if(input){ input.value = digitsToAmountStr(openingDigits); } }
 function appendOpeningDigit(k){ openingDigits = (openingDigits||''); if(k>='0'&&k<='9'){ if(openingDigits.length>12) return; openingDigits = openingDigits + k; } }
 function backspaceOpeningDigit(){ openingDigits = (openingDigits||''); if(openingDigits.length>0) openingDigits = openingDigits.slice(0,-1); }
-function saveOpeningFloat(){ const input=document.getElementById('openingFloatInput'); let v=0; if(openingDigits && openingDigits.length){ v=(parseInt(openingDigits,10)||0)/100; } else { v=Number(input && input.value || 0) || 0; } settings.opening_float = isNaN(v)?0:v; settings.opening_date = todayStr(); settings.net_cash = 0; saveSettings(); openingDigits=''; const o=document.getElementById('openingOverlay'); if(o) o.style.display='none'; alert('Opening float saved for today.'); }
+// Print a float receipt (opening/closing)
+function printFloatReceipt(info) {
+  // Store current body classes to restore after print
+  const currentClasses = document.body.className;
+  // Add float-receipt class for CSS to show only float info
+  document.body.className = 'float-receipt';
+  
+  // Create receipt content
+  const receipt = document.createElement('div');
+  receipt.className = 'float-receipt-content';
+  receipt.innerHTML = `
+    <div class="receipt-header">
+      <h3>${info.type} Float</h3>
+      <div>Date: ${info.date}</div>
+      ${settings.till_number ? `<div>Till: ${settings.till_number}</div>` : ''}
+      ${currentCashier ? `<div>Cashier: ${currentCashier.name}</div>` : ''}
+    </div>
+    <div class="receipt-body">
+      <div class="amount-line">
+        <span>Amount:</span>
+        <span>${money(info.amount)}</span>
+      </div>
+    </div>
+    <div class="receipt-footer">
+      <div>${new Date().toLocaleString()}</div>
+    </div>
+  `;
+  
+  // Add to body temporarily
+  document.body.appendChild(receipt);
+  
+  // Print
+  window.print();
+  
+  // Cleanup
+  document.body.removeChild(receipt);
+  document.body.className = currentClasses;
+}
+
+// Save and print opening float
+function saveOpeningFloat(){
+  const input = document.getElementById('openingFloatInput');
+  let v = 0;
+  
+  if(openingDigits && openingDigits.length){
+    v = (parseInt(openingDigits,10)||0)/100;
+  } else {
+    v = Number(input && input.value || 0) || 0;
+  }
+  
+  settings.opening_float = isNaN(v) ? 0 : v;
+  settings.opening_date = todayStr();
+  settings.net_cash = 0;
+  saveSettings();
+  openingDigits = '';
+  
+  const o = document.getElementById('openingOverlay');
+  if(o) o.style.display = 'none';
+  
+  // Print float receipt
+  printFloatReceipt({
+    type: 'Opening',
+    date: settings.opening_date,
+    amount: settings.opening_float
+  });
+}
 function showClosingOverlay(){ const o=document.getElementById('closingOverlay'); if(!o) return; neutralizeForeignOverlays();
   document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{ el.value=''; });
   const sumBox=document.getElementById('reconSummary'); if(sumBox) sumBox.style.display='none';

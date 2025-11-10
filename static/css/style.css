@@ -598,3 +598,58 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
     padding: 0 12px;
   }
 }
+
+/* Float receipt print styles */
+.float-receipt-content {
+    display: none;
+    width: 78mm;
+    margin: 0 auto;
+    padding: 12px 16px;
+    font-family: 'Courier New', 'SFMono-Regular', Menlo, monospace;
+    font-size: 0.95rem;
+    line-height: 1.4;
+}
+.float-receipt-content .receipt-header {
+    text-align: center;
+    margin-bottom: 16px;
+}
+.float-receipt-content .receipt-header h3 {
+    margin: 0 0 6px 0;
+    font-size: 1.2rem;
+    letter-spacing: 0.04em;
+}
+.float-receipt-content .amount-line {
+    display: flex;
+    justify-content: space-between;
+    font-weight: 600;
+    font-size: 1.05rem;
+    padding: 10px 0;
+    border-top: 1px dashed #000;
+    border-bottom: 1px dashed #000;
+    margin: 12px 0;
+}
+.float-receipt-content .receipt-footer {
+    text-align: center;
+    margin-top: 10px;
+    font-size: 0.85rem;
+}
+
+@media print {
+    body.float-receipt {
+        background: #fff;
+    }
+    body.float-receipt * {
+        visibility: hidden;
+    }
+    body.float-receipt .float-receipt-content,
+    body.float-receipt .float-receipt-content * {
+        visibility: visible;
+    }
+    body.float-receipt .float-receipt-content {
+        display: block;
+        position: absolute;
+        top: 0;
+        left: 50%;
+        transform: translateX(-50%);
+    }
+}
