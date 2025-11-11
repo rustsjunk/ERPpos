@@ -9,6 +9,7 @@ from datetime import datetime
 from uuid import uuid4
 import threading
 import re
+from typing import Optional, Tuple
 
 # Load environment variables
 load_dotenv()
@@ -51,6 +52,23 @@ CASHIER_EXTRA_FIELDS = [
     if field.strip()
 ]
 CASHIER_FILTERS_RAW = (os.getenv('POS_CASHIER_FILTERS', '') or '').strip()
+
+# Attribute normalization map (ERP vs POS expectations)
+ATTRIBUTE_SYNONYMS = {
+    'colour': 'Color',
+    'color': 'Color',
+    'colors': 'Color',
+    'eu half sizes': 'Size',
+    'uk half sizes': 'Size',
+    'eu half size': 'Size',
+    'uk half size': 'Size',
+    'eu sizes': 'Size',
+    'uk sizes': 'Size',
+    'eu size': 'Size',
+    'uk size': 'Size',
+    'size': 'Size',
+    'width': 'Width',
+}
 
 # Optional QZ Tray certificate + signing key (PEM strings)
 QZ_CERTIFICATE = os.getenv('QZ_CERTIFICATE', '').strip() or None
@@ -128,7 +146,9 @@ def _db_items_payload(conn: sqlite3.Connection):
         attrs = {}
         if r["name"] in agg:
             for aname, values in agg[r["name"]].items():
-                attrs[aname] = " ".join(sorted(values))
+                disp = " ".join(sorted(values))
+                for key in _attribute_payload_keys(aname):
+                    attrs[key] = disp
         out.append({
             "name": r["name"],
             "item_code": r["item_code"],
@@ -201,20 +221,22 @@ def _initial_sync_items(conn: sqlite3.Connection):
         total += fetched
         if fetched < 500:
             break
-    if hasattr(ps, 'pull_variant_attributes_incremental'):
+    if hasattr(ps, 'pull_item_attributes'):
         try:
-            ps.pull_variant_attributes_incremental(conn, limit=500)
+            while True:
+                pulled = ps.pull_item_attributes(conn, limit=200)
+                if pulled < 200:
+                    break
         except Exception as exc:
-            # Try to detect an HTTP 403 (permission) error and log a clearer message
             err_code = getattr(exc, 'code', None)
             if not err_code:
                 resp = getattr(exc, 'response', None)
                 if resp is not None:
                     err_code = getattr(resp, 'status_code', None)
             if err_code == 403:
-                app.logger.warning("Variant attribute bootstrap skipped (HTTP 403). Grant read access on 'Variant Attribute' in ERPNext.")
+                app.logger.warning("Item attribute bootstrap skipped (HTTP 403). Grant read access on 'Item Attribute'.")
             else:
-                app.logger.warning("Variant attribute bootstrap failed: %s", exc)
+                app.logger.warning("Item attribute bootstrap failed: %s", exc)
     if SKIP_BARCODE_SYNC:
         app.logger.info("Skipping barcode bootstrap (POS_SKIP_BARCODE_SYNC=1)")
     elif hasattr(ps, 'pull_item_barcodes_incremental'):
@@ -430,7 +452,7 @@ def _erp_headers():
         'Content-Type': 'application/json'
     }
 
-def _absolute_image_url(path):
+def _absolute_image_url(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
     if isinstance(path, bytes):
@@ -454,6 +476,38 @@ def _absolute_image_url(path):
         return ERPNEXT_URL.rstrip('/') + normalized
     return normalized
 
+def _canonical_attr_name(name: Optional[str]) -> Optional[str]:
+    if name is None:
+        return None
+    text = str(name).strip()
+    if not text:
+        return None
+    key = text.lower()
+    return ATTRIBUTE_SYNONYMS.get(key) or text
+
+def _attribute_payload_keys(name: Optional[str]) -> Tuple[str, ...]:
+    canon = _canonical_attr_name(name)
+    original = (str(name).strip() if name else '') or None
+    keys = []
+    if canon:
+        keys.append(canon)
+    if original and original != canon:
+        keys.append(original)
+    if not keys and original:
+        keys.append(original)
+    return tuple(keys)
+
+def _variant_attrs_dict(conn: sqlite3.Connection, item_id: str) -> dict:
+    attrs = {}
+    if not item_id:
+        return attrs
+    try:
+        for ar in conn.execute("SELECT attr_name, value FROM variant_attributes WHERE item_id=?", (item_id,)):
+            for key in _attribute_payload_keys(ar['attr_name']):
+                attrs[key] = ar['value']
+    except Exception:
+        pass
+    return attrs
 
 def _error_message_from_response(resp: requests.Response) -> str:
     try:
@@ -914,12 +968,13 @@ def item_matrix():
             placeholders = ",".join(["?"]*len(ids))
             for ar in conn.execute(f"SELECT item_id, attr_name, value FROM variant_attributes WHERE item_id IN ({placeholders})", ids):
                 d = attr_map.setdefault(ar["item_id"], {})
-                d[ar["attr_name"]] = ar["value"]
+                for key in _attribute_payload_keys(ar["attr_name"]):
+                    d[key] = ar["value"]
     for r in rows:
         attrs = attr_map.get(r["item_id"], {})
-        color = attrs.get('Color', '-')
-        width = attrs.get('Width', 'Standard')
-        size = attrs.get('Size', '-')
+        color = attrs.get('Color') or attrs.get('Colour') or attrs.get('color') or '-'
+        width = attrs.get('Width') or attrs.get('width') or attrs.get('Fit') or 'Standard'
+        size = (attrs.get('Size') or attrs.get('EU half Sizes') or attrs.get('UK half Sizes') or '-')
         colors.add(color); widths.add(width); sizes.add(size)
         key = f"{color}|{width}|{size}"
         variants[key] = { 'item_id': r['item_id'], 'item_name': r['name'], 'rate': float(r['rate']) if r['rate'] is not None else None, 'qty': float(r['qty']) }
@@ -960,7 +1015,7 @@ def api_lookup_barcode():
         """,
         (code,)
     ).fetchone()
-    # If no barcode row found, fall back to matching the code against item_id/item_code/name
+    # If no barcode row found, fall back to matching the code against item_id/name
     if not row:
         try:
             row = conn.execute(
@@ -970,17 +1025,15 @@ def api_lookup_barcode():
                        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
                        COALESCE((SELECT qty FROM stock s WHERE s.item_id=i.item_id AND s.warehouse='Shop'), 0) AS qty
                 FROM items i
-                WHERE (i.item_id = ? OR i.item_code = ? OR i.name = ?) AND i.active=1
+                WHERE (i.item_id = ? OR i.name = ?) AND i.active=1
                 """,
-                (code, code, code)
+                (code, code)
             ).fetchone()
         except Exception:
             row = None
     if not row:
         return jsonify({'status': 'error', 'message': 'Not found'}), 404
-    attrs = {}
-    for ar in conn.execute("SELECT attr_name, value FROM variant_attributes WHERE item_id=?", (row['item_id'],)):
-        attrs[ar['attr_name']] = ar['value']
+    attrs = _variant_attrs_dict(conn, row['item_id'])
     out = {
         'item_id': row['item_id'],
         'name': row['name'],
@@ -1014,11 +1067,13 @@ def api_variant_info():
             'brand': r['brand'],
             'attributes': {}
         }
-    # Attach attributes
-    for ar in conn.execute(f"SELECT item_id, attr_name, value FROM variant_attributes WHERE item_id IN ({placeholders})", tuple(ids)):
-        if ar['item_id'] not in out:
-            out[ar['item_id']] = {'item_id': ar['item_id'], 'name': '', 'brand': None, 'attributes': {}}
-        out[ar['item_id']]['attributes'][ar['attr_name']] = ar['value']
+    # Attach attributes (normalized key names)
+    for vid in ids:
+        if vid not in out:
+            out[vid] = {'item_id': vid, 'name': '', 'brand': None, 'attributes': {}}
+        attrs = _variant_attrs_dict(conn, vid)
+        if attrs:
+            out[vid]['attributes'].update(attrs)
     return jsonify({'status': 'success', 'variants': out})
 
 

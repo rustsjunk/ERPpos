@@ -3,11 +3,13 @@
 # POS scaffold: SQLite + JSON queue + ERPNext sync + NDJSON backups
 import os, sys, json, uuid, sqlite3, time, argparse, datetime as dt
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set, Tuple
 import urllib.request
+import urllib.error
 
 DB_PATH = os.environ.get("POS_DB_PATH", "pos.db")
 BACKUP_DIR = os.environ.get("POS_BACKUP_DIR", "pos_backup")
+_BARCODE_PULL_FORBIDDEN = False
 
 # ERPNext REST
 ERP_BASE = os.environ.get("ERP_BASE")            # e.g., https://erp.yourdomain.com
@@ -56,6 +58,64 @@ def upsert_barcode(conn: sqlite3.Connection, barcode: str, item_id: str):
     ON CONFLICT(barcode) DO UPDATE SET item_id=excluded.item_id;
     """
     conn.execute(sql, (barcode, item_id))
+
+def ensure_barcode_placeholder(conn: sqlite3.Connection, barcode: Optional[str], item_id: str):
+    """Insert a fallback barcode (item_code) if none exists, without overwriting real barcodes."""
+    if not barcode or not item_id:
+        return
+    conn.execute("""
+        INSERT OR IGNORE INTO barcodes (barcode, item_id) VALUES (?,?)
+    """, (barcode, item_id))
+
+def ensure_attribute_definition(conn: sqlite3.Connection, attr_name: str, label: Optional[str] = None):
+    """Ensure the attribute definition row exists so FK constraints pass."""
+    if not attr_name:
+        return
+    lbl = label or attr_name
+    conn.execute("""
+        INSERT OR IGNORE INTO attributes (attr_name, label) VALUES (?,?)
+    """, (attr_name, lbl))
+
+def ensure_template_attribute(conn: sqlite3.Connection, template_id: str, attr_name: str, required: bool = True, sort_order: Optional[int] = None):
+    if not template_id or not attr_name:
+        return
+    req = 1 if required else 0
+    sort = sort_order if sort_order is not None else 0
+    conn.execute("""
+        INSERT INTO template_attributes (template_id, attr_name, required, sort_order)
+        VALUES (?,?,?,?)
+        ON CONFLICT(template_id, attr_name) DO UPDATE SET
+            required=excluded.required,
+            sort_order=COALESCE(NULLIF(excluded.sort_order,0), template_attributes.sort_order)
+    """, (template_id, attr_name, req, sort))
+
+def _hydrate_attribute_options(conn: sqlite3.Connection, docnames: List[str]):
+    """Fetch Item Attribute docs to populate attribute definitions + options."""
+    if not docnames:
+        return
+    seen = set()
+    for name in docnames:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            doc = _erp_get_doc("Item Attribute", name)
+        except Exception as exc:
+            print(f"Failed to fetch attribute {name}: {exc}", file=sys.stderr)
+            continue
+        attr_name = doc.get("attribute_name") or doc.get("name")
+        ensure_attribute_definition(conn, attr_name, doc.get("attribute_name") or doc.get("name"))
+        values = doc.get("item_attribute_values") or doc.get("values") or []
+        conn.execute("DELETE FROM attribute_options WHERE attr_name=?", (attr_name,))
+        for idx, val in enumerate(values):
+            option = val.get("attribute_value") or val.get("abbr") or val.get("value")
+            if option in (None, ""):
+                continue
+            sort = val.get("idx") or val.get("sort_order") or idx
+            conn.execute("""
+                INSERT OR REPLACE INTO attribute_options (attr_name, option, sort_order)
+                VALUES (?,?,?)
+            """, (attr_name, str(option), int(sort)))
 
 def upsert_stock(conn: sqlite3.Connection, item_id: str, qty: float, warehouse: str = "Shop"):
     sql = """
@@ -421,17 +481,37 @@ def _erp_get(url_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
+def _erp_get_doc(doctype: str, name: str) -> Dict[str, Any]:
+    """Fetch a single document (e.g., Item/SKU)"""
+    if not ERP_BASE:
+        return {}
+    import urllib.parse, urllib.request, json
+    base = ERP_BASE.rstrip("/")
+    path = "/api/resource/{}/{}/".format(
+        urllib.parse.quote(doctype, safe=""),
+        urllib.parse.quote(name, safe="")
+    )
+    url = base + path
+    req = urllib.request.Request(url, method="GET", headers={
+        "Accept": "application/json",
+        "Authorization": f"token {ERP_API_KEY}:{ERP_API_SECRET}" if ERP_API_KEY and ERP_API_SECRET else ""
+    })
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data.get("data") or data
+
 def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
     """Pull Item (templates + variants) changed since cursor. Upsert into items; barcodes handled separately."""
     last_mod, last_name = _cursor_get(conn, "Item")
     filters = []
     if last_mod:
         filters = [["modified",">=",last_mod]]
-    fields = ["name","item_name","brand","has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified"]
+    fields = ["name","item_code","item_name","brand","has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified"]
     params = {"fields": json.dumps(fields), "filters": json.dumps(filters), "limit_page_length": limit, "order_by": "modified asc, name asc"}
     data = _erp_get("/api/resource/Item", params).get("data", [])
     if not data:
         return 0
+    variants_to_hydrate: List[tuple[str, Optional[str]]] = []
     for d in data:
         parent = d.get("variant_of")
         price = d.get("standard_rate")
@@ -452,40 +532,107 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
             "modified_utc": d.get("modified")
         }
         upsert_item(conn, itm)
+        ensure_barcode_placeholder(conn, d.get("item_code") or d.get("name"), d["name"])
+        if parent:
+            variants_to_hydrate.append((d["name"], parent))
+    if variants_to_hydrate:
+        _hydrate_variant_attributes(conn, variants_to_hydrate)
     _cursor_set(conn, "Item", data[-1]["modified"], data[-1]["name"])
     conn.commit()
     return len(data)
 
-def pull_variant_attributes_incremental(conn: sqlite3.Connection, limit: int = 500):
-    """Fetch Item Variant Attribute rows to populate variant_attributes."""
-    last_mod, last_name = _cursor_get(conn, "Item Variant Attribute")
+def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tuple[str, Optional[str]]]):
+    """Fetch attributes for variants by hitting each Item doc (no child table permission required)."""
+    if not variant_rows:
+        return
+    seen: Set[str] = set()
+    touched_templates: Set[str] = set()
+    for item_id, parent_id in variant_rows:
+        if not item_id or item_id in seen:
+            continue
+        seen.add(item_id)
+        try:
+            doc = _erp_get_doc("Item", item_id)
+        except Exception as exc:
+            print(f"Failed to fetch attributes for {item_id}: {exc}", file=sys.stderr)
+            continue
+        attrs = doc.get("attributes") or doc.get("variant_attributes") or []
+        conn.execute("DELETE FROM variant_attributes WHERE item_id=?", (item_id,))
+        attr_map: Dict[str, str] = {}
+        for row in attrs:
+            attr_name = row.get("attribute") or row.get("attribute_name") or row.get("attribute_id")
+            value = row.get("attribute_value") or row.get("value")
+            if not attr_name or value in (None, ""):
+                continue
+            ensure_attribute_definition(conn, attr_name, row.get("attribute") or row.get("attribute_name"))
+            conn.execute("""
+                INSERT OR REPLACE INTO variant_attributes (item_id, attr_name, value)
+                VALUES (?,?,?)
+            """, (item_id, attr_name, str(value)))
+            attr_map[attr_name] = str(value)
+            if parent_id:
+                ensure_template_attribute(
+                    conn,
+                    parent_id,
+                    attr_name,
+                    bool(row.get("reqd", 1)),
+                    row.get("idx") or row.get("sort_order")
+                )
+        if attr_map:
+            conn.execute(
+                "UPDATE items SET attributes=? WHERE item_id=?",
+                (json.dumps(attr_map, separators=(',', ':')), item_id)
+            )
+        if parent_id:
+            touched_templates.add(parent_id)
+    if touched_templates:
+        _refresh_template_attribute_cache(conn, touched_templates)
+    conn.commit()
+
+def _refresh_template_attribute_cache(conn: sqlite3.Connection, template_ids: Set[str]):
+    """Store aggregated attribute values on template rows for quick inspection/UI."""
+    if not template_ids:
+        return
+    for template_id in template_ids:
+        rows = conn.execute("""
+            SELECT va.attr_name, va.value
+            FROM variant_attributes va
+            JOIN items v ON v.item_id = va.item_id
+            WHERE v.parent_id=? AND v.is_template=0
+        """, (template_id,)).fetchall()
+        if not rows:
+            continue
+        agg: Dict[str, Set[str]] = {}
+        for attr_name, value in rows:
+            agg.setdefault(attr_name, set()).add(value)
+        payload = {k: sorted(v) for k, v in agg.items()}
+        conn.execute(
+            "UPDATE items SET attributes=? WHERE item_id=?",
+            (json.dumps(payload, separators=(',', ':')), template_id)
+        )
+
+def pull_item_attributes(conn: sqlite3.Connection, limit: int = 200):
+    """Pull Item Attribute definitions + options."""
+    last_mod, last_name = _cursor_get(conn, "Item Attribute")
     filters = []
     if last_mod:
-        filters.append(["modified",">=",last_mod])
+        filters = [["modified",">=",last_mod]]
     params = {
-        "fields": json.dumps(["name","parent","attribute","attribute_value","modified"]),
+        "fields": json.dumps(["name","attribute_name","modified"]),
         "filters": json.dumps(filters),
         "limit_page_length": limit,
         "order_by": "modified asc, name asc"
     }
-    data = _erp_get("/api/resource/Item Variant Attribute", params).get("data", [])
+    data = _erp_get("/api/resource/Item Attribute", params).get("data", [])
     if not data:
         return 0
+    docnames: List[str] = []
     for row in data:
-        item_id = row.get("parent")
-        attr = row.get("attribute")
-        value = row.get("attribute_value")
-        if not item_id or not attr:
-            continue
-        if value:
-            conn.execute("""
-                INSERT INTO variant_attributes (item_id, attr_name, value)
-                VALUES (?,?,?)
-                ON CONFLICT(item_id, attr_name) DO UPDATE SET value=excluded.value
-            """, (item_id, attr, value))
-        else:
-            conn.execute("DELETE FROM variant_attributes WHERE item_id=? AND attr_name=?", (item_id, attr))
-    _cursor_set(conn, "Item Variant Attribute", data[-1]["modified"], data[-1]["name"])
+        attr_name = row.get("attribute_name") or row.get("name")
+        ensure_attribute_definition(conn, attr_name, row.get("attribute_name") or row.get("name"))
+        docnames.append(row.get("name") or attr_name)
+    _hydrate_attribute_options(conn, docnames)
+    _cursor_set(conn, "Item Attribute", data[-1]["modified"], data[-1]["name"])
     conn.commit()
     return len(data)
 
@@ -561,6 +708,9 @@ def pull_item_prices_incremental(conn: sqlite3.Connection, price_list: str, limi
 
 def pull_item_barcodes_incremental(conn: sqlite3.Connection, limit: int = 500):
     """Fetch barcodes from Item Barcode child table (v15)."""
+    global _BARCODE_PULL_FORBIDDEN
+    if _BARCODE_PULL_FORBIDDEN:
+        return 0
     last_mod, last_name = _cursor_get(conn, "Item Barcode")
     filters = []
     if last_mod:
@@ -571,7 +721,15 @@ def pull_item_barcodes_incremental(conn: sqlite3.Connection, limit: int = 500):
         "limit_page_length": limit,
         "order_by": "modified asc, name asc"
     }
-    data = _erp_get("/api/resource/Item Barcode", params).get("data", [])
+    try:
+        data = _erp_get("/api/resource/Item Barcode", params).get("data", [])
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            if not _BARCODE_PULL_FORBIDDEN:
+                print("Item Barcode pull forbidden (HTTP 403); skipping barcode sync", file=sys.stderr)
+            _BARCODE_PULL_FORBIDDEN = True
+            return 0
+        raise
     if not data:
         return 0
     for r in data:
@@ -585,14 +743,14 @@ def sync_cycle(conn: sqlite3.Connection, warehouse: str = "Shop", price_list: Op
     """Run a bounded number of incremental pulls (useful from a cron/loop)."""
     for _ in range(loops):
         n1 = pull_items_incremental(conn)
-        n_attr = pull_variant_attributes_incremental(conn)
+        n_attr_defs = pull_item_attributes(conn)
         n2 = pull_item_barcodes_incremental(conn)
         n3 = pull_bins_incremental(conn, warehouse=warehouse)
         n4 = 0
         if price_list:
             n4 = pull_item_prices_incremental(conn, price_list=price_list)
-        print(f"Pulled: Items={n1}, VariantAttrs={n_attr}, Barcodes={n2}, Bins={n3}, Prices={n4}")
-        if (n1 + n_attr + n2 + n3 + n4) == 0:
+        print(f"Pulled: Items={n1}, AttrDefs={n_attr_defs}, Barcodes={n2}, Bins={n3}, Prices={n4}")
+        if (n1 + n_attr_defs + n2 + n3 + n4) == 0:
             break
 
 

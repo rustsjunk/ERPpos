@@ -56,13 +56,20 @@ let appliedPayments = [];
 let cashEntryDirty = false;
 let otherEntryDirty = false;
 let barcodeFeedbackTimer = null;
+function pickAttribute(attrs, keys){
+  if(!attrs) return '';
+  for(const key of keys){
+    if(attrs[key]) return attrs[key];
+  }
+  return '';
+}
 function displayNameFrom(baseName, attrs){
   try{
     const a = attrs || {};
-    const parts = [];
-    if(a.Color) parts.push(a.Color);
-    if(a.Width) parts.push(a.Width);
-    if(a.Size) parts.push(a.Size);
+    const color = pickAttribute(a, ['Color','Colour','color','colour']);
+    const width = pickAttribute(a, ['Width','width','Fit']);
+    const size = pickAttribute(a, ['Size','EU half Sizes','UK half Sizes','eu half sizes','uk half sizes','size']);
+    const parts = [color, width, size].filter(Boolean);
     const suffix = parts.length ? (' - ' + parts.join(' - ')) : '';
     const name = String(baseName||'');
     if(suffix && name.endsWith(suffix)) return name;
@@ -2736,8 +2743,8 @@ function renderInvoiceDetail(inv){
         if(it.image){ img.style.backgroundImage = `url(${it.image})`; img.style.backgroundSize='cover'; img.style.backgroundPosition='center'; }
         const name = document.createElement('div');
         const attrs = it.attributes || {};
-        const colour = attrs.Colour || attrs.Color || '';
-        const size = attrs.Size || '';
+        const colour = pickAttribute(attrs, ['Colour','Color','colour','color']);
+        const size = pickAttribute(attrs, ['Size','EU half Sizes','UK half Sizes','size']);
         const attrLine = (colour || size) ? ("Colour: " + (colour || '-') + "  Size: " + (size || '-')) : '';
         const brandLine = (it.brand && it.brand!=="null" && it.brand!=='') ? ("<div class='text-muted small'>" + it.brand + "</div>") : '';
         const disp = it.display_name || displayNameFrom(it.item_name||it.item_code||'', attrs);
