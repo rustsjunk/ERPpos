@@ -39,6 +39,13 @@ Then run:
 python main.py
 ```
 
+With `USE_MOCK=0`, ERPpos now auto-initializes `POS_DB_PATH` using `schema.sql` the first time it runs and immediately pulls the ERPNext catalog plus active cashiers. Optional environment knobs:
+
+- `POS_WAREHOUSE` (default `Shop`) – warehouse to probe when seeding stock snapshots during the first sync.
+- `POS_BOOTSTRAP_ITEM_BATCHES` – number of 500-row item batches to pull on bootstrap (default `6`).
+- `POS_CASHIER_DOCTYPE`, `POS_CASHIER_CODE_FIELD`, `POS_CASHIER_NAME_FIELD`, `POS_CASHIER_ACTIVE_FIELD`, `POS_CASHIER_EXTRA_FIELDS`, `POS_CASHIER_FILTERS` – map your ERPNext cashier source (defaults assume a `Cashier` doctype with `code`, `cashier_name`, `enabled` fields). Extra fields land in the local `cashiers.meta` JSON blob.
+- `POS_SKIP_BARCODE_SYNC` – set to `1` if the ERP API user does not have permission to read the `Item Barcode` doctype; items will still load but barcode lookups rely on ERPNext.
+
 ## Project layout (important files)
 
 - `main.py` — launcher that starts the Flask app.

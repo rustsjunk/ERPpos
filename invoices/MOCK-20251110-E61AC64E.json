@@ -1,0 +1,23 @@
+{
+  "invoice_name": "MOCK-20251110-E61AC64E",
+  "created_at": "2025-11-10T11:20:52.481999",
+  "mode": "mock",
+  "customer": "CUST-WALKIN",
+  "items": [
+    {
+      "item_code": "SHOE-ATH-001",
+      "qty": -1,
+      "rate": 59.99
+    }
+  ],
+  "payments": [],
+  "tender": "card",
+  "cash_given": 0,
+  "change": 59.99,
+  "total": -59.99,
+  "vouchers": [],
+  "cashier": {
+    "code": "19",
+    "name": "Josh"
+  }
+}

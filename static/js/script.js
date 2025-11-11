@@ -53,6 +53,8 @@ let cashInput = '';
 let denomSubtract = false;
 let vouchers = [];
 let appliedPayments = [];
+let cashEntryDirty = false;
+let otherEntryDirty = false;
 let barcodeFeedbackTimer = null;
 function displayNameFrom(baseName, attrs){
   try{
@@ -69,6 +71,25 @@ function displayNameFrom(baseName, attrs){
 }
 // App settings and receipt state
 // App-wide persisted settings + simple Z-read aggregates
+const RECEIPT_DEFAULT_HEADER_LINES = [
+  'Russells of Omagh',
+  'Quality Footwear & Apparel'
+];
+const RECEIPT_DEFAULT_FOOTER_LINES = [
+  'Thank you for shopping with us!',
+  'Please retain your receipt for 30 days.'
+];
+const RECEIPT_DEFAULT_HEADER = RECEIPT_DEFAULT_HEADER_LINES.join('\n');
+const RECEIPT_DEFAULT_FOOTER = RECEIPT_DEFAULT_FOOTER_LINES.join('\n');
+const RECEIPT_LINE_WIDTH = 42;
+const RECEIPT_SERIAL_PORT = 'COM3';
+const RECEIPT_DRAWER_PULSE = { m: 0x00, on: 50, off: 250 };
+const POS_QZ_CONFIG = (typeof window !== 'undefined' && window.POS_QZ_CONFIG) ? window.POS_QZ_CONFIG : {};
+const QZ_CERTIFICATE_PEM = typeof (POS_QZ_CONFIG && POS_QZ_CONFIG.certificate) === 'string' ? POS_QZ_CONFIG.certificate.trim() : '';
+const QZ_PRIVATE_KEY_PEM = typeof (POS_QZ_CONFIG && POS_QZ_CONFIG.privateKey) === 'string' ? POS_QZ_CONFIG.privateKey.trim() : '';
+const LEGACY_QZ_CERT = (typeof window !== 'undefined' && typeof window.QZ_CERT === 'string') ? window.QZ_CERT.trim() : '';
+const LEGACY_QZ_SIGN = (typeof window !== 'undefined' && typeof window.QZ_SIGN === 'function') ? window.QZ_SIGN : null;
+let qzPrivateKeyPromise = null;
 let settings = {
   till_number: '',
   branch_name: '',
@@ -83,9 +104,417 @@ let settings = {
   vat_inclusive: true,
   // Aggregates keyed by ISO date (YYYY-MM-DD).
   // Minimal shape: { date: 'YYYY-MM-DD', totals:{...}, perCashier:{...}, perGroup:{...}, tenders:{...}, discounts:{...} }
-  z_agg: {}
+  z_agg: {},
+  receipt_header: RECEIPT_DEFAULT_HEADER,
+  receipt_footer: RECEIPT_DEFAULT_FOOTER,
+  open_drawer_after_print: true
 };
 let lastReceiptInfo = null;
+
+function hasBundledQZCertificate(){
+  return !!(QZ_CERTIFICATE_PEM || LEGACY_QZ_CERT);
+}
+function activeQZCertificate(){
+  return QZ_CERTIFICATE_PEM || LEGACY_QZ_CERT || '';
+}
+function hasBundledQZPrivateKey(){
+  return !!QZ_PRIVATE_KEY_PEM;
+}
+function pemToArrayBuffer(pem){
+  try{
+    if(!pem) return null;
+    const clean = pem.replace(/-----BEGIN [^-]+-----/g, '').replace(/-----END [^-]+-----/g, '').replace(/\s+/g, '');
+    if(!clean) return null;
+    const binary = atob(clean);
+    const len = binary.length;
+    const buffer = new ArrayBuffer(len);
+    const view = new Uint8Array(buffer);
+    for(let i=0; i<len; i++){
+      view[i] = binary.charCodeAt(i);
+    }
+    return buffer;
+  }catch(e){
+    err('Failed to convert PEM to ArrayBuffer', e);
+    return null;
+  }
+}
+function arrayBufferToBase64(buffer){
+  if(!buffer) return '';
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for(let i=0; i<bytes.length; i++){
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+async function importQZPrivateKey(pem){
+  try{
+    if(!pem || !window.crypto || !window.crypto.subtle) return null;
+    const keyBuffer = pemToArrayBuffer(pem);
+    if(!keyBuffer) return null;
+    return await crypto.subtle.importKey(
+      'pkcs8',
+      keyBuffer,
+      { name: 'RSASSA-PKCS1-v1_5', hash: { name: 'SHA-256' } },
+      false,
+      ['sign']
+    );
+  }catch(e){
+    err('Failed to import QZ private key', e);
+    return null;
+  }
+}
+function ensureQZPrivateKey(){
+  if(!hasBundledQZPrivateKey()) return Promise.resolve(null);
+  if(!qzPrivateKeyPromise){
+    qzPrivateKeyPromise = importQZPrivateKey(QZ_PRIVATE_KEY_PEM).catch(e=>{
+      err('QZ private key import error', e);
+      return null;
+    });
+  }
+  return qzPrivateKeyPromise;
+}
+function hasQZCertificateConfig(){
+  return activeQZCertificate().length > 0;
+}
+
+const receiptPrintAdapter = (()=>{
+  const ESC = '\x1B';
+  const GS = '\x1D';
+  let securityPrepared = false;
+  let connectPromise = null;
+
+  function isAvailable(){
+    return typeof window !== 'undefined' && window.qz && qz.serial;
+  }
+
+  function prepareSecurity(){
+    if(securityPrepared || !isAvailable() || !qz.security) return;
+    const cert = activeQZCertificate();
+    if(cert && typeof qz.security.setCertificatePromise === 'function'){
+      qz.security.setCertificatePromise((resolve)=>resolve(cert));
+    }
+    if(typeof qz.security.setSignaturePromise === 'function'){
+      if(hasBundledQZPrivateKey()){
+        qz.security.setSignaturePromise((toSign)=>{
+          return new Promise((resolve, reject)=>{
+            ensureQZPrivateKey().then(key=>{
+              if(!key) return null;
+              const encoder = new TextEncoder();
+              return crypto.subtle.sign(
+                { name: 'RSASSA-PKCS1-v1_5' },
+                key,
+                encoder.encode(toSign)
+              );
+            }).then(signature=>{
+              if(signature){
+                resolve(arrayBufferToBase64(signature));
+              }else{
+                resolve(null);
+              }
+            }).catch(errSig=>{
+              err('QZ signature error', errSig);
+              reject(errSig);
+            });
+          });
+        });
+      }else if(LEGACY_QZ_SIGN){
+        qz.security.setSignaturePromise((toSign)=>{
+          return new Promise((resolve, reject)=>{
+            try{
+              const maybePromise = LEGACY_QZ_SIGN(toSign);
+              if(maybePromise && typeof maybePromise.then === 'function'){
+                maybePromise.then(resolve).catch(reject);
+              }else{
+                resolve(maybePromise);
+              }
+            }catch(errLegacy){
+              reject(errLegacy);
+            }
+          });
+        });
+      }
+    }
+    securityPrepared = true;
+  }
+
+  async function ensureConnection(){
+    if(!isAvailable()) throw new Error('QZ Tray not available');
+    prepareSecurity();
+    if(qz.websocket.isActive()) return;
+    if(!connectPromise){
+      connectPromise = qz.websocket.connect().catch(errConnect=>{
+        connectPromise = null;
+        throw errConnect;
+      });
+    }
+    return connectPromise;
+  }
+
+  function parseLines(value){
+    if(typeof value !== 'string') return [];
+    return value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+  }
+
+  function wrapText(text){
+    const words = String(text||'').split(/\s+/);
+    const lines = [];
+    let current = '';
+    words.forEach(word=>{
+      if(!word) return;
+      const candidate = current ? `${current} ${word}` : word;
+      if(candidate.length > RECEIPT_LINE_WIDTH){
+        if(current) lines.push(current);
+        if(word.length > RECEIPT_LINE_WIDTH){
+          for(let i=0; i<word.length; i+=RECEIPT_LINE_WIDTH){
+            lines.push(word.slice(i, i+RECEIPT_LINE_WIDTH));
+          }
+          current = '';
+        }else{
+          current = word;
+        }
+      }else{
+        current = candidate;
+      }
+    });
+    if(current) lines.push(current);
+    return lines;
+  }
+
+  function centerText(text){
+    const t = String(text||'').trim();
+    if(!t) return '';
+    if(t.length >= RECEIPT_LINE_WIDTH) return t;
+    const pad = Math.max(0, Math.floor((RECEIPT_LINE_WIDTH - t.length)/2));
+    return ' '.repeat(pad) + t;
+  }
+
+  function padLine(left, right){
+    const l = String(left||'');
+    const r = String(right||'');
+    if(!r) return l;
+    if(l.length + r.length >= RECEIPT_LINE_WIDTH){
+      return `${l}\n${r}`;
+    }
+    const spaces = Math.max(1, RECEIPT_LINE_WIDTH - l.length - r.length);
+    return l + ' '.repeat(spaces) + r;
+  }
+
+  function moneyFmt(value){
+    const n = Number(value||0);
+    return (n<0?'-':'') + 'GBP ' + Math.abs(n).toFixed(2);
+  }
+
+  function headerLinesFrom(info){
+    const headerSrc = typeof info?.header === 'string'
+      ? info.header
+      : (typeof settings.receipt_header === 'string' ? settings.receipt_header : RECEIPT_DEFAULT_HEADER);
+    const lines = parseLines(headerSrc);
+    if(lines.length) return lines;
+    return RECEIPT_DEFAULT_HEADER_LINES.slice();
+  }
+
+  function footerLinesFrom(info){
+    const footerSrc = typeof info?.footer === 'string'
+      ? info.footer
+      : (typeof settings.receipt_footer === 'string' ? settings.receipt_footer : RECEIPT_DEFAULT_FOOTER);
+    const lines = parseLines(footerSrc);
+    if(lines.length) return lines;
+    return RECEIPT_DEFAULT_FOOTER_LINES.slice();
+  }
+
+  function buildReceipt(info, opts){
+    if(!info) throw new Error('Missing receipt payload');
+    const gift = !!opts.gift;
+    const wantsDrawerPulse = !!opts.openDrawer;
+    let buffer = ESC + '@';
+    const write = (line='')=>{ buffer += (line||'') + '\n'; };
+    const separator = ()=> write('-'.repeat(RECEIPT_LINE_WIDTH));
+    const headerLines = headerLinesFrom(info);
+    if(headerLines.length){
+      buffer += ESC + '!' + '\x30';
+      write(centerText(headerLines[0]));
+      buffer += ESC + '!' + '\x00';
+      headerLines.slice(1).forEach(line=> write(centerText(line)));
+    }
+    const meta = [];
+    const created = info.created ? new Date(info.created) : new Date();
+    meta.push(['Date', created.toLocaleString()]);
+    meta.push(['Invoice', info.invoice || '']);
+    if(info.branch || settings.branch_name){
+      meta.push(['Branch', info.branch || settings.branch_name || '']);
+    }
+    if(info.till || info.till_number || settings.till_number){
+      meta.push(['Till', info.till || info.till_number || settings.till_number || '']);
+    }
+    if(info.cashier && (info.cashier.code || info.cashier.name)){
+      const cashierLine = [info.cashier.code||'', info.cashier.name||''].filter(Boolean).join(' ').trim();
+      meta.push(['Cashier', cashierLine]);
+    }
+    if(info.customer){
+      meta.push(['Customer', info.customer]);
+    }
+    meta.forEach(([label, value])=>{ if(value) write(padLine(`${label}:`, value)); });
+    if(gift){
+      write(centerText('*** GIFT RECEIPT ***'));
+    }
+    separator();
+    const items = Array.isArray(info.items) ? info.items : [];
+    items.forEach(item=>{
+      const nameLines = wrapText(item.name || item.item_name || item.code || 'Item');
+      if(!nameLines.length) nameLines.push('Item');
+      nameLines.forEach((line, idx)=> write(idx ? `  ${line}` : line));
+      const qty = Number(item.qty||0);
+      const rate = Number(item.rate||0);
+      const lineTotal = Number(item.amount!=null ? item.amount : qty * rate * (item.refund ? -1 : 1));
+      if(gift){
+        write(`Qty: ${qty}${item.refund ? ' (refund)' : ''}`);
+      }else{
+        const qtyLabel = `${item.refund ? '-' : ''}${qty} x ${moneyFmt(rate)}`;
+        write(padLine(qtyLabel, moneyFmt(lineTotal)));
+      }
+    });
+    separator();
+    const vatRate = Number(info.vat_rate!=null ? info.vat_rate : (settings.vat_rate||0));
+    const vatInclusive = info.vat_inclusive!=null ? !!info.vat_inclusive : !!settings.vat_inclusive;
+    const gross = Number(info.total||0);
+    let net = gross;
+    let vatAmount = 0;
+    if(vatRate>0){
+      const ratio = vatRate/100;
+      if(vatInclusive){
+        net = gross / (1 + ratio);
+        vatAmount = gross - net;
+      }else{
+        net = gross;
+        vatAmount = gross * ratio;
+      }
+    }
+    if(!gift){
+      write(padLine('Net', moneyFmt(net)));
+      if(vatRate>0){
+        write(padLine(`VAT ${vatRate.toFixed(1)}%`, moneyFmt(vatAmount)));
+      }
+    }
+    write(padLine(info.isRefund ? 'Refund Total' : 'Total', moneyFmt(gross)));
+    if(!gift){
+      const paymentList = Array.isArray(info.payments)?info.payments:[];
+      paymentList.forEach(p=>{
+        if(!p) return;
+        const mode = p.mode || p.mode_of_payment || 'Payment';
+        write(padLine(mode, moneyFmt(p.amount||0)));
+        if(p.reference) write(`  Ref: ${p.reference}`);
+      });
+      if(info.change){
+        write(padLine(info.isRefund ? 'Refunded' : 'Change', moneyFmt(info.change)));
+      }
+      if(info.tender){
+        write(padLine('Tender', String(info.tender).toUpperCase()));
+      }
+    }
+    const footerLines = footerLinesFrom(info);
+    if(footerLines.length){
+      separator();
+      footerLines.forEach(line=> write(centerText(line)));
+    }
+    buffer += '\n\n';
+    buffer += GS + 'V' + '\x01';
+    if(wantsDrawerPulse){
+      buffer += ESC + 'p' + String.fromCharCode(
+        RECEIPT_DRAWER_PULSE.m,
+        RECEIPT_DRAWER_PULSE.on,
+        RECEIPT_DRAWER_PULSE.off
+      );
+    }
+    return buffer;
+  }
+
+  async function send(raw){
+    await ensureConnection();
+    try{ await qz.serial.closePort(RECEIPT_SERIAL_PORT); }catch(_){}
+    await qz.serial.openPort(RECEIPT_SERIAL_PORT);
+    try{
+      await qz.serial.sendData(RECEIPT_SERIAL_PORT, raw);
+    }finally{
+      try{ await qz.serial.closePort(RECEIPT_SERIAL_PORT); }catch(_){}
+    }
+  }
+
+  async function warmup(){
+    try{
+      await ensureConnection();
+    }catch(e){
+      warn('QZ Tray warmup failed', e);
+    }
+  }
+
+  return {
+    isAvailable,
+    warmup,
+    async print(info, opts = {}){
+      const payload = buildReceipt(info, opts);
+      await send(payload);
+    }
+  };
+})();
+
+if(typeof window !== 'undefined'){
+  window.addEventListener('DOMContentLoaded', ()=>{
+    try{
+      if(receiptPrintAdapter && typeof receiptPrintAdapter.warmup === 'function'){
+        receiptPrintAdapter.warmup();
+      }
+    }catch(e){
+      warn('Failed to warmup QZ Tray connection', e);
+    }
+  });
+}
+
+async function tryDirectReceiptPrint(info, opts = {}){
+  if(!info || !receiptPrintAdapter.isAvailable()) return false;
+  try{
+    await receiptPrintAdapter.print(info, opts);
+    return true;
+  }catch(e){
+    err('direct receipt print failed', e);
+    return false;
+  }
+}
+
+async function ensureReceiptPrinted(info, opts = {}){
+  return tryDirectReceiptPrint(info, opts);
+}
+
+function scheduleAutoReceiptPrint(info){
+  if(!info) return;
+  setTimeout(async ()=>{
+    const ok = await ensureReceiptPrinted(info, { gift:false, openDrawer: wantsDrawerPulseFor(info) });
+    if(!ok){
+      alert('Unable to print receipt via QZ Tray. Please ensure QZ Tray is running and connected.');
+    }
+  }, 75);
+}
+
+function handleReceiptPrintRequest(info, wantsGift){
+  const target = info || lastReceiptInfo;
+  if(!target){
+    return;
+  }
+  (async ()=>{
+    if(wantsGift){
+      const giftOk = await ensureReceiptPrinted(target, { gift:true, openDrawer:false });
+      const standardOk = await ensureReceiptPrinted(target, { gift:false, openDrawer: wantsDrawerPulseFor(target) });
+      if(!giftOk || !standardOk){
+        alert('Gift or standard receipt failed to print via QZ Tray. Please retry.');
+      }
+    }else{
+      const ok = await ensureReceiptPrinted(target, { gift:false, openDrawer: wantsDrawerPulseFor(target) });
+      if(!ok){
+        alert('Receipt failed to print via QZ Tray. Please retry.');
+      }
+    }
+  })().catch(e=> err('receipt print handler failed', e));
+}
 
 // Currency
 const CURRENCY = 'GBP';
@@ -108,6 +537,37 @@ function _setFromCents(el, cents){
     if(el) el.value = val;
     return val;
   }catch(_){ return '0.00'; }
+}
+function resetNumericInput(el, preset='0.00'){
+  if(!el) return;
+  el.value = preset;
+  if(el.dataset) el.dataset.cents = '0';
+}
+function resetCashEntry(){
+  cashInput = '';
+  cashEntryDirty = false;
+  resetNumericInput(document.getElementById('cashInputField'), '0.00');
+}
+function resetOtherEntry(){
+  otherEntryDirty = false;
+  resetNumericInput(document.getElementById('otherAmountInput'), '0.00');
+}
+function resetTenderInputs(){
+  resetCashEntry();
+  resetOtherEntry();
+}
+function resetDiscountValueInput(){
+  resetNumericInput(document.getElementById('discountValueInput'), '');
+}
+function addCashAmount(delta){
+  const field = document.getElementById('cashInputField');
+  if(!field) return;
+  const centsDelta = Math.round(Number(delta||0) * 100);
+  const next = Math.max(0, _getCents(field) + centsDelta);
+  const val = _setFromCents(field, next);
+  cashInput = val;
+  cashEntryDirty = true;
+  updateCashSection();
 }
 function applyMoneyKey(el, k){
   if(!el) return '0.00';
@@ -673,9 +1133,42 @@ function bindEvents(){
     const sub=document.getElementById('toggleSubtractBtn');
     if(sub){ sub.addEventListener('click',()=>{ denomSubtract=!denomSubtract; sub.classList.toggle('active',denomSubtract); sub.textContent = denomSubtract ? '- Mode (On)' : '- Mode'; }); }
     const applyCashBtn = document.getElementById('applyCashBtn');
-    if(applyCashBtn){ applyCashBtn.addEventListener('click', ()=>{ const cashField=document.getElementById('cashInputField'); const val = Number((cashField && cashField.value) || cashInput || 0) || 0; if(val>0){ appliedPayments.push({ mode_of_payment:'Cash', amount: val }); cashInput=''; if(cashField) cashField.value=''; updateCashSection(); } }); }
+    if(applyCashBtn){
+      applyCashBtn.addEventListener('click', ()=>{
+        if(getCartTotal() < 0){
+          alert('Refunds return money to the customer. No payments can be applied.');
+          resetCashEntry();
+          updateCashSection();
+          return;
+        }
+        const cashField=document.getElementById('cashInputField');
+        const val = Number((cashField && cashField.value) || cashInput || 0) || 0;
+        if(val>0){
+          appliedPayments.push({ mode_of_payment:'Cash', amount: val });
+          resetCashEntry();
+          updateCashSection();
+        }
+      });
+    }
     const applyOtherBtn = document.getElementById('applyOtherBtn');
-    if(applyOtherBtn){ applyOtherBtn.addEventListener('click', ()=>{ const amtEl=document.getElementById('otherAmountInput'); const val=Number(amtEl && amtEl.value) || 0; if(val>0){ const mode = (currentTender==='card')?'Card':'Other'; appliedPayments.push({ mode_of_payment: mode, amount: val }); if(amtEl) amtEl.value=''; updateCashSection(); } }); }
+    if(applyOtherBtn){
+      applyOtherBtn.addEventListener('click', ()=>{
+        if(getCartTotal() < 0){
+          alert('Refunds return money to the customer. No payments can be applied.');
+          resetOtherEntry();
+          updateCashSection();
+          return;
+        }
+        const amtEl=document.getElementById('otherAmountInput');
+        const val=Number(amtEl && amtEl.value) || 0;
+        if(val>0){
+          const mode = (currentTender==='card')?'Card':'Other';
+          appliedPayments.push({ mode_of_payment: mode, amount: val });
+          resetOtherEntry();
+          updateCashSection();
+        }
+      });
+    }
     if(cs) cs.addEventListener('click',completeSaleFromOverlay);
   }
   // discount overlay wiring
@@ -725,16 +1218,31 @@ function bindEvents(){
   window.addEventListener('resize', layoutCashPanel);
   // cash input typing and keypad toggle
   const cashInputField = document.getElementById('cashInputField');
-  if (cashInputField) cashInputField.addEventListener('input', ()=> {
-    const raw = (cashInputField.value || '').toString();
-    const n = Number(raw);
-    if(Number.isFinite(n)){
-      const cents = Math.max(0, Math.round(n*100));
-      if(cashInputField.dataset) cashInputField.dataset.cents = String(cents);
-    }
-    cashInput = raw;
-    updateCashSection();
-  });
+  if (cashInputField){
+    cashInputField.addEventListener('focus', ()=>{
+      cashInputField.select();
+    });
+    cashInputField.addEventListener('input', ()=> {
+      const raw = (cashInputField.value || '').toString();
+      const n = Number(raw);
+      if(Number.isFinite(n)){
+        const cents = Math.max(0, Math.round(n*100));
+        if(cashInputField.dataset) cashInputField.dataset.cents = String(cents);
+      }
+      cashInput = raw;
+      cashEntryDirty = true;
+      updateCashSection();
+    });
+  }
+  const otherAmountField = document.getElementById('otherAmountInput');
+  if (otherAmountField){
+    otherAmountField.addEventListener('focus', ()=>{
+      otherAmountField.select();
+    });
+    otherAmountField.addEventListener('input', ()=>{
+      otherEntryDirty = true;
+    });
+  }
   const toggleKeypadBtn = document.getElementById('toggleKeypadBtn');
   const cashKeypad = document.getElementById('cashKeypad');
   const cashSection = document.getElementById('cashSection');
@@ -753,6 +1261,7 @@ function bindEvents(){
         const target = document.getElementById('cashInputField');
         const v = applyMoneyKey(target, k);
         cashInput = v;
+        cashEntryDirty = true;
         updateCashSection();
       });
     });
@@ -766,6 +1275,7 @@ function bindEvents(){
         const k = btn.getAttribute('data-k');
         const target = document.getElementById('otherAmountInput');
         applyMoneyKey(target, k);
+        otherEntryDirty = true;
         updateCashSection();
       });
     });
@@ -780,6 +1290,7 @@ function bindEvents(){
       const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
       const remaining = Math.max(0, total - paid);
       _setFromCents(amtEl, Math.round(remaining * 100));
+      otherEntryDirty = true;
       updateCashSection();
     });
   }
@@ -819,12 +1330,27 @@ function loadSettings(){
         net_voucher:0,
         vat_rate:20,
         vat_inclusive:true,
-        z_agg:{}
+        z_agg:{},
+        receipt_header: RECEIPT_DEFAULT_HEADER,
+        receipt_footer: RECEIPT_DEFAULT_FOOTER,
+        open_drawer_after_print: true
       }, s);
     }
   }catch(e){}
 }
 function saveSettings(){ try{ localStorage.setItem('pos_settings', JSON.stringify(settings)); }catch(e){} }
+function normalizeMultilineInput(value){
+  if(typeof value !== 'string') return '';
+  return value.replace(/\r\n/g, '\n');
+}
+function shouldOpenDrawerAfterPrint(){
+  return !!settings.open_drawer_after_print;
+}
+function wantsDrawerPulseFor(info){
+  if(!info) return false;
+  if(info.isRefund) return false;
+  return shouldOpenDrawerAfterPrint();
+}
 function populateSettingsForm(){
   const till=document.getElementById('tillNumberInput');
   const branch=document.getElementById('branchNameInput');
@@ -832,12 +1358,18 @@ function populateSettingsForm(){
   const vatInc=document.getElementById('vatInclusiveSwitch');
   const dark=document.getElementById('darkModeSwitch');
   const auto=document.getElementById('autoPrintSwitch');
+  const drawer=document.getElementById('openDrawerSwitch');
+  const header=document.getElementById('receiptHeaderInput');
+  const footer=document.getElementById('receiptFooterInput');
   if(till) till.value = settings.till_number || '';
   if(branch) branch.value = settings.branch_name || '';
   if(vat) vat.value = (settings.vat_rate!=null?settings.vat_rate:20);
   if(vatInc) vatInc.checked = !!settings.vat_inclusive;
   if(dark) dark.checked = !!settings.dark_mode;
   if(auto) auto.checked = !!settings.auto_print;
+  if(drawer) drawer.checked = settings.open_drawer_after_print !== false;
+  if(header) header.value = (settings.receipt_header!=null?settings.receipt_header:RECEIPT_DEFAULT_HEADER);
+  if(footer) footer.value = (settings.receipt_footer!=null?settings.receipt_footer:'');
 }
 function saveSettingsFromForm(){
   const till=document.getElementById('tillNumberInput');
@@ -846,12 +1378,18 @@ function saveSettingsFromForm(){
   const vatInc=document.getElementById('vatInclusiveSwitch');
   const dark=document.getElementById('darkModeSwitch');
   const auto=document.getElementById('autoPrintSwitch');
+  const drawer=document.getElementById('openDrawerSwitch');
+  const header=document.getElementById('receiptHeaderInput');
+  const footer=document.getElementById('receiptFooterInput');
   settings.till_number = till ? till.value.trim() : '';
   settings.branch_name = branch ? branch.value.trim() : '';
   settings.vat_rate = vat ? Math.max(0, Number(vat.value||0)) : 20;
   settings.vat_inclusive = vatInc ? !!vatInc.checked : true;
   settings.dark_mode = dark ? !!dark.checked : false;
   settings.auto_print = auto ? !!auto.checked : false;
+  settings.open_drawer_after_print = drawer ? !!drawer.checked : true;
+  if(header) settings.receipt_header = normalizeMultilineInput(header.value||'');
+  if(footer) settings.receipt_footer = normalizeMultilineInput(footer.value||'');
   saveSettings();
 }
 function applySettings(){ document.body.classList.toggle('dark-mode', !!settings.dark_mode); }
@@ -911,7 +1449,7 @@ function openCheckoutOverlay(){
   // fresh split payments state
   appliedPayments = [];
   vouchers = [];
-  cashInput = '';
+  resetTenderInputs();
   const vbtn = document.getElementById('tenderVoucherBtn'); if(vbtn) vbtn.textContent = 'Voucher';
   document.querySelectorAll('.tender-btn').forEach(b=>b.classList.remove('active'));
   const cashSection = document.getElementById('cashSection');
@@ -924,7 +1462,11 @@ function openCheckoutOverlay(){
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
 }
-function hideCheckoutOverlay(){ const o=document.getElementById('checkoutOverlay'); if(o) o.style.display='none'; cashInput=''; }
+function hideCheckoutOverlay(){
+  const o=document.getElementById('checkoutOverlay');
+  if(o) o.style.display='none';
+  resetTenderInputs();
+}
 function renderCheckoutCart() {
   const el = document.getElementById('checkoutCart');
   if (!el) return;
@@ -989,6 +1531,7 @@ function renderAppliedPayments(){
         appliedPayments.splice(idx,1);
         renderAppliedPayments();
         updateCashSection();
+        resetTenderInputs();
         const btn = document.getElementById('tenderVoucherBtn');
         if(btn){ const count = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length; btn.textContent = count>0? `Voucher (${count})` : 'Voucher'; }
       });
@@ -1012,7 +1555,17 @@ function updateCashSection() {
   const changeEl = document.getElementById('amountChange');
   const cashBtn = document.getElementById('tenderCashBtn');
   const clear = document.getElementById('clearCashBtn');
+  const applyCashBtn = document.getElementById('applyCashBtn');
+  const applyOtherBtn = document.getElementById('applyOtherBtn');
+  const voucherBtn = document.getElementById('tenderVoucherBtn');
+  const otherFullBtn = document.getElementById('otherFullAmountBtn');
   const total = getCartTotal();
+  const isRefund = total < 0;
+  if (isRefund && (appliedPayments.length || vouchers.length)){
+    appliedPayments = [];
+    vouchers = [];
+    resetTenderInputs();
+  }
   const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
   const paidCash = appliedPayments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
   const remaining = total - paid;
@@ -1025,8 +1578,16 @@ function updateCashSection() {
   const changeVal = Math.max(0, paid - total);
   if (changeEl) changeEl.textContent = money(changeVal);
   const cashVal = Number(cashInput || 0);
-  if (cashBtn) cashBtn.textContent = `${money(cashVal)} Cash`;
-  if (clear) clear.onclick = () => { cashInput = ''; const f=document.getElementById('cashInputField'); if(f){ f.value=''; if(f.dataset) f.dataset.cents='0'; } updateCashSection(); };
+  if (cashBtn) cashBtn.textContent = isRefund ? 'Refund' : `${money(cashVal)} Cash`;
+  if (clear) clear.onclick = () => { resetCashEntry(); updateCashSection(); };
+  if (applyCashBtn) applyCashBtn.disabled = isRefund;
+  if (applyOtherBtn) applyOtherBtn.disabled = isRefund;
+  if (voucherBtn){
+    const voucherCount = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length;
+    voucherBtn.textContent = voucherCount>0 ? `Voucher (${voucherCount})` : 'Voucher';
+    voucherBtn.disabled = isRefund;
+  }
+  if (otherFullBtn) otherFullBtn.disabled = isRefund;
   renderAppliedPayments();
 }
 
@@ -1065,6 +1626,13 @@ function selectTender(t){
       }
     }
 
+    if (t === 'cash' && !cashEntryDirty) {
+      resetCashEntry();
+    }
+    if ((t === 'card' || t === 'other') && !otherEntryDirty) {
+      resetOtherEntry();
+    }
+
     // If voucher selected, open voucher overlay
     if (t === 'voucher') {
       openVoucherOverlay();
@@ -1085,14 +1653,20 @@ async function completeSaleFromOverlay() {
   if (cart.length === 0) { alert('Cart is empty'); return; }
 
   const total = getCartTotal();
-  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
   const isRefund = total < 0;
+  if (isRefund && (appliedPayments.length || vouchers.length)){
+    appliedPayments = [];
+    vouchers = [];
+    resetTenderInputs();
+    updateCashSection();
+  }
+  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
   if (!isRefund && paid + 1e-9 < total) { alert('Please apply full payment before completing the sale.'); return; }
 
-  const payments = appliedPayments.map(p=>({ mode_of_payment: p.mode_of_payment, amount: Number(p.amount||0), reference_no: p.reference_no || undefined }));
-  const voucherList = appliedPayments.filter(p=>p.mode_of_payment==='Voucher').map(p=>({ code: p.reference_no||'', amount: Number(p.amount||0) }));
-  const tender = (payments.length>1) ? 'split' : (payments[0]?.mode_of_payment||currentTender||'');
-  const cashGiven = payments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
+  const payments = isRefund ? [] : appliedPayments.map(p=>({ mode_of_payment: p.mode_of_payment, amount: Number(p.amount||0), reference_no: p.reference_no || undefined }));
+  const voucherList = isRefund ? [] : appliedPayments.filter(p=>p.mode_of_payment==='Voucher').map(p=>({ code: p.reference_no||'', amount: Number(p.amount||0) }));
+  const tender = isRefund ? 'refund' : ((payments.length>1) ? 'split' : (payments[0]?.mode_of_payment||currentTender||''));
+  const cashGiven = isRefund ? 0 : payments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
   const changeVal = Math.max(0, paid - Math.max(0,total));
 
   const payload = {
@@ -1150,11 +1724,50 @@ async function completeSaleFromOverlay() {
       };
       updateZAggWithSale(saleCtx);
     }catch(_){ }
-    const info = { invoice: data.invoice_name || 'N/A', change: changeVal };
-      lastReceiptInfo = info;
-      showReceiptOverlay(info);
+    const receiptItems = cart.map(item=>({
+      code: item.item_code,
+      name: item.item_name || item.item_code,
+      qty: item.qty,
+      rate: Number(item.rate||0),
+      refund: !!item.refund,
+      amount: Number(item.qty||0) * Number(item.rate||0) * (item.refund ? -1 : 1)
+    }));
+    const receiptPayments = payments.map(p=>({
+      mode: p.mode_of_payment,
+      mode_of_payment: p.mode_of_payment,
+      amount: Number(p.amount||0),
+      reference: p.reference_no || ''
+    }));
+    const info = {
+      invoice: data.invoice_name || 'N/A',
+      change: isRefund ? Math.abs(total) : changeVal,
+      total,
+      items: receiptItems,
+      payments: receiptPayments,
+      paid,
+      tender,
+      customer,
+      branch: settings.branch_name || '',
+      till: settings.till_number || '',
+      till_number: settings.till_number || '',
+      cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
+      created: new Date().toISOString(),
+      vouchers: voucherList,
+      isRefund,
+      vat_rate: settings.vat_rate,
+      vat_inclusive: settings.vat_inclusive,
+      header: settings.receipt_header,
+      footer: settings.receipt_footer,
+      cash_given: cashGiven
+    };
+    appliedPayments = [];
+    vouchers = [];
+    hideCheckoutOverlay();
+    updateCashSection();
+    lastReceiptInfo = info;
+    showReceiptOverlay(info);
       if (settings.auto_print) {
-        setTimeout(() => window.print(), 50);
+        scheduleAutoReceiptPrint(info);
       }
     } else {
       alert('Error: ' + data.message);
@@ -1443,7 +2056,6 @@ let __discountSummaryEl = null;
 function openDiscountOverlay(){
   const o=document.getElementById('discountOverlay');
   const list=document.getElementById('discountItemsList');
-  const val=document.getElementById('discountValueInput');
   if(!o||!list) return;
   neutralizeForeignOverlays();
   // Build working copy from current cart
@@ -1458,10 +2070,14 @@ function openDiscountOverlay(){
     refund: !!it.refund
   }));
   renderDiscountItems();
-  if(val){ val.value=''; }
+  resetDiscountValueInput();
   o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1';
 }
-function hideDiscountOverlay(){ const o=document.getElementById('discountOverlay'); if(o) o.style.display='none'; }
+function hideDiscountOverlay(){
+  const o=document.getElementById('discountOverlay');
+  if(o) o.style.display='none';
+  resetDiscountValueInput();
+}
 function renderDiscountItems(){
   const list=document.getElementById('discountItemsList');
   if(!list) return;
@@ -1533,6 +2149,7 @@ function applyDiscountsToSelected(){
     it.curr = Number(newRate.toFixed(2));
   });
   renderDiscountItems();
+  resetDiscountValueInput();
 }
 
 function commitDiscountsAndClose(){
@@ -1740,11 +2357,8 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   const returnBtn=document.getElementById('receiptReturnBtn');
   if(printBtn) printBtn.onclick = ()=>{
     const giftEl = document.getElementById('giftReceiptCheckbox');
-    const wantsGift = giftEl && giftEl.checked;
-    if(!wantsGift){ window.print(); return; }
-    document.body.classList.add('gift-receipt');
-    window.print();
-    setTimeout(()=>{ document.body.classList.remove('gift-receipt'); window.print(); }, 400);
+    const wantsGift = giftEl ? !!giftEl.checked : false;
+    handleReceiptPrintRequest(info, wantsGift);
   };
   if(returnBtn) returnBtn.onclick = ()=>{
     try{

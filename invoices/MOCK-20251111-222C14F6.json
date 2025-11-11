@@ -1,0 +1,28 @@
+{
+  "invoice_name": "MOCK-20251111-222C14F6",
+  "created_at": "2025-11-11T13:24:40.246637",
+  "mode": "mock",
+  "customer": "CUST-WALKIN",
+  "items": [
+    {
+      "item_code": "SHOE-KID-002",
+      "qty": 1,
+      "rate": 34.99
+    }
+  ],
+  "payments": [
+    {
+      "mode_of_payment": "Card",
+      "amount": 34.99
+    }
+  ],
+  "tender": "Card",
+  "cash_given": 0,
+  "change": 0,
+  "total": 34.99,
+  "vouchers": [],
+  "cashier": {
+    "code": "19",
+    "name": "Josh"
+  }
+}

@@ -409,7 +409,11 @@ def _erp_get(url_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     if not ERP_BASE:
         return {"data": []}
     import urllib.parse, urllib.request, json
-    url = ERP_BASE.rstrip("/") + url_path + "?" + urllib.parse.urlencode(params, doseq=True)
+    base = ERP_BASE.rstrip("/")
+    path = url_path or ""
+    # Encode spaces/control chars but keep path separators
+    path_encoded = urllib.parse.quote(path, safe="/:")
+    url = base + path_encoded + "?" + urllib.parse.urlencode(params, doseq=True)
     req = urllib.request.Request(url, method="GET", headers={
         "Accept": "application/json",
         "Authorization": f"token {ERP_API_KEY}:{ERP_API_SECRET}" if ERP_API_KEY and ERP_API_SECRET else ""
@@ -423,20 +427,25 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
     filters = []
     if last_mod:
         filters = [["modified",">=",last_mod]]
-    fields = ["name","item_name","brand","has_variants","variant_of","disabled","image","modified"]
+    fields = ["name","item_name","brand","has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified"]
     params = {"fields": json.dumps(fields), "filters": json.dumps(filters), "limit_page_length": limit, "order_by": "modified asc, name asc"}
     data = _erp_get("/api/resource/Item", params).get("data", [])
     if not data:
         return 0
     for d in data:
         parent = d.get("variant_of")
+        price = d.get("standard_rate")
+        try:
+            price = float(price) if price is not None else None
+        except Exception:
+            price = None
         itm = {
             "item_id": d["name"],
             "parent_id": parent,
             "name": d.get("item_name") or d["name"],
             "brand": d.get("brand"),
             "attributes": None,
-            "price": None,
+            "price": price,
             "image_url": d.get("image"),
             "is_template": 1 if (d.get("has_variants") and not parent) else 0,
             "active": 0 if d.get("disabled") else 1,
@@ -444,6 +453,39 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
         }
         upsert_item(conn, itm)
     _cursor_set(conn, "Item", data[-1]["modified"], data[-1]["name"])
+    conn.commit()
+    return len(data)
+
+def pull_variant_attributes_incremental(conn: sqlite3.Connection, limit: int = 500):
+    """Fetch Item Variant Attribute rows to populate variant_attributes."""
+    last_mod, last_name = _cursor_get(conn, "Item Variant Attribute")
+    filters = []
+    if last_mod:
+        filters.append(["modified",">=",last_mod])
+    params = {
+        "fields": json.dumps(["name","parent","attribute","attribute_value","modified"]),
+        "filters": json.dumps(filters),
+        "limit_page_length": limit,
+        "order_by": "modified asc, name asc"
+    }
+    data = _erp_get("/api/resource/Item Variant Attribute", params).get("data", [])
+    if not data:
+        return 0
+    for row in data:
+        item_id = row.get("parent")
+        attr = row.get("attribute")
+        value = row.get("attribute_value")
+        if not item_id or not attr:
+            continue
+        if value:
+            conn.execute("""
+                INSERT INTO variant_attributes (item_id, attr_name, value)
+                VALUES (?,?,?)
+                ON CONFLICT(item_id, attr_name) DO UPDATE SET value=excluded.value
+            """, (item_id, attr, value))
+        else:
+            conn.execute("DELETE FROM variant_attributes WHERE item_id=? AND attr_name=?", (item_id, attr))
+    _cursor_set(conn, "Item Variant Attribute", data[-1]["modified"], data[-1]["name"])
     conn.commit()
     return len(data)
 
@@ -543,13 +585,14 @@ def sync_cycle(conn: sqlite3.Connection, warehouse: str = "Shop", price_list: Op
     """Run a bounded number of incremental pulls (useful from a cron/loop)."""
     for _ in range(loops):
         n1 = pull_items_incremental(conn)
+        n_attr = pull_variant_attributes_incremental(conn)
         n2 = pull_item_barcodes_incremental(conn)
         n3 = pull_bins_incremental(conn, warehouse=warehouse)
         n4 = 0
         if price_list:
             n4 = pull_item_prices_incremental(conn, price_list=price_list)
-        print(f"Pulled: Items={n1}, Barcodes={n2}, Bins={n3}, Prices={n4}")
-        if (n1 + n2 + n3 + n4) == 0:
+        print(f"Pulled: Items={n1}, VariantAttrs={n_attr}, Barcodes={n2}, Bins={n3}, Prices={n4}")
+        if (n1 + n_attr + n2 + n3 + n4) == 0:
             break
 
 
