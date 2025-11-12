@@ -109,7 +109,7 @@
     top: 0;
     left: 0;
     right: 0;
-    height: 56px;
+    height: clamp(48px, 8vh, 64px);
     background: #ffffff;
     border-bottom: 1px solid #e9ecef;
     display: flex;
@@ -117,7 +117,10 @@
     z-index: 1030;
     overflow: visible; /* allow dropdowns such as the cashier menu to render above content */
 }
-body { padding-top: 64px; padding-bottom: 88px; }
+body { 
+    padding-top: clamp(52px, 10vh, 72px); 
+    padding-bottom: clamp(80px, 12vh, 100px); 
+}
 
 /* Global text size adjust for compatibility */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -339,20 +342,134 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 .search-modal {
     background: #ffffff;
     border-radius: 12px;
-    padding: 16px;
-    width: min(1100px, 92vw);
-    height: min(80vh, 820px);
+    padding: clamp(12px, 3vw, 16px);
+    width: clamp(320px, 92vw, 1100px);
+    height: clamp(400px, 85vh, 820px);
     overflow: hidden;
     box-shadow: 0 10px 30px rgba(0,0,0,0.2);
     display: flex;
     flex-direction: column;
 }
 .checkout-modal {
-    width: min(1200px, 95vw);
+    width: clamp(320px, 95vw, 1200px);
     overflow: visible;
 }
 /* Receipt modal tweaks */
-.receipt-modal { width: min(600px, 95vw); }
+.receipt-modal { width: clamp(280px, 95vw, 600px); }
+
+/* 4:3 aspect ratio and smaller screen optimizations (1080x768, 800x600, etc.) */
+@media (max-aspect-ratio: 16 / 12) {
+    /* Reduce padding and gaps on 4:3 screens */
+    .search-modal { padding: clamp(10px, 2vh, 14px); }
+    
+    /* Tighter grid layouts */
+    .keypad-grid.compact { gap: 6px; }
+    .keypad-grid.compact .key-btn { padding: 8px 0; font-size: 1rem; }
+    
+    /* Smaller button text in checkout */
+    .tender-grid { gap: 6px; }
+    .tender-grid .tender-btn {
+        min-height: clamp(40px, 8vh, 70px);
+        font-size: clamp(0.8rem, 1.4vw, 0.95rem);
+        padding: clamp(6px, 1vh, 10px);
+    }
+    
+    /* Denomination buttons more compact */
+    .denom-row .denom-btn {
+        min-width: clamp(60px, 10vw, 100px);
+        min-height: clamp(36px, 5vh, 50px);
+        padding: 8px 10px;
+        font-size: clamp(0.9rem, 1.8vw, 1rem);
+    }
+    
+    /* Checkout cart items more compact */
+    .checkout-item {
+        padding: 6px 0;
+        gap: 8px;
+    }
+    .checkout-item .img { width: 40px; height: 40px; }
+    
+    /* Tender panel text smaller */
+    .checkout-modal .tender-panel { font-size: 0.9rem; }
+    
+    /* Modal titles smaller */
+    .search-modal .h5 { font-size: clamp(1.1rem, 3vw, 1.5rem); }
+    
+    /* Applied payments list more compact */
+    .applied-payments-list { max-height: clamp(120px, 20vh, 300px); }
+    
+    /* EUR conversion section tighter */
+    #eurConversionSection {
+        padding: clamp(8px, 2vh, 12px) !important;
+        margin-top: 12px !important;
+    }
+    #eurConversionSection .d-flex {
+        gap: 8px;
+    }
+    #eurConversionSection small {
+        font-size: 0.8rem;
+    }
+    #eurConversionSection .btn {
+        padding: clamp(4px, 1vh, 6px) clamp(8px, 2vw, 10px);
+        font-size: clamp(0.75rem, 1.5vw, 0.85rem);
+    }
+    
+    /* Cart column on 4:3 aspect ratio */
+    .cart-column #cartCard {
+        position: static;
+        max-height: clamp(300px, 55vh, 500px);
+        width: 100%;
+        max-width: none;
+        margin: 0;
+    }
+    .cart-column #cartItems {
+        max-height: clamp(200px, 35vh, 380px);
+    }
+    
+    /* Prevent text overflow in topbar on small 4:3 screens */
+    .app-topbar .container-fluid > .d-flex:last-child { gap: 12px !important; }
+    .app-topbar .customer-select { min-width: clamp(150px, 20vw, 220px); }
+    .cashier-badge { font-size: clamp(0.8rem, 1.5vw, 0.9rem); }
+    
+    /* Cash section input more responsive */
+    #cashInputField { max-width: clamp(100px, 25vw, 160px) !important; }
+    
+    /* Discount panel more compact */
+    .discount-panel .input-group { max-width: 100% !important; }
+    
+    /* Closing/denomination grid: 2 columns on 4:3 instead of 3 */
+    #denomsGrid {
+        grid-template-columns: repeat(2, 1fr) !important;
+    }
+    
+    /* Inventory grid: single column on mobile-like 4:3 */
+    #itemsGrid {
+        grid-template-columns: repeat(auto-fill, minmax(clamp(120px, 30vw, 200px), 1fr)) !important;
+    }
+}
+
+/* Very small 4:3 screens (800x600 and below) */
+@media (max-width: 800px) and (max-aspect-ratio: 16 / 12) {
+    .search-modal { padding: 10px; }
+    .keypad-grid.compact { gap: 4px; }
+    .keypad-grid.compact .key-btn { padding: 6px 0; font-size: 0.95rem; }
+    
+    /* Stack 2-column layouts to 1 column */
+    .checkout-modal .row { flex-direction: column; }
+    .checkout-modal .col-lg-7,
+    .checkout-modal .col-lg-5 { max-width: 100%; }
+    
+    /* Make all inputs full width */
+    #cashInputField { max-width: 100% !important; }
+    #otherAmountInput { max-width: 100% !important; }
+    
+    /* Hide unnecessary labels to save space */
+    #barcodeInput { max-width: clamp(150px, 60vw, 240px) !important; }
+    
+    /* Closing/reconciliation: 2-column max */
+    #denomsGrid { grid-template-columns: repeat(2, 1fr) !important; }
+}
+
 /* Basic dark mode overrides */
 body.dark-mode { background: #121212; color: #e9ecef; }
 body.dark-mode .card,
@@ -365,7 +482,33 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
 /* Ensure right column stretches to modal height */
 .checkout-modal .row { min-height: 0; }
 .checkout-modal .col-lg-5 { display: flex; flex-direction: column; }
-.checkout-modal .tender-panel { flex: 1; display: flex; flex-direction: column; font-size: 0.95rem; }
+.checkout-modal .tender-panel { 
+    flex: 1; 
+    display: flex; 
+    flex-direction: column; 
+    font-size: clamp(0.9rem, 2vw, 1rem);
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Responsive layout for 4:3 aspect ratio */
+@media (max-aspect-ratio: 13 / 10) {
+    .checkout-modal .col-lg-7,
+    .checkout-modal .col-lg-5 {
+        flex: 1;
+        max-width: 100%;
+    }
+    
+    /* Stack vertically on extremely wide 4:3 or tall narrow screens */
+    @media (max-height: 500px) {
+        .checkout-modal .row {
+            flex-direction: column;
+        }
+        .checkout-modal .col-lg-7 {
+            margin-bottom: 12px;
+        }
+    }
+}
 .checkout-cart .checkout-item {
     display: grid;
     grid-template-columns: 64px 1fr auto;
@@ -413,10 +556,61 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
 #otherSection { display: flex; flex-direction: column; }
 #otherKeypad { order: 2; }
 #otherSection .input-group { order: 3; }
-/* Keep tender actions visible */
-.tender-actions { margin-top: auto; }
+/* Keep tender actions visible and always accessible */
+.tender-actions { 
+    margin-top: auto;
+    padding-top: clamp(8px, 1vh, 12px);
+    flex-shrink: 0;
+    border-top: 1px solid #eee;
+}
+
+/* Prevent buttons from getting cut off */
+.tender-actions .btn {
+    padding: clamp(8px, 1.5vh, 12px) clamp(12px, 2vw, 16px);
+    font-size: clamp(0.85rem, 1.8vw, 1rem);
+}
+
+.tender-actions .btn-lg {
+    padding: clamp(10px, 1.8vh, 14px) clamp(16px, 3vw, 20px);
+    font-size: clamp(1rem, 2vw, 1.25rem);
+}
 /* Prevent text overlapping modal edges */
-.search-modal .h5, .search-modal .fw-semibold, .search-modal .btn, .search-modal .form-control { overflow: hidden; text-overflow: ellipsis; }
+.search-modal .h5, .search-modal .fw-semibold, .search-modal .btn, .search-modal .form-control { 
+    overflow: hidden; 
+    text-overflow: ellipsis;
+    word-break: break-word;
+}
+
+/* Make sections within tender panel more compact on 4:3 */
+#cashSection,
+#otherSection {
+    font-size: clamp(0.85rem, 1.8vw, 0.95rem);
+}
+
+/* Compact the amount display rows */
+#cashSection .d-flex,
+#otherSection .d-flex,
+#cashSection .amount-row,
+#otherSection .amount-row {
+    gap: clamp(4px, 1vw, 8px);
+    padding: clamp(4px, 1vh, 6px) 0;
+}
+
+/* Cash controls more responsive */
+.cash-controls {
+    flex-wrap: wrap;
+    gap: clamp(4px, 1vw, 8px) !important;
+}
+
+.cash-controls .btn {
+    padding: clamp(4px, 1vh, 6px) clamp(8px, 1.5vw, 12px);
+    font-size: clamp(0.75rem, 1.5vw, 0.85rem);
+    white-space: nowrap;
+}
+
+#cashInputField {
+    max-width: clamp(80px, 20vw, 160px) !important;
+}
 .denom-row .denom-btn {
     min-width: clamp(72px, 12vw, 120px);
     min-height: clamp(40px, 6vh, 56px);
@@ -549,9 +743,28 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
 :root { --topbar-font: 'Poppins', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; }
 
 /* Product overlay image size (moved from inline) */
-.search-modal #productImage { height: 240px; }
+.search-modal #productImage { 
+    height: clamp(160px, 30vh, 280px);
+    min-height: 160px;
+}
 
-/* Global action footer */
+/* Make product grid responsive to aspect ratio */
+@media (max-aspect-ratio: 16 / 12) {
+    .search-modal #productImage { 
+        height: clamp(140px, 25vh, 220px);
+    }
+}
+
+/* Search grid responsive sizing */
+.search-modal #searchGrid {
+    overflow: auto;
+}
+
+@media (max-aspect-ratio: 16 / 12) {
+    .search-modal #searchGrid {
+        grid-template-columns: repeat(auto-fill, minmax(clamp(100px, 20vw, 180px), 1fr)) !important;
+    }
+}
 .action-footer {
     position: fixed;
     left: 0;
@@ -560,24 +773,29 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
     background: #ffffff;
     border-top: 1px solid #dee2e6;
     box-shadow: 0 -4px 20px rgba(0,0,0,0.05);
-    padding: 8px 0;
+    padding: clamp(6px, 1vh, 12px) 0;
     z-index: 1060;
 }
+
+.action-footer .container-fluid {
+    padding: 0 clamp(8px, 2vw, 16px);
+}
+
 /* Prominent, centered Return-by-Receipt button */
 #returnFromReceiptBtn.return-cta {
     position: absolute;
     left: 50%;
     transform: translateX(-50%);
-    top: 8px;
-    height: 40px;
-    line-height: 38px;
-    padding: 0 16px;
+    top: clamp(6px, 1vh, 10px);
+    height: clamp(36px, 6vh, 44px);
+    line-height: clamp(34px, 6vh, 42px);
+    padding: 0 clamp(12px, 3vw, 18px);
     border-radius: 999px;
     border: 1px solid #ffda6a;
     background: #fff7e6;
     color: #8a6d3b;
     font-weight: 600;
-    font-size: 0.95rem;
+    font-size: clamp(0.85rem, 2vw, 1rem);
     box-shadow: 0 2px 8px rgba(0,0,0,0.06);
     white-space: nowrap;
 }
@@ -591,11 +809,11 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
 
 @media (max-width: 576px) {
   #returnFromReceiptBtn.return-cta {
-    top: 10px;
-    height: 36px;
-    line-height: 34px;
-    font-size: 0.9rem;
-    padding: 0 12px;
+    top: clamp(6px, 1vh, 8px);
+    height: clamp(32px, 5vh, 40px);
+    line-height: clamp(30px, 5vh, 38px);
+    font-size: clamp(0.8rem, 1.5vw, 0.9rem);
+    padding: 0 clamp(10px, 2vw, 14px);
   }
 }
 

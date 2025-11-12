@@ -116,6 +116,8 @@ CREATE TABLE IF NOT EXISTS sales (
   tax            NUMERIC NOT NULL,
   discount       NUMERIC NOT NULL DEFAULT 0,
   total          NUMERIC NOT NULL,
+  currency_used      TEXT NOT NULL,
+  rate_used           NUMERIC NOT NULL DEFAULT 1,  -- to base currency
   pay_status     TEXT NOT NULL,           -- 'paid'|'partially_paid'|'refunded'
   queue_status   TEXT NOT NULL,           -- 'queued'|'posting'|'posted'|'failed'
   erp_docname    TEXT,
@@ -207,6 +209,13 @@ CREATE TABLE IF NOT EXISTS home_tiles (
   image_url    TEXT,
   sort_weight  INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS rates (
+  base_currency   TEXT PRIMARY KEY,
+  target_currency TEXT NOT NULL,
+  rate_to_base    NUMERIC NOT NULL,
+  last_updated    TEXT NOT NULL
+)
 
 
 -- Incremental sync cursors (per ERPNext doctype)

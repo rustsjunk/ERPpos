@@ -1345,7 +1345,163 @@ def api_delete_paused_sale(pid: str):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+# ---- Currency/Exchange Rate APIs ----
+
+# Global thread for currency rate updates (started on first use)
+_CURRENCY_UPDATER_THREAD = None
+
+def _ensure_currency_updater():
+    """Start the background currency updater thread if not already running."""
+    global _CURRENCY_UPDATER_THREAD
+    if _CURRENCY_UPDATER_THREAD is None and ps:
+        try:
+            _CURRENCY_UPDATER_THREAD = ps.schedule_currency_rate_update(
+                base=os.getenv('CURRENCY_BASE', 'GBP'),
+                target=os.getenv('CURRENCY_TARGET', 'EUR'),
+                interval_seconds=int(os.getenv('CURRENCY_UPDATE_INTERVAL', '86400'))
+            )
+            app.logger.info("Currency rate updater thread started")
+        except Exception as e:
+            app.logger.warning(f"Failed to start currency updater: {e}")
+
+@app.route('/api/currency/rates')
+def api_get_currency_rates():
+    """Get the current exchange rates from the database.
+    Query params:
+      base: Base currency code (default: GBP)
+      target: Target currency code (default: EUR)
+    Response: { status, base, target, rate, last_updated }
+    """
+    try:
+        base = (request.args.get('base') or 'GBP').strip().upper()
+        target = (request.args.get('target') or 'EUR').strip().upper()
+        
+        if not ps:
+            return jsonify({'status': 'error', 'message': 'pos_service not available'}), 500
+        
+        conn = _db_connect()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+        
+        rate = ps.get_currency_rate(conn, base, target)
+        if rate is None:
+            return jsonify({'status': 'error', 'message': f'No rate found for {base}->{target}'}), 404
+        
+        # Get last_updated timestamp
+        row = conn.execute(
+            "SELECT last_updated FROM rates WHERE base_currency=? AND target_currency=? ORDER BY last_updated DESC LIMIT 1",
+            (base, target)
+        ).fetchone()
+        last_updated = row['last_updated'] if row else None
+        
+        return jsonify({
+            'status': 'success',
+            'base': base,
+            'target': target,
+            'rate': float(rate),
+            'last_updated': last_updated
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/currency/convert', methods=['POST'])
+def api_convert_currency():
+    """Convert an amount using the current exchange rate.
+    Body: { amount, base, target, round_mode }
+    round_mode: 'nearest' (default), 'down', 'none'
+    Response: { status, base, target, amount_base, conversion: { actual, rounded, rounded_down, rate, savings } }
+    """
+    try:
+        data = request.json or {}
+        amount = float(data.get('amount') or 0)
+        base = (data.get('base') or 'GBP').strip().upper()
+        target = (data.get('target') or 'EUR').strip().upper()
+        round_mode = (data.get('round_mode') or 'nearest').strip().lower()
+        
+        if amount < 0:
+            return jsonify({'status': 'error', 'message': 'Amount must be non-negative'}), 400
+        if round_mode not in ('nearest', 'down', 'none'):
+            round_mode = 'nearest'
+        
+        if not ps:
+            return jsonify({'status': 'error', 'message': 'pos_service not available'}), 500
+        
+        conn = _db_connect()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+        
+        rate = ps.get_currency_rate(conn, base, target)
+        if rate is None:
+            return jsonify({'status': 'error', 'message': f'No rate found for {base}->{target}'}), 404
+        
+        result = ps.convert_currency(amount, rate, round_mode)
+        
+        return jsonify({
+            'status': 'success',
+            'base': base,
+            'target': target,
+            'amount_base': round(amount, 2),
+            'conversion': result
+        })
+    except ValueError as e:
+        return jsonify({'status': 'error', 'message': f'Invalid input: {e}'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/currency/rates/update', methods=['POST'])
+def api_update_currency_rates():
+    """Admin endpoint to manually trigger a currency rate update.
+    Body: { base, target, rate }
+    rate is optional; if not provided, will be fetched from API.
+    Response: { status, message }
+    """
+    if not os.getenv('POS_ADMIN_TOKEN'):
+        # No admin protection configured; allow any local call
+        pass
+    else:
+        # Check token if configured
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if token != os.getenv('POS_ADMIN_TOKEN'):
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    
+    try:
+        data = request.json or {}
+        base = (data.get('base') or 'GBP').strip().upper()
+        target = (data.get('target') or 'EUR').strip().upper()
+        rate = data.get('rate')
+        
+        if rate is not None:
+            rate = float(rate)
+            if rate <= 0:
+                return jsonify({'status': 'error', 'message': 'Rate must be positive'}), 400
+        
+        if not ps:
+            return jsonify({'status': 'error', 'message': 'pos_service not available'}), 500
+        
+        conn = _db_connect()
+        if not conn:
+            return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+        
+        success = ps.update_currency_rate(conn, base, target, rate)
+        if success:
+            new_rate = ps.get_currency_rate(conn, base, target)
+            return jsonify({
+                'status': 'success',
+                'message': f'Updated {base}->{target} rate',
+                'rate': float(new_rate) if new_rate else None
+            })
+        else:
+            return jsonify({'status': 'error', 'message': 'Failed to update rate'}), 500
+    except ValueError as e:
+        return jsonify({'status': 'error', 'message': f'Invalid input: {e}'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 if __name__ == '__main__':
+    # Ensure currency updater is running
+    _ensure_currency_updater()
+    
     debug = os.getenv('FLASK_DEBUG', '0') == '1'
     port = int(os.getenv('PORT', '5000'))
     host = os.getenv('HOST', '0.0.0.0')

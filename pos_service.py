@@ -821,3 +821,185 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ========== CURRENCY CONVERSION ==========
+
+def round_to_nearest_5(value: float) -> float:
+    """Round a numeric value to the nearest 5 cents/lowest unit.
+    E.g., 12.34 -> 12.35, 12.32 -> 12.30
+    """
+    return round(value * 20) / 20
+
+def round_down_to_nearest_5(value: float) -> float:
+    """Round DOWN a numeric value to the nearest 5 cents/lowest unit.
+    E.g., 12.34 -> 12.30, 12.37 -> 12.35
+    """
+    import math
+    return math.floor(value * 20) / 20
+
+def fetch_currency_rate(base: str = "GBP", target: str = "EUR") -> Optional[float]:
+    """
+    Fetch the exchange rate using a free public service.
+
+    Strategy:
+      1. Try exchangerate.host JSON API (no API key required).
+      2. Fall back to ECB daily XML (eurofxref) and compute pair via EUR relative rates.
+
+    Returns the rate as a float meaning: 1 <base> = X <target>
+    Returns None on failure.
+    """
+    # Trivial case
+    if base == target:
+        return 1.0
+
+    # 1) Try exchangerate.host (free, no key required)
+    try:
+        url = f"https://api.exchangerate.host/latest?base={urllib.parse.quote(base)}&symbols={urllib.parse.quote(target)}"
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        # Expected shape: { 'motd':..., 'success': True, 'base': 'GBP', 'rates': {'EUR': 1.18}, ... }
+        rates = data.get("rates") or {}
+        rate = rates.get(target)
+        if rate:
+            return float(rate)
+    except Exception as e:
+        print(f"exchangerate.host fetch failed for {base}->{target}: {e}", file=sys.stderr)
+
+    # 2) Fallback: ECB daily XML (base EUR)
+    try:
+        ecb_url = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
+        with urllib.request.urlopen(ecb_url, timeout=8) as resp:
+            xml = resp.read()
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml)
+        # Find Cube elements like: <Cube currency='USD' rate='1.1234' />
+        ns = { 'gesmes': 'http://www.gesmes.org/xml/2002-08-01', '': 'http://www.ecb.int/vocabulary/2002-08-01/eurofxref' }
+        # Simple approach: search for all Cube with currency attribute
+        rates_per_eur: Dict[str, float] = { 'EUR': 1.0 }
+        for cube in root.findall('.//{http://www.ecb.int/vocabulary/2002-08-01/eurofxref}Cube'):
+            cur = cube.get('currency')
+            r = cube.get('rate')
+            if cur and r:
+                try:
+                    rates_per_eur[cur] = float(r)
+                except Exception:
+                    continue
+
+        # If base or target not present, we cannot compute
+        if base == 'EUR' and target in rates_per_eur:
+            return float(rates_per_eur[target])
+        if target == 'EUR' and base in rates_per_eur:
+            # rates_per_eur[base] = base per EUR => 1 base = 1 / (base per EUR) EUR
+            return float(1.0 / rates_per_eur[base])
+        if base in rates_per_eur and target in rates_per_eur:
+            # 1 base = (target_per_eur / base_per_eur) target
+            return float(rates_per_eur[target] / rates_per_eur[base])
+        print(f"ECB rates missing currencies for {base}->{target}", file=sys.stderr)
+    except Exception as e:
+        print(f"ECB fallback failed for {base}->{target}: {e}", file=sys.stderr)
+
+    return None
+
+def update_currency_rate(conn: sqlite3.Connection, base: str = "GBP", target: str = "EUR", rate: Optional[float] = None) -> bool:
+    """
+    Update or insert the exchange rate in the rates table.
+    If rate is None, fetches it from the API.
+    
+    Returns True if successful, False otherwise.
+    """
+    if rate is None:
+        rate = fetch_currency_rate(base, target)
+        if rate is None:
+            return False
+    
+    try:
+        now_utc = iso_now()
+        conn.execute("""
+            INSERT INTO rates (base_currency, target_currency, rate_to_base, last_updated)
+            VALUES (?,?,?,?)
+            ON CONFLICT(base_currency, target_currency) DO UPDATE SET
+                rate_to_base=excluded.rate_to_base,
+                last_updated=excluded.last_updated
+        """, (base, target, float(rate), now_utc))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Failed to update currency rate: {e}", file=sys.stderr)
+        return False
+
+def get_currency_rate(conn: sqlite3.Connection, base: str = "GBP", target: str = "EUR") -> Optional[float]:
+    """
+    Retrieve the current exchange rate from the database.
+    Returns the rate (e.g., 1.18 means 1 GBP = 1.18 EUR), or None if not found.
+    """
+    try:
+        row = conn.execute(
+            "SELECT rate_to_base FROM rates WHERE base_currency=? AND target_currency=? ORDER BY last_updated DESC LIMIT 1",
+            (base, target)
+        ).fetchone()
+        if row and row[0]:
+            return float(row[0])
+    except Exception:
+        pass
+    return None
+
+def convert_currency(amount: float, rate: float, round_mode: str = "nearest") -> dict:
+    """
+    Convert an amount using the given exchange rate.
+    
+    Args:
+        amount: The amount in the base currency (e.g., GBP)
+        rate: The exchange rate (e.g., 1.18 for GBP->EUR)
+        round_mode: 'nearest' (default), 'down', or 'none' (no rounding)
+    
+    Returns a dict:
+      {
+        'actual': converted amount without rounding,
+        'rounded': rounded amount (to nearest 5),
+        'rounded_down': rounded down amount,
+        'rate': the exchange rate used,
+        'savings': difference between actual and rounded down (potential discount)
+      }
+    """
+    actual = amount * rate
+    rounded = round_to_nearest_5(actual)
+    rounded_down = round_down_to_nearest_5(actual)
+    savings = rounded - rounded_down  # Always positive; discount if rounding down
+    
+    result = {
+        'actual': round(actual, 2),
+        'rounded': round(rounded, 2),
+        'rounded_down': round(rounded_down, 2),
+        'rate': float(rate),
+        'savings': round(savings, 2),  # Potential discount value
+        'mode': round_mode
+    }
+    return result
+
+def schedule_currency_rate_update(base: str = "GBP", target: str = "EUR", interval_seconds: int = 86400):
+    """
+    Suggested scheduling function (integrate with your task scheduler).
+    This would typically be called by a cron job or background thread.
+    
+    Example usage in a separate worker:
+      while True:
+          update_currency_rate(conn, 'GBP', 'EUR')
+          time.sleep(86400)  # Daily
+    """
+    import time
+    import threading
+    
+    def worker():
+        while True:
+            try:
+                conn = connect()
+                update_currency_rate(conn, base, target)
+                conn.close()
+            except Exception as e:
+                print(f"Currency update worker failed: {e}", file=sys.stderr)
+            time.sleep(interval_seconds)
+    
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    return thread
