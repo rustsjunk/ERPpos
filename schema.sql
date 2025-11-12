@@ -64,6 +64,31 @@ CREATE TABLE IF NOT EXISTS stock (
   PRIMARY KEY (item_id, warehouse)
 );
 
+-- Stock snapshot (historical for Bin records)
+CREATE TABLE IF NOT EXISTS stock_snapshot (
+  item_id     TEXT NOT NULL,
+  warehouse   TEXT NOT NULL DEFAULT 'Shop',
+  qty_base    NUMERIC NOT NULL,
+  asof_utc    TEXT NOT NULL,
+  PRIMARY KEY (item_id, warehouse)
+);
+
+CREATE INDEX IF NOT EXISTS idx_stock_snapshot_asof ON stock_snapshot(asof_utc);
+
+-- Price list rates (optional; stores prices from Item Price doctype per price list)
+CREATE TABLE IF NOT EXISTS item_prices (
+  item_id     TEXT NOT NULL,
+  price_list  TEXT NOT NULL,
+  rate        NUMERIC NOT NULL,
+  valid_from  TEXT,
+  valid_to    TEXT,
+  modified_utc TEXT,
+  PRIMARY KEY (item_id, price_list)
+);
+
+CREATE INDEX IF NOT EXISTS idx_item_prices_item ON item_prices(item_id);
+CREATE INDEX IF NOT EXISTS idx_item_prices_list ON item_prices(price_list);
+
 -- Inheritance views
 DROP VIEW IF EXISTS v_item_images;
 CREATE VIEW v_item_images AS

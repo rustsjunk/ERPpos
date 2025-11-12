@@ -10,6 +10,7 @@ import urllib.error
 DB_PATH = os.environ.get("POS_DB_PATH", "pos.db")
 BACKUP_DIR = os.environ.get("POS_BACKUP_DIR", "pos_backup")
 _BARCODE_PULL_FORBIDDEN = False
+_BIN_PULL_FORBIDDEN = False
 
 # ERPNext REST
 ERP_BASE = os.environ.get("ERP_BASE")            # e.g., https://erp.yourdomain.com
@@ -656,7 +657,16 @@ def pull_bins_incremental(conn: sqlite3.Connection, warehouse: str, limit: int =
         "limit_page_length": limit,
         "order_by": "modified asc, name asc"
     }
-    data = _erp_get("/api/resource/Bin", params).get("data", [])
+    global _BIN_PULL_FORBIDDEN
+    try:
+        data = _erp_get("/api/resource/Bin", params).get("data", [])
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            if not _BIN_PULL_FORBIDDEN:
+                print("Bin pull forbidden (HTTP 403); skipping Bin sync", file=sys.stderr)
+            _BIN_PULL_FORBIDDEN = True
+            return 0
+        raise
     if not data:
         return 0
     asof = iso_now()
@@ -667,6 +677,11 @@ def pull_bins_incremental(conn: sqlite3.Connection, warehouse: str, limit: int =
         VALUES (?,?,?,?)
         ON CONFLICT(item_id, warehouse) DO UPDATE SET qty_base=excluded.qty_base, asof_utc=excluded.asof_utc
         """, (b["item_code"], warehouse, sellable, asof))
+        conn.execute("""
+        INSERT INTO stock (item_id, warehouse, qty)
+        VALUES (?,?,?)
+        ON CONFLICT(item_id, warehouse) DO UPDATE SET qty=excluded.qty
+        """, (b["item_code"], warehouse, sellable))
     _cursor_set(conn, f"Bin:{warehouse}", data[-1]["modified"], data[-1]["name"])
     conn.commit()
     return len(data)
@@ -703,8 +718,23 @@ def pull_item_prices_incremental(conn: sqlite3.Connection, price_list: str, limi
         ON CONFLICT(item_id, price_list) DO UPDATE SET rate=excluded.rate, valid_from=excluded.valid_from, valid_to=excluded.valid_to, modified_utc=excluded.modified_utc
         """, (p["item_code"], p["price_list"], float(p["price_list_rate"]), p.get("valid_from"), p.get("valid_upto"), p.get("modified")))
     _cursor_set(conn, f"Item Price:{price_list}", data[-1]["modified"], data[-1]["name"])
+    _apply_price_list_rates(conn, price_list)
     conn.commit()
     return len(data)
+
+def _apply_price_list_rates(conn: sqlite3.Connection, price_list: str):
+    """Override the catalog price with the configured price list rate when available."""
+    if not price_list:
+        return
+    conn.execute("""
+    UPDATE items
+    SET price = (
+      SELECT rate FROM item_prices ip WHERE ip.item_id = items.item_id AND ip.price_list = ?
+    )
+    WHERE EXISTS (
+      SELECT 1 FROM item_prices ip WHERE ip.item_id = items.item_id AND ip.price_list = ?
+    )
+    """, (price_list, price_list))
 
 def pull_item_barcodes_incremental(conn: sqlite3.Connection, limit: int = 500):
     """Fetch barcodes from Item Barcode child table (v15)."""

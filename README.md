@@ -41,10 +41,11 @@ python main.py
 
 With `USE_MOCK=0`, ERPpos now auto-initializes `POS_DB_PATH` using `schema.sql` the first time it runs and immediately pulls the ERPNext catalog plus active cashiers. Optional environment knobs:
 
-- `POS_WAREHOUSE` (default `Shop`) – warehouse to probe when seeding stock snapshots during the first sync.
-- `POS_BOOTSTRAP_ITEM_BATCHES` – number of 500-row item batches to pull on bootstrap (default `6`).
-- `POS_CASHIER_DOCTYPE`, `POS_CASHIER_CODE_FIELD`, `POS_CASHIER_NAME_FIELD`, `POS_CASHIER_ACTIVE_FIELD`, `POS_CASHIER_EXTRA_FIELDS`, `POS_CASHIER_FILTERS` – map your ERPNext cashier source (defaults assume a `Cashier` doctype with `code`, `cashier_name`, `enabled` fields). Extra fields land in the local `cashiers.meta` JSON blob.
-- `POS_SKIP_BARCODE_SYNC` – set to `1` if the ERP API user does not have permission to read the `Item Barcode` doctype; items will still load but barcode lookups rely on ERPNext.
+- `POS_WAREHOUSE` (default `Shop`) — warehouse to probe when seeding stock snapshots during the first sync.
+- `POS_BOOTSTRAP_ITEM_BATCHES` — number of 500-row item batches to pull on bootstrap (default `6`).
+- `POS_CASHIER_DOCTYPE`, `POS_CASHIER_CODE_FIELD`, `POS_CASHIER_NAME_FIELD`, `POS_CASHIER_ACTIVE_FIELD`, `POS_CASHIER_EXTRA_FIELDS`, `POS_CASHIER_FILTERS` — map your ERPNext cashier source (defaults assume a `Cashier` doctype with `code`, `cashier_name`, `enabled` fields). Extra fields land in the local `cashiers.meta` JSON blob.
+- `POS_SKIP_BARCODE_SYNC` — set to `1` if the ERP API user does not have permission to read the `Item Barcode` doctype; items will still load but barcode lookups rely on ERPNext.
+- `POS_PRICE_LIST` — optional price list name to pull into the POS catalog. When supplied (and `/api/db/` syncs are run via `python pos_service.py --sync --price-list "$POS_PRICE_LIST"`), the local `items.price` values override the standard rate and the configured warehouse stock is updated too.
 
 ## Project layout (important files)
 
@@ -77,6 +78,7 @@ With `USE_MOCK=0`, ERPpos now auto-initializes `POS_DB_PATH` using `schema.sql` 
 ## Operational notes
 
 - Logs and errors appear on the Flask console. Persist logs externally when running in production.
+- To refresh catalog stock and price-list rates from ERPNext, run `python pos_service.py --sync --warehouse Shop --price-list Retail` (or substitute `Shop`/`Retail` with `POS_WAREHOUSE`/`POS_PRICE_LIST`). That sync writes the selected warehouse Bin levels into `stock` and applies the price list to `items.price`.
 - The app is intentionally simple to be run behind a process manager (systemd, NSSM on Windows) or inside a container.
 
 ## Where to go next

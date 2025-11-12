@@ -749,7 +749,29 @@ async function loadItems(){
 }
 async function loadCustomers(){ try{ const r=await fetch('/api/customers'); const d=await r.json(); if(d.status==='success'){ customers=d.customers; const b=document.getElementById('customerSelect'); const t=document.getElementById('topCustomerSelect'); customers.forEach(c=>{ if(b){const o=document.createElement('option'); o.value=c.name;o.textContent=c.customer_name;b.appendChild(o);} if(t){const o2=document.createElement('option'); o2.value=c.name;o2.textContent=c.customer_name;t.appendChild(o2);} }); setDefaultCustomer(); } }catch(e){ console.error(e);} }
 
-function renderItems(list){ const grid=document.getElementById('itemsGrid'); if(!grid) return; grid.innerHTML=''; list.forEach(it=>{ const d=document.createElement('div'); d.className='col'; d.innerHTML=`<div class="card item-card h-100"><div class="card-body"><h5 class="card-title">${it.item_name}</h5><p class="card-text">${money(it.standard_rate)}</p><p class="card-text"><small>${it.stock_uom}</small></p></div></div>`; d.onclick=()=>openProduct(it); grid.appendChild(d); });}
+function renderItems(list){
+  const grid=document.getElementById('itemsGrid'); if(!grid) return; grid.innerHTML='';
+  list.forEach(it=>{
+    const d=document.createElement('div'); d.className='col';
+    // Determine price display: prefer explicit standard_rate; otherwise show variant min-max when available
+    let priceHtml = '';
+    if(it.price_min != null && it.price_max != null){
+      if(Number(it.price_min) === Number(it.price_max)){
+        priceHtml = money(it.price_min);
+      } else {
+        priceHtml = `${money(it.price_min)} - ${money(it.price_max)}`;
+      }
+    } else if(it.standard_rate != null){
+      priceHtml = money(it.standard_rate);
+    } else {
+      priceHtml = '—';
+    }
+    const stockNote = (it.variant_stock != null) ? `<p class="card-text"><small>Stock: ${it.variant_stock}</small></p>` : `<p class="card-text"><small>${it.stock_uom}</small></p>`;
+    d.innerHTML = `<div class="card item-card h-100"><div class="card-body"><h5 class="card-title">${it.item_name}</h5><p class="card-text">${priceHtml}</p>${stockNote}</div></div>`;
+    d.onclick=()=>openProduct(it);
+    grid.appendChild(d);
+  });
+}
 
 function addToCart(item) {
   // Always open product overlay to choose a specific variant to ensure consistent IDs
@@ -1418,12 +1440,58 @@ async function openProduct(item){ currentProduct=item; const o=document.getEleme
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} try{ const r=await fetch(`/api/item_matrix?item=${encodeURIComponent(item.name)}`); const d=await r.json(); if(d.status==='success') renderVariantMatrix(item,d.data);}catch(e){ console.error(e);} }
 function hideProductOverlay(){ const o=document.getElementById('productOverlay'); if(o) o.style.display='none'; }
-function renderVariantMatrix(item,m){ const h=document.getElementById('matrixHead'), b=document.getElementById('matrixBody'); if(!h||!b) return; h.innerHTML=''; const tr=document.createElement('tr'); ['Colour','Width',...(m.sizes||[])].forEach(x=>{ const th=document.createElement('th'); th.textContent=x; tr.appendChild(th);}); h.appendChild(tr); b.innerHTML=''; (m.colors||[]).forEach(color=>{ (m.widths||[]).forEach(width=>{ const row=document.createElement('tr'); const tc=document.createElement('th'); tc.textContent=color; row.appendChild(tc); const tw=document.createElement('th'); tw.textContent=width; row.appendChild(tw); (m.sizes||[]).forEach(sz=>{ const key=`${color}|${width}|${sz}`; const qty=(m.stock&&m.stock[key])||0; const td=document.createElement('td'); td.className='variant-cell'+(qty<=0?' disabled':''); td.textContent=qty; if(qty>0){ const vrec=(m.variants&&m.variants[key])||null; td.addEventListener('click',()=>addVariantToCart(item,{color,width,size:sz,qtyAvailable:qty}, td, vrec)); } row.appendChild(td); }); b.appendChild(row); }); }); }
+function renderVariantMatrix(item,m){ 
+  const h=document.getElementById('matrixHead'), b=document.getElementById('matrixBody'); 
+  if(!h||!b) return; 
+  h.innerHTML=''; 
+  const tr=document.createElement('tr'); 
+  ['Colour','Width',...(m.sizes||[])].forEach(x=>{ const th=document.createElement('th'); th.textContent=x; tr.appendChild(th);}); 
+  h.appendChild(tr); 
+  b.innerHTML=''; 
+  (m.colors||[]).forEach(color=>{ 
+    (m.widths||[]).forEach(width=>{ 
+      const row=document.createElement('tr'); 
+      const tc=document.createElement('th'); 
+      tc.style.cursor='pointer';
+      tc.textContent=color;
+      // Click on color to show that color's image (get first variant with this color)
+      tc.addEventListener('click',()=>{
+        const firstVarKey=Object.keys(m.variants||{}).find(k=>k.startsWith(color+'|'));
+        if(firstVarKey){
+          const firstVar=m.variants[firstVarKey];
+          if(firstVar && firstVar.image){
+            const im=document.getElementById('productImage');
+            if(im) im.style.backgroundImage=`url('${firstVar.image}')`;
+          }
+        }
+      });
+      row.appendChild(tc); 
+      const tw=document.createElement('th'); 
+      tw.textContent=width; 
+      row.appendChild(tw); 
+      (m.sizes||[]).forEach(sz=>{ 
+        const key=`${color}|${width}|${sz}`; 
+        const qty=(m.stock&&m.stock[key])||0; 
+        const td=document.createElement('td'); 
+        td.className='variant-cell'+(qty<=0?' disabled':''); 
+        td.textContent=qty; 
+        if(qty>0){ 
+          const vrec=(m.variants&&m.variants[key])||null; 
+          td.addEventListener('click',()=>addVariantToCart(item,{color,width,size:sz,qtyAvailable:qty}, td, vrec)); 
+        } 
+        row.appendChild(td); 
+      }); 
+      b.appendChild(row); 
+    }); 
+  }); 
+}
 function addVariantToCart(item, variant, cellEl, variantRec){
   const name = displayNameFrom(item.item_name, { Color: variant.color, Width: variant.width, Size: variant.size });
   const code = (variantRec && (variantRec.item_id||variantRec.name)) || `${item.name}-${variant.color}-${variant.width}-${variant.size}`;
   const existing = cart.find(ci => ci.item_code === code && !ci.refund);
   const rate = (variantRec && variantRec.rate!=null) ? Number(variantRec.rate) : item.standard_rate;
+  // Use variant image if available, otherwise fall back to parent image
+  const variantImage = (variantRec && variantRec.image) ? variantRec.image : (item.image || null);
   if (existing) {
     existing.qty += 1;
     existing.amount = existing.qty * existing.rate;
@@ -1435,7 +1503,7 @@ function addVariantToCart(item, variant, cellEl, variantRec){
       rate,
       original_rate: rate,
       amount: rate,
-      image: item.image || null,
+      image: variantImage,
       brand: item.brand || null,
       variant,
       refund: false

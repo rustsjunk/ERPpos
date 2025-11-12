@@ -43,6 +43,7 @@ try:
 except ValueError:
     BOOTSTRAP_ITEM_BATCHES = 6
 SKIP_BARCODE_SYNC = os.getenv('POS_SKIP_BARCODE_SYNC', '0') == '1'
+POS_PRICE_LIST = os.getenv('POS_PRICE_LIST') or None
 CASHIER_DOCTYPE = os.getenv('POS_CASHIER_DOCTYPE', 'Cashier')
 CASHIER_CODE_FIELD = os.getenv('POS_CASHIER_CODE_FIELD', 'code')
 CASHIER_NAME_FIELD = os.getenv('POS_CASHIER_NAME_FIELD', 'cashier_name')
@@ -114,14 +115,20 @@ def _db_has_items(conn: sqlite3.Connection) -> bool:
 
 def _db_items_payload(conn: sqlite3.Connection):
     """Return template items as tiles, with aggregated variant attribute values for search/display."""
-    q_tpl = """
+    # Use POS_WAREHOUSE config var in the SQL subquery for aggregated variant stock
+    q_tpl = f"""
     SELECT i.item_id AS name,
            i.item_id AS item_code,
            i.name AS item_name,
            i.brand AS brand,
-           (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
-           'Each' AS stock_uom,
-           (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image
+        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
+        -- Min/max of configured price list rates for child variants (if present in item_prices)
+        (SELECT MIN(ip.rate) FROM item_prices ip JOIN items v2 ON v2.item_id = ip.item_id WHERE v2.parent_id = i.item_id) AS min_variant_price,
+        (SELECT MAX(ip.rate) FROM item_prices ip JOIN items v2 ON v2.item_id = ip.item_id WHERE v2.parent_id = i.item_id) AS max_variant_price,
+        -- Aggregate sellable stock across variants for this template (using configured warehouse)
+        (SELECT COALESCE(SUM(s.qty),0) FROM stock s JOIN items v2 ON v2.item_id = s.item_id WHERE v2.parent_id = i.item_id AND s.warehouse='{POS_WAREHOUSE}') AS variant_stock,
+        'Each' AS stock_uom,
+        (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image
     FROM items i
     WHERE i.active=1 AND i.is_template=1
     ORDER BY COALESCE(i.brand,''), i.name
@@ -149,17 +156,29 @@ def _db_items_payload(conn: sqlite3.Connection):
                 disp = " ".join(sorted(values))
                 for key in _attribute_payload_keys(aname):
                     attrs[key] = disp
-        out.append({
+
+        # Determine displayed rate: prefer template's effective price; otherwise fallback to variant prices
+        template_rate = r["standard_rate"] if r["standard_rate"] is not None else None
+        min_var = r["min_variant_price"] if r["min_variant_price"] is not None else None
+        max_var = r["max_variant_price"] if r["max_variant_price"] is not None else None
+        display_rate = template_rate if template_rate is not None else (min_var if min_var is not None else None)
+
+        payload = {
             "name": r["name"],
             "item_code": r["item_code"],
             "item_name": r["item_name"],
             "brand": r["brand"],
             "barcode": None,
-            "standard_rate": float(r["standard_rate"]) if r["standard_rate"] is not None else None,
+            "standard_rate": float(display_rate) if display_rate is not None else None,
             "stock_uom": r["stock_uom"],
             "image": _absolute_image_url(r["image"]),
             "attributes": attrs,
-        })
+            # expose variant price bounds and aggregated stock for UI use
+            "price_min": float(min_var) if min_var is not None else None,
+            "price_max": float(max_var) if max_var is not None else None,
+            "variant_stock": float(r["variant_stock"]) if r["variant_stock"] is not None else 0.0,
+        }
+        out.append(payload)
     return out
 
 def _db_has_cashiers(conn: sqlite3.Connection) -> bool:
@@ -253,6 +272,11 @@ def _initial_sync_items(conn: sqlite3.Connection):
             ps.pull_bins_incremental(conn, warehouse=POS_WAREHOUSE, limit=500)
         except Exception as exc:
             app.logger.warning("Stock bootstrap failed: %s", exc)
+    if POS_PRICE_LIST and hasattr(ps, 'pull_item_prices_incremental'):
+        try:
+            ps.pull_item_prices_incremental(conn, price_list=POS_PRICE_LIST, limit=500)
+        except Exception as exc:
+            app.logger.warning("Price list bootstrap failed: %s", exc)
     app.logger.info("Seeded %d ERPNext items locally", total)
 
 def _initial_sync_cashiers(conn: sqlite3.Connection):
@@ -933,10 +957,41 @@ def api_db_status():
 
 @app.route('/api/db/sync-items', methods=['POST'])
 def api_db_sync_items():
-    # Placeholder: wiring for future ERPNext incremental pulls
+    # Trigger an incremental pull from ERPNext into the local SQLite DB.
+    # Runs the sync in a background thread and returns immediately.
     if not ERPNEXT_URL:
         return jsonify({'status':'error','message':'ERPNext not configured'}), 400
-    return jsonify({'status':'error','message':'Sync not implemented yet in this build'}), 501
+    if not ps or not hasattr(ps, 'sync_cycle'):
+        return jsonify({'status':'error','message':'pos_service not available or missing sync implementation'}), 500
+    def _run_sync():
+        conn = None
+        try:
+            # Connect to DB inside the worker thread to avoid cross-thread SQLite use
+            try:
+                conn = _db_connect() or ps.connect(POS_DB_PATH)
+            except Exception as e:
+                app.logger.exception('Failed to connect to DB inside sync worker: %s', e)
+                return
+            # Ensure schema present
+            try:
+                _ensure_schema(conn)
+            except Exception:
+                pass
+            # Run a few loops to fetch items, attributes, barcodes, bins and prices
+            ps.sync_cycle(conn, warehouse=POS_WAREHOUSE, price_list=POS_PRICE_LIST, loops=3)
+            app.logger.info('ERPNext incremental sync completed')
+        except Exception as exc:
+            app.logger.exception('ERP sync failed: %s', exc)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    thr = threading.Thread(target=_run_sync, daemon=True)
+    thr.start()
+    return jsonify({'status': 'success', 'message': 'Sync started'})
 
 @app.route('/api/item_matrix')
 def item_matrix():
@@ -950,11 +1005,12 @@ def item_matrix():
     tpl = conn.execute("SELECT item_id, name, brand FROM items WHERE item_id=? AND is_template=1", (template_id,)).fetchone()
     if not tpl:
         return jsonify({'status': 'error', 'message': 'Template not found'}), 404
-    qv = """
+    qv = f"""
       SELECT v.item_id,
              v.name,
+             v.image_url,
              (SELECT price_effective FROM v_item_prices p WHERE p.item_id=v.item_id) AS rate,
-             COALESCE((SELECT qty FROM stock s WHERE s.item_id=v.item_id AND s.warehouse='Shop'), 0) AS qty
+             COALESCE((SELECT qty FROM stock s WHERE s.item_id=v.item_id AND s.warehouse='{POS_WAREHOUSE}'), 0) AS qty
       FROM items v
       WHERE v.parent_id=? AND v.active=1 AND v.is_template=0
     """
@@ -977,7 +1033,9 @@ def item_matrix():
         size = (attrs.get('Size') or attrs.get('EU half Sizes') or attrs.get('UK half Sizes') or '-')
         colors.add(color); widths.add(width); sizes.add(size)
         key = f"{color}|{width}|{size}"
-        variants[key] = { 'item_id': r['item_id'], 'item_name': r['name'], 'rate': float(r['rate']) if r['rate'] is not None else None, 'qty': float(r['qty']) }
+        # Get variant image (with absolute URL), fallback to parent image
+        variant_image = _absolute_image_url(r['image_url']) if r['image_url'] else None
+        variants[key] = { 'item_id': r['item_id'], 'item_name': r['name'], 'rate': float(r['rate']) if r['rate'] is not None else None, 'qty': float(r['qty']), 'image': variant_image }
     data = {
         'item': template_id,
         'sizes': sorted(sizes, key=lambda x: (len(x), x)),
