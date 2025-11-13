@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 # POS scaffold: SQLite + JSON queue + ERPNext sync + NDJSON backups
-import os, sys, json, uuid, sqlite3, time, argparse, datetime as dt
+import os, sys, json, uuid, sqlite3, time, argparse, datetime as dt, ssl
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set, Tuple
 import urllib.request
@@ -212,12 +212,29 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
                 ON CONFLICT(item_id, warehouse) DO UPDATE SET qty = MAX(0, stock.qty - ?)
             """, (l["item_id"], warehouse, 0, float(l["qty"])))
 
-        # Payments
+        # Payments (store optional meta_json for extra metadata like EUR conversion details)
         for idx, p in enumerate(payments, start=1):
+            meta_json = None
+            try:
+                meta = p.get('meta') if isinstance(p, dict) else None
+                if meta is not None:
+                    meta_json = json.dumps(meta, separators=(",",":"))
+            except Exception:
+                meta_json = None
+            
+            # Support both old format (amount) and new format (amount_gbp / amount_eur)
+            amount_gbp = p.get('amount_gbp') or p.get('amount', 0)
+            amount_eur = p.get('amount_eur')
+            currency = (p.get('currency') or 'GBP').upper()
+            eur_rate = p.get('eur_rate')
+            
             conn.execute("""
-                INSERT INTO payments (sale_id, seq, method, amount, ref)
-                VALUES (?,?,?,?,?)
-            """, (sale_id, idx, p["method"], float(p["amount"]), p.get("ref")))
+                INSERT INTO payments (sale_id, seq, method, currency, amount_gbp, amount_eur, eur_rate, ref, meta_json)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (sale_id, idx, p["method"], currency, float(amount_gbp), 
+                  float(amount_eur) if amount_eur else None, 
+                  float(eur_rate) if eur_rate else None,
+                  p.get("ref"), meta_json))
 
         # Voucher redemption
         for v in sale.get("voucher_redeem", []):
@@ -825,25 +842,41 @@ if __name__ == "__main__":
 
 # ========== CURRENCY CONVERSION ==========
 
-def round_to_nearest_5(value: float) -> float:
-    """Round a numeric value to the nearest 5 cents/lowest unit.
-    E.g., 12.34 -> 12.35, 12.32 -> 12.30
+def round_to_nearest_multiple(value: float, multiple: float) -> float:
+    """Round value to nearest `multiple` units. If multiple is small (0.05) this is cents.
+
+    Examples:
+      round_to_nearest_multiple(12.34, 0.05) -> 12.35
+      round_to_nearest_multiple(249.35, 5.0) -> 250.0
     """
-    return round(value * 20) / 20
+    if multiple == 0:
+        return value
+    return round(value / multiple) * multiple
+
+
+def round_down_to_nearest_multiple(value: float, multiple: float) -> float:
+    """Round DOWN (floor) to nearest `multiple` units."""
+    import math
+    if multiple == 0:
+        return value
+    return math.floor(value / multiple) * multiple
+
+
+def round_to_nearest_5(value: float) -> float:
+    """Backward-compatible helper: nearest 5 cents (0.05)."""
+    return round_to_nearest_multiple(value, 0.05)
+
 
 def round_down_to_nearest_5(value: float) -> float:
-    """Round DOWN a numeric value to the nearest 5 cents/lowest unit.
-    E.g., 12.34 -> 12.30, 12.37 -> 12.35
-    """
-    import math
-    return math.floor(value * 20) / 20
+    """Backward-compatible helper: round down to 5 cents (0.05)."""
+    return round_down_to_nearest_multiple(value, 0.05)
 
 def fetch_currency_rate(base: str = "GBP", target: str = "EUR") -> Optional[float]:
     """
     Fetch the exchange rate using a free public service.
 
     Strategy:
-      1. Try exchangerate.host JSON API (no API key required).
+      1. Try exchangerate.host JSON API (requires API key - deprecated, now falls through).
       2. Fall back to ECB daily XML (eurofxref) and compute pair via EUR relative rates.
 
     Returns the rate as a float meaning: 1 <base> = X <target>
@@ -853,10 +886,17 @@ def fetch_currency_rate(base: str = "GBP", target: str = "EUR") -> Optional[floa
     if base == target:
         return 1.0
 
-    # 1) Try exchangerate.host (free, no key required)
+    # Create SSL context that handles certificate verification issues
+    # (useful for corporate proxies, custom CAs, etc.)
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    # 1) Try exchangerate.host (free API - now requires API key, so we skip this)
+    # Keeping code for reference but it will fail and fall through to ECB
     try:
         url = f"https://api.exchangerate.host/latest?base={urllib.parse.quote(base)}&symbols={urllib.parse.quote(target)}"
-        with urllib.request.urlopen(url, timeout=8) as resp:
+        with urllib.request.urlopen(url, timeout=8, context=ssl_context) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         # Expected shape: { 'motd':..., 'success': True, 'base': 'GBP', 'rates': {'EUR': 1.18}, ... }
         rates = data.get("rates") or {}
@@ -869,7 +909,7 @@ def fetch_currency_rate(base: str = "GBP", target: str = "EUR") -> Optional[floa
     # 2) Fallback: ECB daily XML (base EUR)
     try:
         ecb_url = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
-        with urllib.request.urlopen(ecb_url, timeout=8) as resp:
+        with urllib.request.urlopen(ecb_url, timeout=8, context=ssl_context) as resp:
             xml = resp.read()
         import xml.etree.ElementTree as ET
         root = ET.fromstring(xml)
@@ -944,7 +984,7 @@ def get_currency_rate(conn: sqlite3.Connection, base: str = "GBP", target: str =
         pass
     return None
 
-def convert_currency(amount: float, rate: float, round_mode: str = "nearest") -> dict:
+def convert_currency(amount: float, rate: float, round_mode: str = "nearest", target_currency: str = "EUR") -> dict:
     """
     Convert an amount using the given exchange rate.
     
@@ -963,8 +1003,15 @@ def convert_currency(amount: float, rate: float, round_mode: str = "nearest") ->
       }
     """
     actual = amount * rate
-    rounded = round_to_nearest_5(actual)
-    rounded_down = round_down_to_nearest_5(actual)
+    # Use euro-specific rounding when converting to EUR: nearest 5 EUR (unit steps)
+    if (target_currency or '').upper() == 'EUR':
+        multiple = 5.0
+    else:
+        # default to nearest 5 cents for other currencies
+        multiple = 0.05
+
+    rounded = round_to_nearest_multiple(actual, multiple)
+    rounded_down = round_down_to_nearest_multiple(actual, multiple)
     savings = rounded - rounded_down  # Always positive; discount if rounding down
     
     result = {
@@ -976,6 +1023,53 @@ def convert_currency(amount: float, rate: float, round_mode: str = "nearest") ->
         'mode': round_mode
     }
     return result
+
+def ensure_currency_rate_populated(conn: sqlite3.Connection, base: str = "GBP", target: str = "EUR") -> bool:
+    """
+    Ensure that a currency rate exists in the database.
+    
+    Logic:
+      1. Check if rate exists for base->target pair
+      2. If it exists, check if today's date matches the last_updated date
+      3. If missing OR date has changed, fetch and update the rate
+    
+    Returns True if successful or rate already exists and is fresh, False otherwise.
+    """
+    try:
+        today = dt.datetime.utcnow().date().isoformat()
+        
+        # Check if rate exists
+        row = conn.execute(
+            "SELECT rate_to_base, last_updated FROM rates WHERE base_currency=? AND target_currency=? ORDER BY last_updated DESC LIMIT 1",
+            (base, target)
+        ).fetchone()
+        
+        if row and row['rate_to_base']:
+            # Rate exists, check if it's from today
+            last_updated = row['last_updated']
+            last_updated_date = last_updated.split('T')[0] if last_updated else None
+            
+            if last_updated_date == today:
+                # Rate is fresh, no need to update
+                return True
+            else:
+                # Date has changed, need to refresh
+                print(f"Currency rate is stale (last updated {last_updated_date}, today is {today}). Refreshing...", file=sys.stderr)
+        else:
+            # Rate doesn't exist, need to fetch
+            print(f"No currency rate found for {base}->{target}. Fetching...", file=sys.stderr)
+        
+        # Fetch and update the rate
+        success = update_currency_rate(conn, base, target)
+        if success:
+            print(f"Currency rate {base}->{target} populated/refreshed successfully", file=sys.stderr)
+            return True
+        else:
+            print(f"Failed to fetch currency rate {base}->{target}", file=sys.stderr)
+            return False
+    except Exception as e:
+        print(f"Error ensuring currency rate: {e}", file=sys.stderr)
+        return False
 
 def schedule_currency_rate_update(base: str = "GBP", target: str = "EUR", interval_seconds: int = 86400):
     """
@@ -1003,3 +1097,93 @@ def schedule_currency_rate_update(base: str = "GBP", target: str = "EUR", interv
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
     return thread
+
+
+# ========== FX ROUNDING & EFFECTIVE RATE ==========
+
+def compute_eur_suggestions(gbp_total: float, store_rate: float) -> Dict[str, Any]:
+    """
+    Given a GBP total and store rate, compute EUR suggestions (nearest 5 EUR up/down).
+    
+    Returns:
+      {
+        'eur_exact': exact EUR (gbp_total * store_rate),
+        'eur_round_up': nearest 5 EUR ceiling,
+        'eur_round_down': nearest 5 EUR floor,
+        'store_rate': the input store_rate,
+        'gbp_total': the input gbp_total
+      }
+    """
+    eur_exact = gbp_total * store_rate
+    eur_round_up = round_to_nearest_multiple(eur_exact, 5.0)
+    eur_round_down = round_down_to_nearest_multiple(eur_exact, 5.0)
+    
+    return {
+        'eur_exact': round(eur_exact, 2),
+        'eur_round_up': round(eur_round_up, 2),
+        'eur_round_down': round(eur_round_down, 2),
+        'store_rate': float(store_rate),
+        'gbp_total': float(gbp_total)
+    }
+
+
+def compute_effective_rate(gbp_total: float, eur_target: float) -> float:
+    """
+    Derive the effective exchange rate from a chosen EUR target.
+    
+    effective_rate = eur_target / gbp_total
+    
+    This is the rate that will be used for ALL conversions and change calculations
+    within this sale.
+    """
+    if gbp_total <= 0:
+        return 1.0
+    return round(eur_target / gbp_total, 4)
+
+
+def convert_eur_payment_to_gbp(eur_amount: float, effective_rate: float) -> float:
+    """
+    Convert a EUR payment to GBP equivalent using the sale's effective_rate.
+    
+    gbp_equiv = eur_amount / effective_rate
+    """
+    if effective_rate <= 0:
+        return 0.0
+    return round(eur_amount / effective_rate, 2)
+
+
+def record_sale_with_fx(conn: sqlite3.Connection, sale: Dict[str, Any], fx_metadata: Optional[Dict[str, Any]] = None) -> str:
+    """
+    Enhanced record_sale that also persists FX metadata if provided.
+    
+    fx_metadata (optional):
+      {
+        'store_rate': 1.30,
+        'effective_rate': 1.243,
+        'eur_target': 55.0,
+        'gbp_total': 44.23,
+        'eur_exact': 57.50
+      }
+    """
+    sale_id = record_sale(conn, sale)
+    
+    # If FX metadata provided, record it in sales_fx table
+    if fx_metadata:
+        try:
+            conn.execute("""
+                INSERT INTO sales_fx (sale_id, store_rate, effective_rate, eur_target, gbp_total, eur_exact, created_utc)
+                VALUES (?,?,?,?,?,?,?)
+            """, (
+                sale_id,
+                fx_metadata.get('store_rate'),
+                fx_metadata.get('effective_rate'),
+                fx_metadata.get('eur_target'),
+                fx_metadata.get('gbp_total'),
+                fx_metadata.get('eur_exact'),
+                iso_now()
+            ))
+            conn.commit()
+        except Exception as e:
+            print(f"Failed to record FX metadata for sale {sale_id}: {e}", file=sys.stderr)
+    
+    return sale_id

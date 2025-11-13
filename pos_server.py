@@ -666,7 +666,10 @@ def create_sale():
                 'change': data.get('change'),
                 'total': data.get('total'),
                 'vouchers': data.get('vouchers', []),
-                'cashier': data.get('cashier')
+                'cashier': data.get('cashier'),
+                'currency_used': data.get('currency_used', 'GBP'),
+                'currency_rate_used': data.get('currency_rate_used', 1.0),
+                'fx_metadata': data.get('fx_metadata')  # Include FX metadata for audit trail
             }
             with open(os.path.join('invoices', f"{invoice_name}.json"), 'w', encoding='utf-8') as f:
                 import json
@@ -698,7 +701,12 @@ def create_sale():
                         {
                             'method': (p.get('mode_of_payment') or p.get('method') or 'Other'),
                             'amount': float(p.get('amount') or 0),
-                            'ref': p.get('ref')
+                            'amount_gbp': float(p.get('amount_gbp') or p.get('amount') or 0),
+                            'amount_eur': float(p.get('amount_eur')) if p.get('amount_eur') else None,
+                            'currency': (p.get('currency') or 'GBP').upper(),
+                            'eur_rate': float(p.get('eur_rate')) if p.get('eur_rate') else None,
+                            'ref': p.get('ref'),
+                            'meta': p.get('meta')  # EUR metadata
                         }
                         for p in (data.get('payments') or [])
                     ],
@@ -711,8 +719,14 @@ def create_sale():
                         for v in (data.get('vouchers') or []) if v.get('code')
                     ],
                 }
+                # FX metadata for sale-level FX tracking
+                fx_metadata = data.get('fx_metadata')
                 try:
-                    ps.record_sale(conn, sale_payload)
+                    # Use record_sale_with_fx to also record FX metadata if present
+                    if fx_metadata:
+                        ps.record_sale_with_fx(conn, sale_payload, fx_metadata)
+                    else:
+                        ps.record_sale(conn, sale_payload)
                 except Exception:
                     # Do not block POS on DB/indexing issues
                     pass
@@ -1355,9 +1369,19 @@ def _ensure_currency_updater():
     global _CURRENCY_UPDATER_THREAD
     if _CURRENCY_UPDATER_THREAD is None and ps:
         try:
+            base = os.getenv('CURRENCY_BASE', 'GBP')
+            target = os.getenv('CURRENCY_TARGET', 'EUR')
+            
+            # Ensure rate is populated (blocking call - checks if exists/is fresh)
+            conn = _db_connect()
+            if conn:
+                ps.ensure_currency_rate_populated(conn, base, target)
+                conn.close()
+            
+            # Schedule background updates
             _CURRENCY_UPDATER_THREAD = ps.schedule_currency_rate_update(
-                base=os.getenv('CURRENCY_BASE', 'GBP'),
-                target=os.getenv('CURRENCY_TARGET', 'EUR'),
+                base=base,
+                target=target,
                 interval_seconds=int(os.getenv('CURRENCY_UPDATE_INTERVAL', '86400'))
             )
             app.logger.info("Currency rate updater thread started")
@@ -1433,15 +1457,77 @@ def api_convert_currency():
         rate = ps.get_currency_rate(conn, base, target)
         if rate is None:
             return jsonify({'status': 'error', 'message': f'No rate found for {base}->{target}'}), 404
-        
-        result = ps.convert_currency(amount, rate, round_mode)
-        
+
+        result = ps.convert_currency(amount, rate, round_mode, target)
+
         return jsonify({
             'status': 'success',
             'base': base,
             'target': target,
             'amount_base': round(amount, 2),
             'conversion': result
+        })
+    except ValueError as e:
+        return jsonify({'status': 'error', 'message': f'Invalid input: {e}'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/currency/eur-suggestions', methods=['POST'])
+def api_eur_suggestions():
+    """Compute EUR rounding suggestions based on GBP total and store rate.
+    Body: { gbp_total, store_rate }
+    Response: { status, eur_exact, eur_round_up, eur_round_down, store_rate, gbp_total }
+    """
+    try:
+        data = request.json or {}
+        gbp_total = float(data.get('gbp_total') or 0)
+        store_rate = float(data.get('store_rate') or 1.0)
+        
+        if gbp_total < 0:
+            return jsonify({'status': 'error', 'message': 'GBP total must be non-negative'}), 400
+        if store_rate <= 0:
+            return jsonify({'status': 'error', 'message': 'Store rate must be positive'}), 400
+        
+        if not ps:
+            return jsonify({'status': 'error', 'message': 'pos_service not available'}), 500
+        
+        suggestions = ps.compute_eur_suggestions(gbp_total, store_rate)
+        
+        return jsonify({
+            'status': 'success',
+            **suggestions
+        })
+    except ValueError as e:
+        return jsonify({'status': 'error', 'message': f'Invalid input: {e}'}), 400
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/currency/effective-rate', methods=['POST'])
+def api_compute_effective_rate():
+    """Compute the effective rate for a sale given a chosen EUR target.
+    Body: { gbp_total, eur_target }
+    Response: { status, gbp_total, eur_target, effective_rate }
+    """
+    try:
+        data = request.json or {}
+        gbp_total = float(data.get('gbp_total') or 0)
+        eur_target = float(data.get('eur_target') or 0)
+        
+        if gbp_total <= 0:
+            return jsonify({'status': 'error', 'message': 'GBP total must be positive'}), 400
+        if eur_target < 0:
+            return jsonify({'status': 'error', 'message': 'EUR target must be non-negative'}), 400
+        
+        if not ps:
+            return jsonify({'status': 'error', 'message': 'pos_service not available'}), 500
+        
+        effective_rate = ps.compute_effective_rate(gbp_total, eur_target)
+        
+        return jsonify({
+            'status': 'success',
+            'gbp_total': float(gbp_total),
+            'eur_target': float(eur_target),
+            'effective_rate': float(effective_rate)
         })
     except ValueError as e:
         return jsonify({'status': 'error', 'message': f'Invalid input: {e}'}), 400

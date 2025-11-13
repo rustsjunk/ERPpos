@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS sales (
   payload_json   TEXT NOT NULL
 );
 
+-- FX rounding metadata (if EUR conversion was chosen)
+CREATE TABLE IF NOT EXISTS sales_fx (
+  sale_id            TEXT PRIMARY KEY REFERENCES sales(sale_id) ON DELETE CASCADE,
+  store_rate         NUMERIC,              -- e.g., 1.30 (1 GBP = 1.30 EUR) - daily reference
+  effective_rate     NUMERIC,              -- e.g., 1.243 (what actually happened after rounding)
+  eur_target         NUMERIC,              -- e.g., 55.00 (the "deal" amount in EUR that was chosen)
+  gbp_total          NUMERIC NOT NULL,     -- e.g., 44.23 (always in GBP, never changes)
+  eur_exact          NUMERIC,              -- e.g., 57.50 (gbp_total * store_rate, for reference)
+  created_utc        TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sale_lines (
   sale_id        TEXT NOT NULL REFERENCES sales(sale_id) ON DELETE CASCADE,
   line_no        INTEGER NOT NULL,
@@ -142,8 +153,12 @@ CREATE TABLE IF NOT EXISTS payments (
   sale_id        TEXT NOT NULL REFERENCES sales(sale_id) ON DELETE CASCADE,
   seq            INTEGER NOT NULL,
   method         TEXT NOT NULL,           -- 'Cash'|'Card'|'Voucher'|'GiftCard'|'StoreCredit'
-  amount         NUMERIC NOT NULL,
+  currency       TEXT DEFAULT 'GBP',      -- 'GBP'|'EUR'|'Other'
+  amount_gbp     NUMERIC NOT NULL,        -- Amount in GBP (base currency, always recorded)
+  amount_eur     NUMERIC,                 -- Amount in EUR if currency='EUR', else NULL
+  eur_rate       NUMERIC,                 -- Effective rate used for this payment (if EUR)
   ref            TEXT,
+  meta_json      TEXT,
   PRIMARY KEY (sale_id, seq)
 );
 
@@ -211,11 +226,12 @@ CREATE TABLE IF NOT EXISTS home_tiles (
 );
 
 CREATE TABLE IF NOT EXISTS rates (
-  base_currency   TEXT PRIMARY KEY,
+  base_currency   TEXT NOT NULL,
   target_currency TEXT NOT NULL,
   rate_to_base    NUMERIC NOT NULL,
-  last_updated    TEXT NOT NULL
-)
+  last_updated    TEXT NOT NULL,
+  PRIMARY KEY (base_currency, target_currency)
+);
 
 
 -- Incremental sync cursors (per ERPNext doctype)

@@ -58,8 +58,9 @@ let otherEntryDirty = false;
 let barcodeFeedbackTimer = null;
 
 // Currency conversion state
-let eurConversionData = null;  // { actual, rounded, rounded_down, rate, savings }
+let eurConversionData = null;  // { eur_exact, eur_round_up, eur_round_down, store_rate, gbp_total }
 let eurConversionActive = false;  // Whether EUR conversion is currently being used
+let saleEffectiveRate = null;  // Effective rate chosen for this sale (eur_target / gbp_total)
 function pickAttribute(attrs, keys){
   if(!attrs) return '';
   for(const key of keys){
@@ -111,74 +112,210 @@ async function convertCurrency(amount, base = 'GBP', target = 'EUR', roundMode =
   }
 }
 
-async function updateEurConversion(cashAmount) {
+async function fetchEurSuggestions(gbpTotal, storeRate) {
+  /**
+   * Fetch EUR rounding suggestions (round up/down to nearest 5 EUR).
+   */
   try {
-    const amt = Number(cashAmount || 0);
-    if (amt <= 0) {
-      eurConversionData = null;
-      updateEurConversionDisplay();
-      return;
-    }
-    
-    eurConversionData = await convertCurrency(amt, 'GBP', 'EUR', 'nearest');
-    updateEurConversionDisplay();
+    const resp = await fetch('/api/currency/eur-suggestions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gbp_total: gbpTotal, store_rate: storeRate })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.status === 'success' ? data : null;
   } catch (e) {
-    err('updateEurConversion error:', e);
+    err('Failed to fetch EUR suggestions:', e);
+    return null;
   }
 }
 
-function updateEurConversionDisplay() {
-  const section = document.getElementById('eurConversionSection');
-  const rateEl = document.getElementById('eurRate');
-  const actualEl = document.getElementById('eurActual');
-  const roundedEl = document.getElementById('eurRounded');
-  const roundedDownEl = document.getElementById('eurRoundedDown');
-  const useRoundedBtn = document.getElementById('useEurRoundedBtn');
-  const useRoundedDownBtn = document.getElementById('useEurRoundedDownBtn');
-  
-  if (!eurConversionData || !section) return;
-  
-  const { actual, rounded, rounded_down, rate, savings } = eurConversionData;
-  
-  if (rateEl) rateEl.textContent = (rate || 1).toFixed(4);
-  if (actualEl) actualEl.textContent = `€ ${(actual || 0).toFixed(2)}`;
-  if (roundedEl) roundedEl.textContent = `€ ${(rounded || 0).toFixed(2)}`;
-  if (roundedDownEl) {
-    const savingsText = savings > 0 ? ` (save €${savings.toFixed(2)})` : '';
-    roundedDownEl.textContent = `€ ${(rounded_down || 0).toFixed(2)}${savingsText}`;
+async function computeEffectiveRate(gbpTotal, eurTarget) {
+  /**
+   * Compute effective_rate = eurTarget / gbpTotal.
+   * This rate will be used for all EUR payment conversions in this sale.
+   */
+  try {
+    const resp = await fetch('/api/currency/effective-rate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gbp_total: gbpTotal, eur_target: eurTarget })
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.status === 'success' ? data.effective_rate : null;
+  } catch (e) {
+    err('Failed to compute effective rate:', e);
+    return null;
   }
-  
-  if (useRoundedBtn) {
-    useRoundedBtn.textContent = `Use Rounded (€ ${(rounded || 0).toFixed(2)})`;
-  }
-  if (useRoundedDownBtn) {
-    useRoundedDownBtn.textContent = `Use Down (€ ${(rounded_down || 0).toFixed(2)})`;
-  }
-  
-  // Show section if we have data
-  if (section) section.style.display = 'block';
 }
 
-function applyEurConversion(roundMode) {
-  // roundMode: 'rounded' or 'rounded_down'
+function applyEurConversion(eurTarget) {
+  /**
+   * User has chosen a EUR target (rounded up, down, or custom).
+   * Compute effective_rate and record it in the sale.
+   * Create an applied payment with both GBP and EUR amounts.
+   * Update UI to reflect that EUR mode is active.
+   */
   if (!eurConversionData) return;
+
+  const gbpTotal = eurConversionData.gbp_total || 0;
+  if (gbpTotal <= 0) {
+    alert('Invalid GBP total');
+    return;
+  }
+
+  // Compute and store the effective rate
+  saleEffectiveRate = Number((eurTarget / gbpTotal).toFixed(4));
   
-  const amount = roundMode === 'rounded_down' ? eurConversionData.rounded_down : eurConversionData.rounded;
-  
-  // Apply EUR as a payment with special metadata
+  // Record in sale metadata
+  window.saleEurMetadata = {
+    store_rate: eurConversionData.store_rate,
+    effective_rate: saleEffectiveRate,
+    eur_target: Number(eurTarget.toFixed(2)),
+    gbp_total: Number(gbpTotal.toFixed(2)),
+    eur_exact: eurConversionData.eur_exact
+  };
+
+  // Create payment record with both GBP and EUR amounts
+  const gbpEquivalent = Number((eurTarget / saleEffectiveRate).toFixed(2));
   appliedPayments.push({
-    mode_of_payment: 'Cash (EUR)',
-    amount: amount,
-    currency: 'EUR',
-    currency_rate: eurConversionData.rate,
-    original_gbp: eurConversionData.actual / eurConversionData.rate
+    mode_of_payment: 'Cash',
+    amount: gbpEquivalent,  // This is the GBP equivalent (what we record in accounts)
+    reference_no: null,
+    currency: 'EUR',        // Mark this as EUR payment
+    amount_eur: Number(eurTarget.toFixed(2)),
+    eur_rate: saleEffectiveRate,
+    meta: {
+      currency: 'EUR',
+      eur_amount: Number(eurTarget.toFixed(2)),
+      eur_rate: saleEffectiveRate,
+      gbp_equivalent: gbpEquivalent
+    }
   });
-  
+
   eurConversionActive = true;
-  renderAppliedPayments();
+  
+  // Hide the EUR panel and suggestions
+  const eurSection = document.getElementById('eurSuggestionsDiv');
+  if (eurSection) eurSection.style.display = 'none';
+  
   updateCashSection();
   resetTenderInputs();
 }
+
+async function openEurConversionOverlay(gbpTotal) {
+  /**
+   * Open the EUR conversion overlay modal.
+   * Fetch suggestions and populate the overlay with GBP total, store rate, and EUR amounts.
+   */
+  if (gbpTotal <= 0) return;
+
+  // Get store rate from settings or default
+  const storeRate = settings && settings.currency_rate ? settings.currency_rate : 1.30;
+  
+  // Fetch EUR suggestions
+  const suggestions = await fetchEurSuggestions(gbpTotal, storeRate);
+  if (!suggestions) {
+    alert('Failed to fetch EUR conversion suggestions');
+    return;
+  }
+
+  // Store in global for later use
+  eurConversionData = suggestions;
+
+  // Populate overlay elements
+  document.getElementById('eurOverlayGbpTotal').textContent = `£${gbpTotal.toFixed(2)}`;
+  document.getElementById('eurOverlayStoreRate').textContent = `${storeRate.toFixed(4)} EUR`;
+  document.getElementById('eurOverlayExact').textContent = `€${(suggestions.eur_exact || 0).toFixed(2)}`;
+  document.getElementById('eurOverlayRoundUp').textContent = `€${(suggestions.eur_round_up || 0).toFixed(2)}`;
+  document.getElementById('eurOverlayRoundDown').textContent = `€${(suggestions.eur_round_down || 0).toFixed(2)}`;
+
+  // Update button labels
+  document.getElementById('eurSelectRoundUpLabel').textContent = `€${(suggestions.eur_round_up || 0).toFixed(2)}`;
+  document.getElementById('eurSelectRoundDownLabel').textContent = `€${(suggestions.eur_round_down || 0).toFixed(2)}`;
+
+  // Clear custom input
+  const customInput = document.getElementById('eurCustomInput');
+  if (customInput) customInput.value = '';
+
+  // Show the modal
+  const modal = new bootstrap.Modal(document.getElementById('eurConversionOverlay'));
+  modal.show();
+}
+
+const _eurModalElement = document.getElementById('eurConversionOverlay');
+if (_eurModalElement) {
+  _eurModalElement.addEventListener('shown.bs.modal', () => {
+    document.querySelectorAll('.modal-backdrop').forEach(el => el.classList.add('eur-modal-backdrop'));
+  });
+  _eurModalElement.addEventListener('hidden.bs.modal', () => {
+    document.querySelectorAll('.modal-backdrop.eur-modal-backdrop').forEach(el => el.classList.remove('eur-modal-backdrop'));
+  });
+}
+
+function eurApplyRounding(roundMode) {
+  /**
+   * User selected "Round Up" or "Round Down" button.
+   * Apply the corresponding EUR amount and close the modal.
+   */
+  if (!eurConversionData) {
+    alert('No EUR conversion data available');
+    return;
+  }
+
+  const eurTarget = roundMode === 'up' ? eurConversionData.eur_round_up : eurConversionData.eur_round_down;
+  
+  // Close modal
+  const modal = bootstrap.Modal.getInstance(document.getElementById('eurConversionOverlay'));
+  if (modal) modal.hide();
+
+  // Apply the conversion
+  applyEurConversion(eurTarget);
+}
+
+function eurApplyCustom() {
+  /**
+   * User entered a custom EUR amount.
+   * Apply it and close the modal.
+   */
+  const customInput = document.getElementById('eurCustomInput');
+  const eurTarget = parseFloat(customInput?.value || 0);
+
+  if (eurTarget <= 0) {
+    alert('Please enter a valid EUR amount');
+    return;
+  }
+
+  if (!eurConversionData) {
+    alert('No EUR conversion data available');
+    return;
+  }
+
+  // Close modal
+  const modal = bootstrap.Modal.getInstance(document.getElementById('eurConversionOverlay'));
+  if (modal) modal.hide();
+
+  // Apply the conversion
+  applyEurConversion(eurTarget);
+}
+
+function updateEurEffectiveRateDisplay(eurTarget) {
+  /**
+   * Display the effective rate that will be used for this sale.
+   */
+  if (!eurConversionData) return;
+
+  const gbpTotal = eurConversionData.gbp_total || 0;
+  if (gbpTotal <= 0) return;
+
+  const effectiveRate = (eurTarget / gbpTotal).toFixed(4);
+  const display = `1 GBP = ${effectiveRate} EUR`;
+  const el = document.getElementById('eurEffectiveRateDisplay');
+  if (el) el.textContent = display;
+}
+
 // App settings and receipt state
 // App-wide persisted settings + simple Z-read aggregates
 const RECEIPT_DEFAULT_HEADER_LINES = [
@@ -1282,6 +1419,31 @@ function bindEvents(){
         }
       });
     }
+    
+    // Convert to Euro button
+    const convertToEuroBtn = document.getElementById('convertToEuroBtn');
+    if(convertToEuroBtn){
+      convertToEuroBtn.addEventListener('click', async ()=>{
+        const amountDueEl = document.getElementById('amountDue');
+        const amountDue = amountDueEl ? Number(amountDueEl.textContent.replace(/[^\d.-]/g, '')) : 0;
+        
+        if(amountDue <= 0){
+          alert('No amount due to convert.');
+          return;
+        }
+
+        // Pre-fill cash field so the amount is visible
+        const cashField = document.getElementById('cashInputField');
+        if(cashField){
+          cashField.value = amountDue.toFixed(2);
+          cashField.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // Open the EUR conversion modal
+        await openEurConversionOverlay(amountDue);
+      });
+    }
+    
     const applyOtherBtn = document.getElementById('applyOtherBtn');
     if(applyOtherBtn){
       applyOtherBtn.addEventListener('click', ()=>{
@@ -1302,47 +1464,12 @@ function bindEvents(){
       });
     }
     
-    // EUR Conversion button handlers
-    const toggleEurBtn = document.getElementById('toggleEurBtn');
-    const useEurRoundedBtn = document.getElementById('useEurRoundedBtn');
-    const useEurRoundedDownBtn = document.getElementById('useEurRoundedDownBtn');
-    const cashInputField = document.getElementById('cashInputField');
-    
-    if (cashInputField) {
-      // Update EUR conversion whenever cash input changes
-      cashInputField.addEventListener('input', async () => {
-        const val = Number(cashInputField.value || 0);
-        if (val > 0 && currentTender === 'cash') {
-          await updateEurConversion(val);
-        }
-      });
-    }
-    
-    if (toggleEurBtn) {
-      toggleEurBtn.addEventListener('click', async () => {
-        const val = Number(cashInputField && cashInputField.value || cashInput || 0) || 0;
-        if (val > 0) {
-          await updateEurConversion(val);
-          const section = document.getElementById('eurConversionSection');
-          if (section) section.style.display = section.style.display === 'none' ? 'block' : 'none';
-        } else {
-          alert('Please enter a cash amount first');
-        }
-      });
-    }
-    
-    if (useEurRoundedBtn) {
-      useEurRoundedBtn.addEventListener('click', () => {
-        if (eurConversionData) {
-          applyEurConversion('rounded');
-        }
-      });
-    }
-    
-    if (useEurRoundedDownBtn) {
-      useEurRoundedDownBtn.addEventListener('click', () => {
-        if (eurConversionData) {
-          applyEurConversion('rounded_down');
+    const eurCustomInput = document.getElementById('eurCustomInput');
+    if (eurCustomInput) {
+      eurCustomInput.addEventListener('input', () => {
+        const eurTarget = parseFloat(eurCustomInput.value || 0);
+        if (eurTarget > 0) {
+          updateEurEffectiveRateDisplay(eurTarget);
         }
       });
     }
@@ -1739,7 +1866,18 @@ function renderAppliedPayments(){
       const row = document.createElement('div');
       row.className = 'd-flex justify-content-between align-items-center py-1 border-bottom';
       const left = document.createElement('div');
-      left.textContent = `${p.mode_of_payment}${p.reference_no? ' ('+p.reference_no+')':''}`;
+      // Show currency metadata if present (EUR payments)
+      let label = p.mode_of_payment || '';
+      try {
+        if (p.meta && p.meta.currency === 'EUR') {
+          label = `${label} (EUR €${Number(p.meta.eur_amount||0).toFixed(2)})`;
+        } else if (p.currency) {
+          label = `${label} (${p.currency})`;
+        }
+      } catch (e) {
+        // ignore
+      }
+      left.textContent = `${label}${p.reference_no? ' ('+p.reference_no+')':''}`;
       const right = document.createElement('div');
       const amt = document.createElement('span');
       amt.className = 'me-2';
@@ -1789,6 +1927,9 @@ function updateCashSection() {
     appliedPayments = [];
     vouchers = [];
     resetTenderInputs();
+    eurConversionActive = false;
+    saleEffectiveRate = null;
+    window.saleEurMetadata = null;
   }
   const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
   const paidCash = appliedPayments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
@@ -1812,8 +1953,10 @@ function updateCashSection() {
     voucherBtn.disabled = isRefund;
   }
   if (otherFullBtn) otherFullBtn.disabled = isRefund;
+  
   renderAppliedPayments();
 }
+
 
 // Select tender type (Cash / Card / Voucher / Other)
 function selectTender(t){
@@ -1889,9 +2032,12 @@ async function completeSaleFromOverlay() {
 
   const payments = isRefund ? [] : appliedPayments.map(p=>({ 
     mode_of_payment: p.mode_of_payment, 
-    amount: Number(p.amount||0), 
+    amount: Number(p.amount||0),
+    amount_gbp: Number(p.amount||0),  // Always recorded in GBP
+    amount_eur: p.amount_eur ? Number(p.amount_eur) : undefined,
+    currency: p.currency || 'GBP',
+    eur_rate: p.eur_rate ? Number(p.eur_rate) : undefined,
     reference_no: p.reference_no || undefined,
-    currency: p.currency || undefined,
     currency_rate: p.currency_rate || undefined
   }));
   const voucherList = isRefund ? [] : appliedPayments.filter(p=>p.mode_of_payment==='Voucher').map(p=>({ code: p.reference_no||'', amount: Number(p.amount||0) }));
@@ -1914,9 +2060,10 @@ async function completeSaleFromOverlay() {
     vouchers: voucherList,
     till_number: settings.till_number,
     cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
-    // Currency information
+    // Currency information - include full FX metadata if EUR conversion was active
     currency_used: eurConversionActive ? 'EUR' : 'GBP',
-    currency_rate_used: eurConversionActive && eurConversionData ? eurConversionData.rate : 1.0
+    currency_rate_used: eurConversionActive && eurConversionData ? eurConversionData.store_rate : 1.0,
+    fx_metadata: eurConversionActive && window.saleEurMetadata ? window.saleEurMetadata : null
   };
 
   try {

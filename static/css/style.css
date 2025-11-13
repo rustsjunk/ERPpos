@@ -339,6 +339,12 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     justify-content: center;
     z-index: 2000;
 }
+.eur-conversion-modal {
+    z-index: 2500 !important;
+}
+.modal-backdrop.eur-modal-backdrop {
+    z-index: 2450 !important;
+}
 .search-modal {
     background: #ffffff;
     border-radius: 12px;
@@ -397,22 +403,6 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     
     /* Applied payments list more compact */
     .applied-payments-list { max-height: clamp(120px, 20vh, 300px); }
-    
-    /* EUR conversion section tighter */
-    #eurConversionSection {
-        padding: clamp(8px, 2vh, 12px) !important;
-        margin-top: 12px !important;
-    }
-    #eurConversionSection .d-flex {
-        gap: 8px;
-    }
-    #eurConversionSection small {
-        font-size: 0.8rem;
-    }
-    #eurConversionSection .btn {
-        padding: clamp(4px, 1vh, 6px) clamp(8px, 2vw, 10px);
-        font-size: clamp(0.75rem, 1.5vw, 0.85rem);
-    }
     
     /* Cart column on 4:3 aspect ratio */
     .cart-column #cartCard {
