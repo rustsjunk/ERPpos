@@ -757,10 +757,16 @@ def create_sale():
         submit_response = requests.post(
             f"{ERPNEXT_URL}/api/method/frappe.client.submit",
             headers=_erp_headers(),
-            json={'doctype': 'Sales Invoice', 'name': invoice['name']},
+            json={
+                'doc': {
+                    'doctype': 'Sales Invoice',
+                    'name': invoice['name'],
+                }
+            },
             timeout=20
         )
         submit_response.raise_for_status()
+
 
         # Persist invoice file (placeholder JSON format)
         try:
