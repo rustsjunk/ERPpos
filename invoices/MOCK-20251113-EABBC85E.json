@@ -1,0 +1,39 @@
+{
+  "invoice_name": "MOCK-20251113-EABBC85E",
+  "sale_id": "MOCK-20251113-EABBC85E",
+  "created_at": "2025-11-13T20:42:31.973773",
+  "mode": "mock",
+  "customer": "CUST-WALKIN",
+  "items": [
+    {
+      "item_code": "Adesso-Raine-A8184-Mariners Glow-36 EU",
+      "qty": 2,
+      "rate": 110
+    },
+    {
+      "item_code": "Adesso-Raine-A8183-Jungle Gleam-36 EU",
+      "qty": 2,
+      "rate": 110
+    }
+  ],
+  "payments": [
+    {
+      "mode_of_payment": "Cash",
+      "amount": 3000,
+      "amount_gbp": 3000,
+      "currency": "GBP"
+    }
+  ],
+  "tender": "Cash",
+  "cash_given": 3000,
+  "change": 2560,
+  "total": 440,
+  "vouchers": [],
+  "cashier": {
+    "code": "19",
+    "name": "Josh"
+  },
+  "currency_used": "GBP",
+  "currency_rate_used": 1,
+  "fx_metadata": null
+}

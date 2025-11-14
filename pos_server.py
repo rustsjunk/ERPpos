@@ -75,6 +75,9 @@ ATTRIBUTE_SYNONYMS = {
 QZ_CERTIFICATE = os.getenv('QZ_CERTIFICATE', '').strip() or None
 QZ_PRIVATE_KEY = os.getenv('QZ_PRIVATE_KEY', '').strip() or None
 
+# Force POS to stay in local queue-only mode even when ERP creds exist.
+POS_QUEUE_ONLY = os.getenv('POS_QUEUE_ONLY', '0') == '1'
+
 # Optional SQLite service helpers
 try:
     import pos_service as ps
@@ -638,112 +641,202 @@ def api_cashier_login():
         row = conn.execute("SELECT code, name FROM cashiers WHERE active=1 AND code = ?", (stripped,)).fetchone()
     if not row:
         return jsonify({'status': 'error', 'message': 'Invalid code'}), 401
+    try:
+        ingested = _ingest_new_local_invoices(conn)
+        if ingested:
+            app.logger.info("Ingested %s local invoice(s) into SQLite during cashier login", ingested)
+    except Exception:
+        pass
     return jsonify({'status': 'success', 'cashier': {'code': row['code'], 'name': row['name']}})
+
+
+def _generate_invoice_name(prefix: str) -> str:
+    """Stable invoice names for offline receipts."""
+    return f"{prefix}-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}"
+
+
+def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
+    """Persist the JSON receipt for audit/replay."""
+    try:
+        os.makedirs('invoices', exist_ok=True)
+        record = {
+            'invoice_name': invoice_name,
+            'sale_id': invoice_name,
+            'created_at': datetime.now().isoformat(),
+            'mode': mode_label,
+            'customer': data.get('customer'),
+            'items': data.get('items') or [],
+            'payments': data.get('payments') or [],
+            'tender': data.get('tender'),
+            'cash_given': data.get('cash_given'),
+            'change': data.get('change'),
+            'total': data.get('total'),
+            'vouchers': data.get('vouchers') or [],
+            'cashier': data.get('cashier'),
+            'currency_used': data.get('currency_used', 'GBP'),
+            'currency_rate_used': data.get('currency_rate_used', 1.0),
+            'fx_metadata': data.get('fx_metadata')
+        }
+        with open(os.path.join('invoices', f"{invoice_name}.json"), 'w', encoding='utf-8') as f:
+            _json.dump(record, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _build_sale_payload(data: dict, sale_id: str) -> dict:
+    """Normalize incoming checkout data for the local SQLite queue."""
+    items = data.get('items') or []
+    payments = data.get('payments') or []
+    vouchers = data.get('vouchers') or []
+
+    lines = []
+    for it in items:
+        item_id = it.get('item_code') or it.get('code') or it.get('name')
+        if not item_id:
+            continue
+        lines.append({
+            'item_id': item_id,
+            'item_name': it.get('item_name') or it.get('name') or '',
+            'brand': it.get('brand'),
+            'attributes': it.get('attributes') or {},
+            'qty': float(it.get('qty') or 0),
+            'rate': float(it.get('rate') or 0),
+            'barcode_used': it.get('barcode_used') or it.get('barcode') or None,
+        })
+
+    payments_payload = []
+    for p in payments:
+        amount = float(p.get('amount') or p.get('amount_gbp') or 0)
+        payments_payload.append({
+            'method': (p.get('mode_of_payment') or p.get('method') or 'Other'),
+            'amount': amount,
+            'amount_gbp': float(p.get('amount_gbp') or amount),
+            'amount_eur': float(p.get('amount_eur')) if p.get('amount_eur') else None,
+            'currency': (p.get('currency') or 'GBP').upper(),
+            'eur_rate': float(p.get('eur_rate')) if p.get('eur_rate') else None,
+            'ref': p.get('ref'),
+            'meta': p.get('meta')
+        })
+
+    voucher_payload = [
+        {'code': v.get('code'), 'amount': float(v.get('amount') or 0)}
+        for v in vouchers if v.get('code')
+    ]
+
+    cashier = (data.get('cashier') or {}).get('code') or (data.get('cashier') or {}).get('name')
+
+    return {
+        'sale_id': sale_id,
+        'cashier': cashier,
+        'customer_id': data.get('customer'),
+        'warehouse': data.get('warehouse') or POS_WAREHOUSE,
+        'lines': lines,
+        'payments': payments_payload,
+        'voucher_redeem': voucher_payload,
+        'discount': float(data.get('discount') or 0),
+        'tax': float(data.get('tax') or 0),
+    }
+
+
+def _record_local_sale(invoice_name: str, data: dict) -> None:
+    if not ps:
+        return
+    try:
+        conn = _db_connect() or ps.connect(POS_DB_PATH)
+        if not conn:
+            return
+        sale_payload = _build_sale_payload(data, invoice_name)
+        fx_metadata = data.get('fx_metadata')
+        if fx_metadata:
+            ps.record_sale_with_fx(conn, sale_payload, fx_metadata)
+        else:
+            ps.record_sale(conn, sale_payload)
+    except Exception:
+        pass
+
+
+def _persist_local_sale(data: dict, prefix: str, mode_label: str) -> str:
+    invoice_name = _generate_invoice_name(prefix)
+    _save_invoice_file(invoice_name, data, mode_label)
+    _record_local_sale(invoice_name, data)
+    return invoice_name
+
+
+def _ingest_new_local_invoices(conn: Optional[sqlite3.Connection]) -> int:
+    """Replay invoices/*.json that have not yet been persisted into SQLite."""
+    if not ps or not conn:
+        return 0
+    inv_dir = Path('invoices')
+    if not inv_dir.is_dir():
+        return 0
+    ingested = 0
+    for inv_path in sorted(inv_dir.glob('*.json')):
+        try:
+            with open(inv_path, 'r', encoding='utf-8') as f:
+                record = _json.load(f)
+        except Exception:
+            continue
+        sale_id = record.get('sale_id') or record.get('invoice_name') or inv_path.stem
+        if not sale_id:
+            continue
+        try:
+            exists = conn.execute('SELECT 1 FROM sales WHERE sale_id=?', (sale_id,)).fetchone()
+        except Exception:
+            exists = None
+        if exists:
+            continue
+        try:
+            payload = _build_sale_payload(record, sale_id)
+            fx_metadata = record.get('fx_metadata')
+            app.logger.info('Recording sale ID "%s" into database', sale_id)
+
+            if fx_metadata:
+                ps.record_sale_with_fx(conn, payload, fx_metadata)
+                app.logger.info('Recorded sale ID "%s" with FX into database', sale_id)
+            else:
+                ps.record_sale(conn, payload)
+                app.logger.info('Recorded sale ID "%s" into database', sale_id)
+
+            ingested += 1
+
+        except Exception:
+            app.logger.exception('Failed to record sale "%s" from %s', sale_id, inv_path)
+            continue
+
 
 
 @app.route('/api/create-sale', methods=['POST'])
 def create_sale():
     """Create a sales invoice"""
+    data = request.json or {}
+    customer = data.get('customer')
+    if not customer:
+        return jsonify({'status': 'error', 'message': 'Customer is required'}), 400
+    items = data.get('items') or []
+    if not items:
+        return jsonify({'status': 'error', 'message': 'Items are required'}), 400
+    payments = data.get('payments') or []
+
+    if POS_QUEUE_ONLY:
+        prefix = 'LOCAL'
+        mode_label = 'local'
+        invoice_name = _persist_local_sale(data, prefix, mode_label)
+        return jsonify({'status': 'success', 'message': 'Sale recorded (queued locally for sync)', 'invoice_name': invoice_name})
     if USE_MOCK:
-        data = request.json or {}
-        if not data.get('customer'):
-            return jsonify({'status': 'error', 'message': 'Customer is required'}), 400
-        if not data.get('items'):
-            return jsonify({'status': 'error', 'message': 'Items are required'}), 400
-        invoice_name = f"MOCK-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}"
-        # Persist a simple invoice file (placeholder JSON format)
-        try:
-            os.makedirs('invoices', exist_ok=True)
-            record = {
-                'invoice_name': invoice_name,
-                'created_at': datetime.now().isoformat(),
-                'mode': 'mock',
-                'customer': data.get('customer'),
-                'items': data.get('items', []),
-                'payments': data.get('payments', []),
-                'tender': data.get('tender'),
-                'cash_given': data.get('cash_given'),
-                'change': data.get('change'),
-                'total': data.get('total'),
-                'vouchers': data.get('vouchers', []),
-                'cashier': data.get('cashier'),
-                'currency_used': data.get('currency_used', 'GBP'),
-                'currency_rate_used': data.get('currency_rate_used', 1.0),
-                'fx_metadata': data.get('fx_metadata')  # Include FX metadata for audit trail
-            }
-            with open(os.path.join('invoices', f"{invoice_name}.json"), 'w', encoding='utf-8') as f:
-                import json
-                json.dump(record, f, ensure_ascii=False, indent=2)
-        except Exception:
-            # Don't fail the sale if writing the file has issues
-            pass
-        # Also index the sale into SQLite outbox for durable tracking (idempotency via invoice_name)
-        try:
-            if ps:
-                conn = _db_connect() or ps.connect(POS_DB_PATH)
-                sale_payload = {
-                    'sale_id': invoice_name,  # idempotency key matches file name
-                    'cashier': (data.get('cashier') or {}).get('code') or (data.get('cashier') or {}).get('name'),
-                    'customer_id': data.get('customer'),
-                    'lines': [
-                        {
-                            'item_id': it.get('item_code') or it.get('code') or it.get('name'),
-                            'item_name': it.get('item_name') or it.get('name') or (it.get('item_code') or ''),
-                            'brand': it.get('brand'),
-                            'attributes': it.get('attributes') or {},
-                            'qty': float(it.get('qty') or 0),
-                            'rate': float(it.get('rate') or 0),
-                            'barcode_used': None,
-                        }
-                        for it in (data.get('items') or [])
-                    ],
-                    'payments': [
-                        {
-                            'method': (p.get('mode_of_payment') or p.get('method') or 'Other'),
-                            'amount': float(p.get('amount') or 0),
-                            'amount_gbp': float(p.get('amount_gbp') or p.get('amount') or 0),
-                            'amount_eur': float(p.get('amount_eur')) if p.get('amount_eur') else None,
-                            'currency': (p.get('currency') or 'GBP').upper(),
-                            'eur_rate': float(p.get('eur_rate')) if p.get('eur_rate') else None,
-                            'ref': p.get('ref'),
-                            'meta': p.get('meta')  # EUR metadata
-                        }
-                        for p in (data.get('payments') or [])
-                    ],
-                    'warehouse': 'Shop',
-                    'voucher_redeem': [
-                        {
-                            'code': v.get('code'),
-                            'amount': float(v.get('amount') or 0)
-                        }
-                        for v in (data.get('vouchers') or []) if v.get('code')
-                    ],
-                }
-                # FX metadata for sale-level FX tracking
-                fx_metadata = data.get('fx_metadata')
-                try:
-                    # Use record_sale_with_fx to also record FX metadata if present
-                    if fx_metadata:
-                        ps.record_sale_with_fx(conn, sale_payload, fx_metadata)
-                    else:
-                        ps.record_sale(conn, sale_payload)
-                except Exception:
-                    # Do not block POS on DB/indexing issues
-                    pass
-        except Exception:
-            pass
+        prefix = 'MOCK'
+        mode_label = 'mock'
+        invoice_name = _persist_local_sale(data, prefix, mode_label)
         return jsonify({'status': 'success', 'message': 'Sale recorded (mock)', 'invoice_name': invoice_name})
+
     try:
-        data = request.json
         invoice_data = {
             'doctype': 'Sales Invoice',
-            'customer': data['customer'],
+            'customer': customer,
             'posting_date': datetime.now().strftime('%Y-%m-%d'),
-            'items': data['items'],
+            'items': items,
             'is_pos': 1,
-            'payments': data['payments']
+            'payments': payments
         }
-        # Create invoice
         response = requests.post(
             f"{ERPNEXT_URL}/api/resource/Sales Invoice",
             headers=_erp_headers(),
@@ -753,7 +846,6 @@ def create_sale():
         response.raise_for_status()
         invoice = response.json().get('data', {})
 
-        # Submit invoice
         submit_response = requests.post(
             f"{ERPNEXT_URL}/api/method/frappe.client.submit",
             headers=_erp_headers(),
@@ -767,30 +859,7 @@ def create_sale():
         )
         submit_response.raise_for_status()
 
-
-        # Persist invoice file (placeholder JSON format)
-        try:
-            data = data or {}
-            os.makedirs('invoices', exist_ok=True)
-            record = {
-                'invoice_name': invoice['name'],
-                'created_at': datetime.now().isoformat(),
-                'mode': 'erpnext',
-                'customer': data.get('customer'),
-                'items': data.get('items', []),
-                'payments': data.get('payments', []),
-                'tender': data.get('tender'),
-                'cash_given': data.get('cash_given'),
-                'change': data.get('change'),
-                'total': data.get('total'),
-                'vouchers': data.get('vouchers', []),
-                'cashier': data.get('cashier')
-            }
-            with open(os.path.join('invoices', f"{invoice['name']}.json"), 'w', encoding='utf-8') as f:
-                import json
-                json.dump(record, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        _save_invoice_file(invoice['name'], data, 'erpnext')
         return jsonify({'status': 'success', 'message': 'Sale completed successfully', 'invoice_name': invoice['name']})
     except requests.HTTPError as e:
         return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500

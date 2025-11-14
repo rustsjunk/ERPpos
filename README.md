@@ -60,9 +60,10 @@ With `USE_MOCK=0`, ERPpos now auto-initializes `POS_DB_PATH` using `schema.sql` 
 
 ## Modes & behavior
 
-- Mock mode (default) — fast local testing using built-in mock items and customers. Use `USE_MOCK=1`.
-- ERPNEXT mode — real integration using `ERPNEXT_URL`, `ERPNEXT_API_KEY`, and `ERPNEXT_API_SECRET`.
+- Mock mode (default) – fast local testing using built-in mock items and customers. Use `USE_MOCK=1`.
+- ERPNEXT mode – real integration using `ERPNEXT_URL`, `ERPNEXT_API_KEY`, and `ERPNEXT_API_SECRET`.
 - The app writes invoice JSON files into `invoices/` for audit and offline recovery. In mock mode invoices are prefixed `MOCK-YYYYMMDD-<id>.json`.
+- Set `POS_QUEUE_ONLY=1` when you want checkout to stop at the local invoice/outbox (just write a JSON receipt) even though ERP credentials are configured; the receipts can be replayed later via `sync_worker` or manual posting.
 
 ## Development notes
 

@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS sales (
   tax            NUMERIC NOT NULL,
   discount       NUMERIC NOT NULL DEFAULT 0,
   total          NUMERIC NOT NULL,
-  currency_used      TEXT NOT NULL,
+  currency_used      TEXT NOT NULL DEFAULT 'GBP',  -- 'GBP'|'EUR'|'Other'
   rate_used           NUMERIC NOT NULL DEFAULT 1,  -- to base currency
   pay_status     TEXT NOT NULL,           -- 'paid'|'partially_paid'|'refunded'
   queue_status   TEXT NOT NULL,           -- 'queued'|'posting'|'posted'|'failed'
