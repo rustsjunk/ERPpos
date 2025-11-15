@@ -1,12 +1,12 @@
 {
-  "invoice_name": "LOCAL-20251113-2CF1F80F",
-  "sale_id": "LOCAL-20251113-2CF1F80F",
-  "created_at": "2025-11-13T20:52:02.630611",
+  "invoice_name": "LOCAL-20251114-0058C94A",
+  "sale_id": "LOCAL-20251114-0058C94A",
+  "created_at": "2025-11-14T11:03:20.937381",
   "mode": "local",
-  "customer": "CUST-WALKIN",
+  "customer": "Walk-In Customer",
   "items": [
     {
-      "item_code": "Adesso-Raine-A8183-Jungle Gleam-36 EU",
+      "item_code": "Adesso-Raine-A8184-Mariners Glow-41 EU",
       "qty": 1,
       "rate": 110
     }

@@ -53,6 +53,39 @@ def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]):
     """
     conn.execute(sql, item)
 
+def _serialize_item_attributes(attributes: Any) -> Optional[str]:
+    if not attributes:
+        return None
+    if isinstance(attributes, dict):
+        try:
+            return json.dumps(attributes, separators=(",",":"))
+        except TypeError:
+            return json.dumps({str(k): str(v) for k, v in attributes.items()}, separators=(",",":"))
+    if isinstance(attributes, str):
+        attr = attributes.strip()
+        return attr or None
+    return str(attributes)
+
+
+def ensure_item_for_sale_line(conn: sqlite3.Connection, line: Dict[str, Any]):
+    item_id = (line.get("item_id") or "").strip()
+    if not item_id:
+        return
+    name = (line.get("item_name") or "").strip() or item_id
+    brand = line.get("brand")
+    attributes = _serialize_item_attributes(line.get("attributes"))
+    now = iso_now()
+    conn.execute("""
+        INSERT INTO items (item_id, parent_id, name, brand, attributes, price, image_url, is_template, active, modified_utc)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(item_id) DO UPDATE SET
+            name=COALESCE(NULLIF(excluded.name,''), items.name),
+            brand=COALESCE(excluded.brand, items.brand),
+            attributes=COALESCE(NULLIF(excluded.attributes,''), items.attributes),
+            modified_utc=excluded.modified_utc,
+            active=1
+    """, (item_id, None, name, brand, attributes, None, None, 0, 1, now))
+
 def upsert_barcode(conn: sqlite3.Connection, barcode: str, item_id: str):
     sql = """
     INSERT INTO barcodes (barcode, item_id) VALUES (?,?)
@@ -200,6 +233,7 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
 
         # Lines
         for idx, l in enumerate(lines, start=1):
+            ensure_item_for_sale_line(conn, l)
             conn.execute("""
                 INSERT INTO sale_lines (sale_id, line_no, item_id, item_name, brand, attributes, qty, rate, line_total, barcode_used)
                 VALUES (?,?,?,?,?,?,?,?,?,?)

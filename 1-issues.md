@@ -13,6 +13,8 @@
 2. voucher needs to verify with erpnext giftvoucher doc type.
 3. plastic bag should be option at checkout
 4. when euro is made create a print ouyt with the value taken and rate used to secure to euro in till.
+5. partially paid sales 
+6. Check payload json and database sales are properly written.
 
 # search
 1. not showing variant prices
@@ -26,3 +28,4 @@
 # db
 1. sales not saving into db, due to draft sales not going into erpnext.
 2. vat rate also per item rather than hardcoded on till.
+3. product style code
