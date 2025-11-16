@@ -63,6 +63,10 @@ let eurConversionActive = false;  // Whether EUR conversion is currently being u
 let saleEffectiveRate = null;  // Effective rate chosen for this sale (eur_target / gbp_total)
 let eurSelectedMode = null;
 let eurExpectedAmount = 0;
+const DEFAULT_STORE_RATE = 1.30;
+let cachedStoreRate = null;
+let cachedStoreRateFetchedAt = 0;
+const STORE_RATE_TTL_MS = 60 * 60 * 1000; // cache live rates for 1 hour
 if (typeof window !== 'undefined') {
   window.saleEurMetadata = null;
 }
@@ -99,6 +103,34 @@ async function fetchCurrencyRate(base = 'GBP', target = 'EUR') {
     err('Failed to fetch currency rate:', e);
     return null;
   }
+}
+
+async function getStoreCurrencyRate(base = 'GBP', target = 'EUR') {
+  const now = Date.now();
+  if (cachedStoreRate && (now - cachedStoreRateFetchedAt) < STORE_RATE_TTL_MS) {
+    return cachedStoreRate;
+  }
+  const live = await fetchCurrencyRate(base, target);
+  if (typeof live === 'number' && Number.isFinite(live) && live > 0) {
+    cachedStoreRate = live;
+    cachedStoreRateFetchedAt = now;
+    try {
+      if (settings) {
+        settings.currency_rate = live;
+        settings.currency_rate_updated = new Date().toISOString();
+        saveSettings();
+      }
+    } catch (_){}
+    return live;
+  }
+  const persisted = settings && settings.currency_rate ? Number(settings.currency_rate) : null;
+  if (persisted && Number.isFinite(persisted) && persisted > 0) {
+    cachedStoreRate = persisted;
+    cachedStoreRateFetchedAt = now;
+    return persisted;
+  }
+  warn('Falling back to default EUR store rate; live rate unavailable');
+  return DEFAULT_STORE_RATE;
 }
 
 async function convertCurrency(amount, base = 'GBP', target = 'EUR', roundMode = 'nearest') {
@@ -327,6 +359,7 @@ function applySelectedEurTender() {
     currency: 'EUR',
     amount_eur: Number(actual.toFixed(2)),
     eur_rate: saleEffectiveRate,
+    currency_rate: saleEffectiveRate,
     meta: {
       currency: 'EUR',
       eur_amount: Number(actual.toFixed(2)),
@@ -419,8 +452,8 @@ async function openEurConversionOverlay(gbpTotal) {
    */
   if (gbpTotal <= 0) return;
 
-  // Get store rate from settings or default
-  const storeRate = settings && settings.currency_rate ? settings.currency_rate : 1.30;
+  // Live store rate pulled from backend (falls back to last cached/default)
+  const storeRate = await getStoreCurrencyRate('GBP', 'EUR');
   
   // Fetch EUR suggestions
   const suggestions = await fetchEurSuggestions(gbpTotal, storeRate);
@@ -483,6 +516,8 @@ let settings = {
   net_voucher: 0,
   vat_rate: 20,
   vat_inclusive: true,
+  currency_rate: DEFAULT_STORE_RATE,
+  currency_rate_updated: null,
   // Aggregates keyed by ISO date (YYYY-MM-DD).
   // Minimal shape: { date: 'YYYY-MM-DD', totals:{...}, perCashier:{...}, perGroup:{...}, tenders:{...}, discounts:{...} }
   z_agg: {},
@@ -1123,6 +1158,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   log('DOMContentLoaded fired');
   loadSettings();
   applySettings();
+  try { getStoreCurrencyRate().catch(()=>{}); } catch(_){}
   loadItems();
   loadCustomers();
   bindEvents();
@@ -1866,12 +1902,14 @@ function loadSettings(){
         opening_date:'',
         net_cash:0,
         net_card:0,
-        net_voucher:0,
-        vat_rate:20,
-        vat_inclusive:true,
-        z_agg:{},
-        receipt_header: RECEIPT_DEFAULT_HEADER,
-        receipt_footer: RECEIPT_DEFAULT_FOOTER,
+      net_voucher:0,
+      vat_rate:20,
+      vat_inclusive:true,
+      currency_rate: DEFAULT_STORE_RATE,
+      currency_rate_updated: null,
+      z_agg:{},
+      receipt_header: RECEIPT_DEFAULT_HEADER,
+      receipt_footer: RECEIPT_DEFAULT_FOOTER,
         open_drawer_after_print: true
       }, s);
     }

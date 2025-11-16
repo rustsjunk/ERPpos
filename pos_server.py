@@ -1759,6 +1759,17 @@ def api_update_currency_rates():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+_CURRENCY_BOOTSTRAP_DONE = False
+
+@app.before_request
+def _bootstrap_background_services():
+    """Start background helpers (currency updater) on first inbound request."""
+    global _CURRENCY_BOOTSTRAP_DONE
+    if not _CURRENCY_BOOTSTRAP_DONE:
+        _ensure_currency_updater()
+        _CURRENCY_BOOTSTRAP_DONE = True
+
+
 if __name__ == '__main__':
     # Ensure currency updater is running
     _ensure_currency_updater()
