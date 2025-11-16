@@ -1,15 +1,24 @@
-# Currency Conversion Feature — Complete Changelog
+﻿# Currency Conversion Feature â€” Complete Changelog
 
 ## Summary
 
 A comprehensive currency conversion feature has been implemented for ERPpos, enabling cashiers to accept payments in EUR with intelligent rounding options. The feature includes:
 
-- ✅ Automatic daily exchange rate fetching
-- ✅ Three rounding strategies (actual, rounded, rounded-down)
-- ✅ Real-time conversion UI in checkout
-- ✅ Complete audit trail with currency metadata
-- ✅ REST API for programmatic access
-- ✅ Admin endpoints for manual rate updates
+- âœ… Automatic daily exchange rate fetching
+- âœ… Three rounding strategies (actual, rounded, rounded-down)
+- âœ… Real-time conversion UI in checkout
+- âœ… Complete audit trail with currency metadata
+- âœ… REST API for programmatic access
+- âœ… Admin endpoints for manual rate updates
+
+---
+
+## 2025-11-16 — Euro workflow polish
+
+- Redesigned the EUR overlay so the rate tiles, keypad, and status panel fit on screen simultaneously. Cashiers can now pick the actual, rounded-down, or rounded-up EUR target and immediately key in the euros presented.
+- The converter now pops in its own overlay so staff have a full-screen workspace for the tiles, keypad, and GBP status without crowding the tender column.
+- The overlay now shows the GBP impact of any over/under payment in real time so staff know if they should return GBP change or collect the remaining GBP balance before applying the tender.
+- Every EUR sale writes richer FX metadata (expected EUR, received EUR, GBP difference) and prints a dedicated wrap slip right after the standard receipt so foreign cash can be bundled for end-of-day counting.
 
 ---
 
@@ -19,13 +28,13 @@ A comprehensive currency conversion feature has been implemented for ERPpos, ena
 **Lines: 801-915 (115 new lines)**
 
 **Added Functions:**
-- `fetch_currency_rate(base='GBP', target='EUR')` — Fetch rate from API
-- `update_currency_rate(conn, base='GBP', target='EUR', rate=None)` — Store rate in DB
-- `get_currency_rate(conn, base='GBP', target='EUR')` — Retrieve cached rate
-- `round_to_nearest_5(value)` — Round to nearest 0.05 EUR
-- `round_down_to_nearest_5(value)` — Round down to nearest 0.05 EUR
-- `convert_currency(amount, rate, round_mode='nearest')` — Full conversion with options
-- `schedule_currency_rate_update(base, target, interval_seconds)` — Background updater
+- `fetch_currency_rate(base='GBP', target='EUR')` â€” Fetch rate from API
+- `update_currency_rate(conn, base='GBP', target='EUR', rate=None)` â€” Store rate in DB
+- `get_currency_rate(conn, base='GBP', target='EUR')` â€” Retrieve cached rate
+- `round_to_nearest_5(value)` â€” Round to nearest 0.05 EUR
+- `round_down_to_nearest_5(value)` â€” Round down to nearest 0.05 EUR
+- `convert_currency(amount, rate, round_mode='nearest')` â€” Full conversion with options
+- `schedule_currency_rate_update(base, target, interval_seconds)` â€” Background updater
 
 **Features:**
 - Supports multiple currency APIs (Fixer.io default, others via config)
@@ -39,10 +48,10 @@ A comprehensive currency conversion feature has been implemented for ERPpos, ena
 **Lines: 1400-1560 (161 new lines)**
 
 **Added Endpoints:**
-- `GET /api/currency/rates` — Get current rate
-- `POST /api/currency/convert` — Convert with rounding options
-- `POST /api/currency/rates/update` — Admin: manual rate update
-- `_ensure_currency_updater()` — Start background thread
+- `GET /api/currency/rates` â€” Get current rate
+- `POST /api/currency/convert` â€” Convert with rounding options
+- `POST /api/currency/rates/update` â€” Admin: manual rate update
+- `_ensure_currency_updater()` â€” Start background thread
 
 **Features:**
 - Full input validation
@@ -51,7 +60,7 @@ A comprehensive currency conversion feature has been implemented for ERPpos, ena
 - Automatic thread startup on server init
 
 **Modified:**
-- `if __name__ == '__main__':` — Now calls `_ensure_currency_updater()`
+- `if __name__ == '__main__':` â€” Now calls `_ensure_currency_updater()`
 
 ---
 
@@ -83,11 +92,11 @@ let eurConversionActive = false;   // Current status
 ```
 
 **Added Functions:**
-- `fetchCurrencyRate(base, target)` — API call to get rate
-- `convertCurrency(amount, base, target, roundMode)` — API call to convert
-- `updateEurConversion(cashAmount)` — Fetch and display conversion
-- `updateEurConversionDisplay()` — Refresh UI with data
-- `applyEurConversion(roundMode)` — Add EUR payment to cart
+- `fetchCurrencyRate(base, target)` â€” API call to get rate
+- `convertCurrency(amount, base, target, roundMode)` â€” API call to convert
+- `updateEurConversion(cashAmount)` â€” Fetch and display conversion
+- `updateEurConversionDisplay()` â€” Refresh UI with data
+- `applyEurConversion(roundMode)` â€” Add EUR payment to cart
 
 **Added Event Handlers:**
 - EUR Toggle button listener
@@ -96,7 +105,7 @@ let eurConversionActive = false;   // Current status
 - Cash input change listener (auto-updates conversion)
 
 **Modified Functions:**
-- `completeSaleFromOverlay()` — Added `currency_used` and `currency_rate_used` to payload
+- `completeSaleFromOverlay()` â€” Added `currency_used` and `currency_rate_used` to payload
 
 ---
 
@@ -114,8 +123,8 @@ CREATE TABLE IF NOT EXISTS rates (
 ```
 
 **Modified `sales` table columns:**
-- `currency_used TEXT NOT NULL` — Currency of payment
-- `rate_used NUMERIC NOT NULL DEFAULT 1` — Exchange rate applied
+- `currency_used TEXT NOT NULL` â€” Currency of payment
+- `rate_used NUMERIC NOT NULL DEFAULT 1` â€” Exchange rate applied
 
 ---
 
@@ -169,9 +178,9 @@ Overview and summary:
 
 ### 2. Smart Rounding (0.05 EUR)
 ```
-Actual:       £12.34 × 1.1847 = €14.5708
-Rounded:      €14.55 (nearest 0.05)
-Rounded Down: €14.55 (potential €0.00 saving)
+Actual:       Â£12.34 Ã— 1.1847 = â‚¬14.5708
+Rounded:      â‚¬14.55 (nearest 0.05)
+Rounded Down: â‚¬14.55 (potential â‚¬0.00 saving)
 ```
 
 ### 3. Automatic Rate Updates
@@ -182,8 +191,8 @@ Rounded Down: €14.55 (potential €0.00 saving)
 
 ### 4. Complete Audit Trail
 Every sale includes:
-- `currency_used` — 'GBP' or 'EUR'
-- `rate_used` — Exchange rate applied
+- `currency_used` â€” 'GBP' or 'EUR'
+- `rate_used` â€” Exchange rate applied
 - Payment metadata with currency info
 
 ### 5. API-First Design
@@ -260,30 +269,30 @@ sqlite3 pos.db "SELECT currency_used, rate_used FROM sales LIMIT 1;"
 
 ### UI Testing
 1. Add items to cart
-2. Select "Cash" tender → EUR panel appears
-3. Enter amount → Conversion updates in real-time
+2. Select "Cash" tender â†’ EUR panel appears
+3. Enter amount â†’ Conversion updates in real-time
 4. Click toggle/buttons to apply conversion
-5. Complete sale → Currency data recorded
+5. Complete sale â†’ Currency data recorded
 
 ---
 
 ## Backward Compatibility
 
-- ✅ Existing sales work without currency data
-- ✅ New columns have sensible defaults (GBP, rate=1.0)
-- ✅ No breaking changes to APIs
-- ✅ HTML additions don't interfere with other UI
-- ✅ JavaScript additions are self-contained
+- âœ… Existing sales work without currency data
+- âœ… New columns have sensible defaults (GBP, rate=1.0)
+- âœ… No breaking changes to APIs
+- âœ… HTML additions don't interfere with other UI
+- âœ… JavaScript additions are self-contained
 
 ---
 
 ## Security Measures
 
-- ✅ API keys stored server-side only
-- ✅ No sensitive data sent to browser
-- ✅ Rate updates optional (can disable API)
-- ✅ Input validation on all endpoints
-- ✅ Admin token protection (optional)
+- âœ… API keys stored server-side only
+- âœ… No sensitive data sent to browser
+- âœ… Rate updates optional (can disable API)
+- âœ… Input validation on all endpoints
+- âœ… Admin token protection (optional)
 
 ---
 
@@ -302,24 +311,24 @@ sqlite3 pos.db "SELECT currency_used, rate_used FROM sales LIMIT 1;"
 
 ## Future Enhancement Ideas
 
-1. **Multiple Currency Pairs** — USD, JPY, CHF, etc.
-2. **Historical Rates** — Track rate changes over time
-3. **Rate Alerts** — Notify if rate changes significantly
-4. **Multi-Currency Split** — Part EUR, part GBP same sale
-5. **Dashboard** — Visualize EUR vs GBP trends
-6. **Integration** — Sync to ERPNext with currency fields
-7. **Accounting** — Currency P&L reports
-8. **Customer Preference** — Remember customer's preferred currency
+1. **Multiple Currency Pairs** â€” USD, JPY, CHF, etc.
+2. **Historical Rates** â€” Track rate changes over time
+3. **Rate Alerts** â€” Notify if rate changes significantly
+4. **Multi-Currency Split** â€” Part EUR, part GBP same sale
+5. **Dashboard** â€” Visualize EUR vs GBP trends
+6. **Integration** â€” Sync to ERPNext with currency fields
+7. **Accounting** â€” Currency P&L reports
+8. **Customer Preference** â€” Remember customer's preferred currency
 
 ---
 
 ## Support & Documentation
 
 Comprehensive documentation in:
-1. **CURRENCY_CONVERSION.md** — Technical deep dive
-2. **CURRENCY_SETUP.md** — Setup & troubleshooting
-3. **CURRENCY_QUICKREF.md** — Quick examples
-4. **IMPLEMENTATION_SUMMARY.md** — Overview
+1. **CURRENCY_CONVERSION.md** â€” Technical deep dive
+2. **CURRENCY_SETUP.md** â€” Setup & troubleshooting
+3. **CURRENCY_QUICKREF.md** â€” Quick examples
+4. **IMPLEMENTATION_SUMMARY.md** â€” Overview
 
 ---
 
@@ -328,7 +337,7 @@ Comprehensive documentation in:
 - **Feature Added:** November 2025
 - **Version:** 1.0
 - **Status:** Production Ready
-- **Default Currency Pair:** GBP ↔ EUR
+- **Default Currency Pair:** GBP â†” EUR
 - **Database Compatibility:** SQLite 3.8+
 
 ---
@@ -351,3 +360,4 @@ For issues:
 3. Check server logs for error messages
 4. Test API endpoints directly
 5. Review function documentation in CURRENCY_CONVERSION.md
+

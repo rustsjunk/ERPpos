@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS items (
   parent_id      TEXT REFERENCES items(item_id),  -- NULL for templates
   name           TEXT NOT NULL,
   brand          TEXT,
+  custom_style_code   TEXT,
+  custom_simple_colour TEXT,
+  vat_rate       NUMERIC,
   attributes     TEXT,                            -- JSON: {"Size":"8","Color":"Black"}
   price          NUMERIC,                         -- variant price; NULL = inherit
   image_url      TEXT,                            -- variant image; NULL = inherit

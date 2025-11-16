@@ -28,6 +28,10 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
+    try:
+        _ensure_item_extras(conn)
+    except Exception:
+        pass
     return conn
 
 def init_db(conn: sqlite3.Connection, schema_path: str):
@@ -35,15 +39,37 @@ def init_db(conn: sqlite3.Connection, schema_path: str):
         conn.executescript(f.read())
     conn.commit()
 
+def _ensure_item_extras(conn: sqlite3.Connection):
+    """Add new optional columns on items table if they are missing."""
+    try:
+        rows = conn.execute("PRAGMA table_info(items)").fetchall()
+    except Exception:
+        return
+    existing = {row["name"] for row in rows}
+    alters = []
+    if "custom_style_code" not in existing:
+        alters.append("ALTER TABLE items ADD COLUMN custom_style_code TEXT")
+    if "custom_simple_colour" not in existing:
+        alters.append("ALTER TABLE items ADD COLUMN custom_simple_colour TEXT")
+    if "vat_rate" not in existing:
+        alters.append("ALTER TABLE items ADD COLUMN vat_rate NUMERIC")
+    for sql in alters:
+        conn.execute(sql)
+    if alters:
+        conn.commit()
+
 # ---------- UPSERT HELPERS ----------
 def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]):
     sql = """
-    INSERT INTO items (item_id, parent_id, name, brand, attributes, price, image_url, is_template, active, modified_utc)
-    VALUES (:item_id, :parent_id, :name, :brand, :attributes, :price, :image_url, :is_template, :active, :modified_utc)
+    INSERT INTO items (item_id, parent_id, name, brand, custom_style_code, custom_simple_colour, vat_rate, attributes, price, image_url, is_template, active, modified_utc)
+    VALUES (:item_id, :parent_id, :name, :brand, :custom_style_code, :custom_simple_colour, :vat_rate, :attributes, :price, :image_url, :is_template, :active, :modified_utc)
     ON CONFLICT(item_id) DO UPDATE SET
       parent_id=excluded.parent_id,
       name=excluded.name,
       brand=excluded.brand,
+      custom_style_code=excluded.custom_style_code,
+      custom_simple_colour=excluded.custom_simple_colour,
+      vat_rate=COALESCE(excluded.vat_rate, items.vat_rate),
       attributes=excluded.attributes,
       price=excluded.price,
       image_url=excluded.image_url,
@@ -76,15 +102,18 @@ def ensure_item_for_sale_line(conn: sqlite3.Connection, line: Dict[str, Any]):
     attributes = _serialize_item_attributes(line.get("attributes"))
     now = iso_now()
     conn.execute("""
-        INSERT INTO items (item_id, parent_id, name, brand, attributes, price, image_url, is_template, active, modified_utc)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO items (item_id, parent_id, name, brand, custom_style_code, custom_simple_colour, vat_rate, attributes, price, image_url, is_template, active, modified_utc)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(item_id) DO UPDATE SET
             name=COALESCE(NULLIF(excluded.name,''), items.name),
             brand=COALESCE(excluded.brand, items.brand),
+            custom_style_code=COALESCE(excluded.custom_style_code, items.custom_style_code),
+            custom_simple_colour=COALESCE(excluded.custom_simple_colour, items.custom_simple_colour),
+            vat_rate=COALESCE(excluded.vat_rate, items.vat_rate),
             attributes=COALESCE(NULLIF(excluded.attributes,''), items.attributes),
             modified_utc=excluded.modified_utc,
             active=1
-    """, (item_id, None, name, brand, attributes, None, None, 0, 1, now))
+    """, (item_id, None, name, brand, None, None, None, attributes, None, None, 0, 1, now))
 
 def upsert_barcode(conn: sqlite3.Connection, barcode: str, item_id: str):
     sql = """
@@ -203,7 +232,18 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
     tax = float(sale.get("tax", 0))
     total = subtotal - discount + tax
     pay_total = sum(float(p["amount"]) for p in payments) + sum(float(v["amount"]) for v in sale.get("voucher_redeem", []))
-    pay_status = "paid" if abs(pay_total - total) < 0.005 else ("partially_paid" if pay_total > 0 else "unpaid")
+
+    def _as_float(value: Any) -> float:
+        if value in (None, "", False):
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    raw_change = _as_float(sale.get("change"))
+    net_collected = pay_total - raw_change if total >= 0 else pay_total
+    pay_status = "paid" if abs(net_collected - total) < 0.005 else ("partially_paid" if abs(net_collected) > 0 else "unpaid")
 
     payload = {
         "sale_id": sale_id,
@@ -216,7 +256,10 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
         "discount": discount,
         "tax": tax,
         "totals": {"subtotal": subtotal, "total": total},
-        "voucher_redeem": sale.get("voucher_redeem", [])
+        "voucher_redeem": sale.get("voucher_redeem", []),
+        "tender": sale.get("tender"),
+        "cash_given": sale.get("cash_given"),
+        "change": sale.get("change"),
     }
 
     try:
@@ -558,12 +601,16 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
     filters = []
     if last_mod:
         filters = [["modified",">=",last_mod]]
-    fields = ["name","item_code","item_name","brand","has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified"]
+    fields = [
+        "name","item_code","item_name","brand","custom_style_code","custom_simple_colour",
+        "has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified"
+    ]
     params = {"fields": json.dumps(fields), "filters": json.dumps(filters), "limit_page_length": limit, "order_by": "modified asc, name asc"}
     data = _erp_get("/api/resource/Item", params).get("data", [])
     if not data:
         return 0
     variants_to_hydrate: List[tuple[str, Optional[str]]] = []
+    item_rows: List[Dict[str, Any]] = []
     for d in data:
         parent = d.get("variant_of")
         price = d.get("standard_rate")
@@ -576,6 +623,9 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
             "parent_id": parent,
             "name": d.get("item_name") or d["name"],
             "brand": d.get("brand"),
+            "custom_style_code": d.get("custom_style_code"),
+            "custom_simple_colour": d.get("custom_simple_colour"),
+            "vat_rate": None,
             "attributes": None,
             "price": price,
             "image_url": d.get("image"),
@@ -584,34 +634,79 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
             "modified_utc": d.get("modified")
         }
         upsert_item(conn, itm)
+        item_rows.append({"item_id": d["name"], "parent_id": parent})
         ensure_barcode_placeholder(conn, d.get("item_code") or d.get("name"), d["name"])
         if parent:
             variants_to_hydrate.append((d["name"], parent))
     if variants_to_hydrate:
         _hydrate_variant_attributes(conn, variants_to_hydrate)
+    if item_rows:
+        _hydrate_item_tax_rates(conn, item_rows)
     _cursor_set(conn, "Item", data[-1]["modified"], data[-1]["name"])
     conn.commit()
     return len(data)
+
+def _infer_variant_attributes_from_name(item_id: str) -> Optional[List[Dict[str, Any]]]:
+    """Best-effort parse variant naming convention Brand-Style-...-Color-Size to recover attributes."""
+    if not item_id:
+        return None
+    parts = [p.strip() for p in item_id.split("-") if p and p.strip()]
+    if len(parts) < 2:
+        return None
+    size = parts[-1]
+    color = parts[-2] if len(parts) >= 2 else None
+    rows: List[Dict[str, Any]] = []
+    if color:
+        rows.append({"attribute": "Colour", "attribute_value": color})
+        rows.append({"attribute": "Color", "attribute_value": color})
+    if size:
+        rows.append({"attribute": "EU half Sizes", "attribute_value": size})
+        rows.append({"attribute": "Size", "attribute_value": size})
+    return rows or None
 
 def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tuple[str, Optional[str]]]):
     """Fetch attributes for variants by hitting each Item doc (no child table permission required)."""
     if not variant_rows:
         return
+    def _fallback_variant_attr_rows(item_id: str) -> Optional[List[Dict[str, Any]]]:
+        params = {
+            "fields": json.dumps(["attribute", "attribute_name", "attribute_value", "abbr", "idx", "parent"]),
+            "filters": json.dumps([["parent","=",item_id]]),
+            "limit_page_length": 200
+        }
+        try:
+            data = _erp_get("/api/resource/Item Variant Attribute", params).get("data", [])
+            return data
+        except urllib.error.HTTPError as exc:
+            print(f"Failed to fetch variant attribute child rows for {item_id}: {exc}", file=sys.stderr)
+        except Exception as exc:
+            print(f"Failed to fetch variant attribute child rows for {item_id}: {exc}", file=sys.stderr)
+        return None
     seen: Set[str] = set()
     touched_templates: Set[str] = set()
     for item_id, parent_id in variant_rows:
         if not item_id or item_id in seen:
             continue
         seen.add(item_id)
+        attr_rows: Optional[List[Dict[str, Any]]] = None
         try:
             doc = _erp_get_doc("Item", item_id)
+            attr_rows = doc.get("attributes") or doc.get("variant_attributes") or doc.get("attributes_json") or []
         except Exception as exc:
-            print(f"Failed to fetch attributes for {item_id}: {exc}", file=sys.stderr)
-            continue
-        attrs = doc.get("attributes") or doc.get("variant_attributes") or []
+            attr_rows = _fallback_variant_attr_rows(item_id)
+            if attr_rows is None:
+                # As a last resort, try to infer from the variant name
+                inferred = _infer_variant_attributes_from_name(item_id)
+                if inferred:
+                    attr_rows = inferred
+                else:
+                    print(f"Failed to fetch attributes for {item_id}: {exc}", file=sys.stderr)
+                    continue
+        if attr_rows is None:
+            attr_rows = []
         conn.execute("DELETE FROM variant_attributes WHERE item_id=?", (item_id,))
         attr_map: Dict[str, str] = {}
-        for row in attrs:
+        for row in attr_rows:
             attr_name = row.get("attribute") or row.get("attribute_name") or row.get("attribute_id")
             value = row.get("attribute_value") or row.get("value")
             if not attr_name or value in (None, ""):
@@ -639,6 +734,74 @@ def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tup
             touched_templates.add(parent_id)
     if touched_templates:
         _refresh_template_attribute_cache(conn, touched_templates)
+    conn.commit()
+
+def _extract_item_vat_rate(doc: Dict[str, Any]) -> Optional[float]:
+    if not doc:
+        return None
+    # Try explicit field names first
+    for key in ("vat_rate", "tax_rate"):
+        if doc.get(key) is not None:
+            try:
+                return float(doc.get(key))
+            except (TypeError, ValueError):
+                pass
+    taxes = doc.get("taxes") or []
+    for row in taxes:
+        rate = row.get("tax_rate")
+        if rate is None:
+            rate = row.get("rate")
+        if rate is None and isinstance(row.get("tax_rate"), str):
+            rate = row.get("tax_rate")
+        if rate is None:
+            continue
+        try:
+            return float(rate)
+        except (TypeError, ValueError):
+            continue
+    taxes_json = doc.get("taxes_json")
+    if taxes_json:
+        try:
+            parsed = json.loads(taxes_json)
+            if isinstance(parsed, dict):
+                for val in parsed.values():
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        continue
+        except Exception:
+            pass
+    return None
+
+def _hydrate_item_tax_rates(conn: sqlite3.Connection, item_rows: List[Dict[str, Any]]):
+    """Fetch VAT/tax rates for items and store on items.vat_rate."""
+    if not item_rows:
+        return
+    seen: Set[str] = set()
+    for row in item_rows:
+        item_id = row.get("item_id") or row.get("name")
+        if not item_id or item_id in seen:
+            continue
+        seen.add(item_id)
+        parent_id = row.get("parent_id")
+        vat_rate = None
+        try:
+            doc = _erp_get_doc("Item", item_id)
+            vat_rate = _extract_item_vat_rate(doc)
+        except Exception as exc:
+            print(f"Failed to fetch tax info for {item_id}: {exc}", file=sys.stderr)
+            vat_rate = None
+        try:
+            if vat_rate is not None:
+                conn.execute("UPDATE items SET vat_rate=? WHERE item_id=?", (vat_rate, item_id))
+            elif parent_id:
+                conn.execute("""
+                    UPDATE items
+                    SET vat_rate = COALESCE(vat_rate, (SELECT vat_rate FROM items WHERE item_id=?))
+                    WHERE item_id=? AND vat_rate IS NULL
+                """, (parent_id, item_id))
+        except Exception:
+            continue
     conn.commit()
 
 def _refresh_template_attribute_cache(conn: sqlite3.Connection, template_ids: Set[str]):

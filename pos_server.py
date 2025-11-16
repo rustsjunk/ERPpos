@@ -9,7 +9,7 @@ from datetime import datetime
 from uuid import uuid4
 import threading
 import re
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Set, List
 
 # Load environment variables
 load_dotenv()
@@ -124,6 +124,9 @@ def _db_items_payload(conn: sqlite3.Connection):
            i.item_id AS item_code,
            i.name AS item_name,
            i.brand AS brand,
+           i.custom_style_code AS custom_style_code,
+           i.custom_simple_colour AS custom_simple_colour,
+           i.vat_rate AS vat_rate,
         (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
         -- Min/max of configured price list rates for child variants (if present in item_prices)
         (SELECT MIN(ip.rate) FROM item_prices ip JOIN items v2 ON v2.item_id = ip.item_id WHERE v2.parent_id = i.item_id) AS min_variant_price,
@@ -151,6 +154,24 @@ def _db_items_payload(conn: sqlite3.Connection):
         vals = d.setdefault(row["attr_name"], set())
         vals.add(row["value"])
 
+    # Aggregate custom fields (style code + simple colour) from variants
+    custom_agg: Dict[str, Dict[str, Set[str]]] = {}
+    q_custom = """
+      SELECT parent_id AS template_id, custom_style_code, custom_simple_colour
+      FROM items
+      WHERE parent_id IS NOT NULL
+        AND (custom_style_code IS NOT NULL OR custom_simple_colour IS NOT NULL)
+    """
+    for row in conn.execute(q_custom):
+        tpl = row["template_id"]
+        if not tpl:
+            continue
+        entry = custom_agg.setdefault(tpl, {"custom_style_code": set(), "custom_simple_colour": set()})
+        if row["custom_style_code"]:
+            entry["custom_style_code"].add(str(row["custom_style_code"]))
+        if row["custom_simple_colour"]:
+            entry["custom_simple_colour"].add(str(row["custom_simple_colour"]))
+
     out = []
     for r in conn.execute(q_tpl):
         attrs = {}
@@ -166,11 +187,21 @@ def _db_items_payload(conn: sqlite3.Connection):
         max_var = r["max_variant_price"] if r["max_variant_price"] is not None else None
         display_rate = template_rate if template_rate is not None else (min_var if min_var is not None else None)
 
+        custom_entry = custom_agg.get(r["name"])
         payload = {
             "name": r["name"],
             "item_code": r["item_code"],
             "item_name": r["item_name"],
             "brand": r["brand"],
+            "custom_style_code": _merge_custom_field_value(
+                r["custom_style_code"],
+                custom_entry["custom_style_code"] if custom_entry else None
+            ),
+            "custom_simple_colour": _merge_custom_field_value(
+                r["custom_simple_colour"],
+                custom_entry["custom_simple_colour"] if custom_entry else None
+            ),
+            "vat_rate": float(r["vat_rate"]) if r["vat_rate"] is not None else None,
             "barcode": None,
             "standard_rate": float(display_rate) if display_rate is not None else None,
             "stock_uom": r["stock_uom"],
@@ -183,6 +214,26 @@ def _db_items_payload(conn: sqlite3.Connection):
         }
         out.append(payload)
     return out
+
+def _merge_custom_field_value(base_value: Optional[str], variants: Optional[Set[str]]) -> Optional[str]:
+    values: List[str] = []
+    if base_value:
+        values.append(str(base_value))
+    if variants:
+        values.extend(str(v) for v in variants if v)
+    if not values:
+        return None
+    dedup = []
+    seen = set()
+    for val in values:
+        if val in seen:
+            continue
+        dedup.append(val)
+        seen.add(val)
+    if len(dedup) == 1:
+        return dedup[0]
+    dedup.sort()
+    return ", ".join(dedup)
 
 def _db_has_cashiers(conn: sqlite3.Connection) -> bool:
     try:
@@ -584,7 +635,7 @@ def get_items():
                 f"{ERPNEXT_URL}/api/resource/Item",
                 headers=_erp_headers(),
                 params={
-                    'fields': '["name", "item_code", "item_name", "brand", "item_group", "image", "standard_rate", "stock_uom", "barcode"]',
+                    'fields': '["name", "item_code", "item_name", "brand", "custom_style_code", "custom_simple_colour", "item_group", "image", "standard_rate", "stock_uom", "barcode"]',
                     'filters': '[["is_sales_item","=",1],["disabled","=",0]]'
                 },
                 timeout=15
@@ -604,6 +655,7 @@ def get_items():
                     # If ERPNext does not have barcodes configured, allow using the item_code as a scanable barcode
                     item['barcode'] = barcode or item_code or None
                 item['image'] = _absolute_image_url(item.get('image'))
+                item['vat_rate'] = item.get('vat_rate')
             return jsonify({'status': 'success', 'items': items})
         except requests.HTTPError as e:
             return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500
@@ -659,13 +711,23 @@ def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
     """Persist the JSON receipt for audit/replay."""
     try:
         os.makedirs('invoices', exist_ok=True)
+        items_payload = []
+        for it in data.get('items') or []:
+            entry = {
+                'item_code': it.get('item_code') or it.get('code') or it.get('name'),
+                'item_name': it.get('item_name') or it.get('name'),
+                'qty': it.get('qty'),
+                'rate': it.get('rate'),
+                'vat_rate': it.get('vat_rate')
+            }
+            items_payload.append(entry)
         record = {
             'invoice_name': invoice_name,
             'sale_id': invoice_name,
             'created_at': datetime.now().isoformat(),
             'mode': mode_label,
             'customer': data.get('customer'),
-            'items': data.get('items') or [],
+            'items': items_payload,
             'payments': data.get('payments') or [],
             'tender': data.get('tender'),
             'cash_given': data.get('cash_given'),
@@ -688,12 +750,18 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
     items = data.get('items') or []
     payments = data.get('payments') or []
     vouchers = data.get('vouchers') or []
+    tender = (data.get('tender') or '').strip() or None
 
     lines = []
     for it in items:
         item_id = it.get('item_code') or it.get('code') or it.get('name')
         if not item_id:
             continue
+        vat_rate = it.get('vat_rate')
+        try:
+            vat_rate = float(vat_rate) if vat_rate not in (None, '') else None
+        except (TypeError, ValueError):
+            vat_rate = None
         lines.append({
             'item_id': item_id,
             'item_name': it.get('item_name') or it.get('name') or '',
@@ -702,6 +770,7 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
             'qty': float(it.get('qty') or 0),
             'rate': float(it.get('rate') or 0),
             'barcode_used': it.get('barcode_used') or it.get('barcode') or None,
+            'vat_rate': vat_rate,
         })
 
     payments_payload = []
@@ -723,6 +792,17 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
         for v in vouchers if v.get('code')
     ]
 
+    def _safe_float(val):
+        if val in (None, ''):
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
+    cash_given = _safe_float(data.get('cash_given'))
+    change_due = _safe_float(data.get('change'))
+
     cashier = (data.get('cashier') or {}).get('code') or (data.get('cashier') or {}).get('name')
 
     return {
@@ -735,6 +815,9 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
         'voucher_redeem': voucher_payload,
         'discount': float(data.get('discount') or 0),
         'tax': float(data.get('tax') or 0),
+        'tender': tender,
+        'cash_given': cash_given,
+        'change': change_due,
     }
 
 
@@ -1097,6 +1180,7 @@ def item_matrix():
     qv = f"""
       SELECT v.item_id,
              v.name,
+             v.vat_rate,
              v.image_url,
              (SELECT price_effective FROM v_item_prices p WHERE p.item_id=v.item_id) AS rate,
              COALESCE((SELECT qty FROM stock s WHERE s.item_id=v.item_id AND s.warehouse='{POS_WAREHOUSE}'), 0) AS qty
@@ -1124,7 +1208,14 @@ def item_matrix():
         key = f"{color}|{width}|{size}"
         # Get variant image (with absolute URL), fallback to parent image
         variant_image = _absolute_image_url(r['image_url']) if r['image_url'] else None
-        variants[key] = { 'item_id': r['item_id'], 'item_name': r['name'], 'rate': float(r['rate']) if r['rate'] is not None else None, 'qty': float(r['qty']), 'image': variant_image }
+        variants[key] = {
+            'item_id': r['item_id'],
+            'item_name': r['name'],
+            'rate': float(r['rate']) if r['rate'] is not None else None,
+            'qty': float(r['qty']),
+            'vat_rate': float(r['vat_rate']) if r['vat_rate'] is not None else None,
+            'image': variant_image
+        }
     data = {
         'item': template_id,
         'sizes': sorted(sizes, key=lambda x: (len(x), x)),
@@ -1154,6 +1245,8 @@ def api_lookup_barcode():
         """
         SELECT i.item_id,
                i.name,
+               i.item_group,
+               i.vat_rate,
                (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
                COALESCE((SELECT qty FROM stock s WHERE s.item_id=i.item_id AND s.warehouse='Shop'), 0) AS qty
         FROM barcodes b
@@ -1169,6 +1262,8 @@ def api_lookup_barcode():
                 """
                 SELECT i.item_id,
                        i.name,
+                       i.item_group,
+                       i.vat_rate,
                        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
                        COALESCE((SELECT qty FROM stock s WHERE s.item_id=i.item_id AND s.warehouse='Shop'), 0) AS qty
                 FROM items i
@@ -1185,7 +1280,9 @@ def api_lookup_barcode():
         'item_id': row['item_id'],
         'name': row['name'],
         'rate': float(row['rate']) if row['rate'] is not None else 0.0,
+        'vat_rate': float(row['vat_rate']) if row['vat_rate'] is not None else None,
         'qty': float(row['qty']) if row['qty'] is not None else 0.0,
+        'item_group': row['item_group'],
         'attributes': attrs,
     }
     return jsonify({'status': 'success', 'variant': out})
@@ -1243,7 +1340,8 @@ def api_get_sale(sale_id: str):
                     'item_code': it.get('item_code') or it.get('code') or it.get('name'),
                     'item_name': it.get('item_name') or it.get('name') or (it.get('item_code') or ''),
                     'qty': it.get('qty') or 1,
-                    'rate': it.get('rate') or it.get('price') or 0
+                    'rate': it.get('rate') or it.get('price') or 0,
+                    'vat_rate': it.get('vat_rate')
                 })
             out = {
                 'id': rec.get('invoice_name') or sid,
@@ -1269,7 +1367,8 @@ def api_get_sale(sale_id: str):
                                 'item_code': it.get('item_code') or it.get('code') or it.get('name'),
                                 'item_name': it.get('item_name') or it.get('name') or (it.get('item_code') or ''),
                                 'qty': it.get('qty') or 1,
-                                'rate': it.get('rate') or it.get('price') or 0
+                                'rate': it.get('rate') or it.get('price') or 0,
+                                'vat_rate': it.get('vat_rate')
                             })
                         out = {
                             'id': inv_name,
@@ -1299,7 +1398,8 @@ def api_get_sale(sale_id: str):
                         'item_code': ln.get('item_id') or ln.get('item_code') or ln.get('name'),
                         'item_name': ln.get('item_name') or ln.get('name') or (ln.get('item_id') or ''),
                         'qty': ln.get('qty') or 1,
-                        'rate': ln.get('rate') or ln.get('price') or 0
+                        'rate': ln.get('rate') or ln.get('price') or 0,
+                        'vat_rate': ln.get('vat_rate')
                     })
                 out = {
                     'id': sid,
@@ -1784,6 +1884,7 @@ def api_invoice_detail(inv_id: str):
                         'item_name': ln.get('item_name') or ln.get('name') or code,
                         'qty': ln.get('qty') or 1,
                         'rate': ln.get('rate') or ln.get('price') or 0,
+                        'vat_rate': ln.get('vat_rate'),
                         'image': None,
                     })
                     if code: ids.append(code)
@@ -1844,6 +1945,7 @@ def api_invoice_detail(inv_id: str):
                     'item_name': it.get('item_name') or it.get('name') or code,
                     'qty': it.get('qty') or 1,
                     'rate': it.get('rate') or it.get('price') or 0,
+                    'vat_rate': it.get('vat_rate'),
                     'image': None,
                 })
                 if code: ids.append(code)

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en" data-qz-certificate="{{ qz_certificate or '' }}" data-qz-private-key="{{ qz_private_key or '' }}">
 <head>
     <meta charset="UTF-8">
@@ -7,7 +7,7 @@
     <link rel="icon" href="data:,">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='5') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='6') }}">
     
     <!-- Optional: ensure UTF-8 is respected -->
 </head>
@@ -153,59 +153,24 @@
                                 <button class="key-btn" data-k="0">0</button>
                                 <button class="key-btn key-action" data-k="B">&#x232B;</button>
                             </div>
-                            <!-- <div class="denom-row mt-2 d-flex flex-wrap gap-2">
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="100">Â£100</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="50">Â£50</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="20">Â£20</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="10">Â£10</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="5">Â£5</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="2">Â£2</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="1">Â£1</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="0.5">50p</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="0.2">20p</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="0.1">10p</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="0.05">5p</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="0.02">2p</button>
-                                <button class="btn btn-outline-secondary denom-btn" data-amount="0.01">1p</button>
-                            </div> -->
-                            <div class="d-flex justify-content-between">
-                                <div>Due</div>
-                                <div id="amountDue" class="fw-semibold"></div>
-                            </div>
-                            <div class="d-flex justify-content-between">
-                                <div>Cash</div>
-                                <div id="amountCash" class="fw-semibold"></div>
-                            </div>
-                            <div class="d-flex justify-content-between">
-                                <div>Entered</div>
-                                <div id="amountCashEntered" class="text-muted"></div>
-                            </div>
-                            <div class="d-flex justify-content-between">
-                                <div>Change</div>
-                                <div id="amountChange" class="fw-bold"></div>
+                            <div id="cashSummaryData" class="d-none" aria-hidden="true">
+                                <div id="amountDue"></div>
+                                <div id="amountCash"></div>
+                                <div id="amountCashEntered"></div>
+                                <div id="amountChange"></div>
                             </div>
                             <div class="cash-controls mt-2 d-flex flex-wrap gap-2 align-items-center justify-content-end">
                                 <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
                                 <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm" placeholder="Enter cash amount" style="max-width: 160px;" />
                                 <button id="toggleKeypadBtn" class="btn btn-outline-secondary btn-sm">Show Keypad</button>
-                                <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">€ Convert</button>
+                                <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
+                                <button id="addPlasticBagBtn" class="btn btn-outline-primary btn-sm" type="button" title="Add a plastic bag to this sale">+ Plastic Bag</button>
                                 <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
                                 <button id="applyCashBtn" class="btn btn-primary btn-sm">Apply Cash</button>
                             </div>
 
                         </div>
                         <div id="otherSection" class="mb-3" style="display:none;">
-                            <div class="d-flex justify-content-between">
-                                <div>Due</div>
-                                <div id="amountDueOther" class="fw-semibold"></div>
-                            </div>
-                            <div class="input-group mt-2" style="max-width: 420px; margin-left:auto;">
-                                <span id="otherLabel" class="input-group-text">Amount</span>
-                                <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
-                                <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining Amount</button>
-                                <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
-                            </div>
-                            <!-- Keypad for Card/Other tender input -->
                             <div id="otherKeypad" class="keypad-grid compact mt-2" style="display:block;">
                                 <button class="key-btn" data-k="7">7</button>
                                 <button class="key-btn" data-k="8">8</button>
@@ -220,6 +185,18 @@
                                 <button class="key-btn" data-k="0">0</button>
                                 <button class="key-btn key-action" data-k="B">&#x232B;</button>
                             </div>
+                            <div class="cash-summary mt-2">
+                                <div class="d-flex justify-content-between">
+                                    <div>Due</div>
+                                    <div id="amountDueOther" class="fw-semibold"></div>
+                                </div>
+                            </div>
+                            <div class="input-group mt-2" style="max-width: 420px; margin-left:auto;">
+                                <span id="otherLabel" class="input-group-text">Amount</span>
+                                <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
+                                <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining Amount</button>
+                                <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
+                            </div>
                         </div>
                         <div class="d-grid gap-2 tender-actions">
                             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -229,6 +206,104 @@
                             <button id="openDiscountBtn" class="btn btn-outline-secondary">Discount</button>
                             <button id="completeSaleBtn" class="btn btn-success btn-lg">Complete Sale</button>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- EUR Converter Overlay -->
+    <div id="eurConverterOverlay" class="search-overlay" style="display:none;">
+        <div class="search-modal eur-overlay-modal">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    <div class="h5 mb-1">Accept Euro Cash</div>
+                    <div id="eurOverlayStatus" class="text-muted small">Select a rate option to begin.</div>
+                </div>
+                <button id="eurOverlayCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+            </div>
+            <div class="eur-overlay-grid">
+                <div class="eur-overlay-left">
+                    <div class="eur-overview">
+                        <div class="eur-overview-row">
+                            <div>
+                                <small class="text-uppercase text-muted fw-semibold">GBP Total</small>
+                                <div id="eurOverlayGbpTotal" class="eur-figure text-dark">&pound;0.00</div>
+                            </div>
+                            <div>
+                                <small class="text-uppercase text-muted fw-semibold">Store Rate (1 GBP)</small>
+                                <div id="eurOverlayStoreRate" class="eur-figure text-primary">1.0000 EUR</div>
+                            </div>
+                        </div>
+                        <p class="text-muted small mb-0">Choose the EUR target, then enter how many euros the customer hands over.</p>
+                    </div>
+                    <div class="eur-option-row compact">
+                        <button type="button" class="eur-option-card" data-eur-option="exact">
+                            <span class="eur-option-title">Actual</span>
+                            <span class="eur-option-amount" id="eurOverlayExact">&euro;0.00</span>
+                            <span class="eur-option-note">No rounding</span>
+                        </button>
+                        <button type="button" class="eur-option-card" data-eur-option="down">
+                            <span class="eur-option-title">Round down</span>
+                            <span class="eur-option-amount" id="eurOverlayRoundDown">&euro;0.00</span>
+                            <span class="eur-option-note">Nearest &euro;5 below</span>
+                        </button>
+                        <button type="button" class="eur-option-card" data-eur-option="up">
+                            <span class="eur-option-title">Round up</span>
+                            <span class="eur-option-amount" id="eurOverlayRoundUp">&euro;0.00</span>
+                            <span class="eur-option-note">Nearest &euro;5 above</span>
+                        </button>
+                    </div>
+                    <div class="eur-selection-summary">
+                        <div>
+                            <small class="text-muted text-uppercase fw-semibold">Expected EUR</small>
+                            <div id="eurExpectedAmount" class="eur-figure-sm">--</div>
+                        </div>
+                        <div>
+                            <small class="text-muted text-uppercase fw-semibold">Effective rate</small>
+                            <div id="eurEffectiveRateDisplay" class="eur-figure-sm">1 GBP = -- EUR</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="eur-overlay-right">
+                    <div class="eur-keypad-panel">
+                        <div class="eur-keypad" id="eurKeypad">
+                            <button type="button" class="key-btn" data-k="1">1</button>
+                            <button type="button" class="key-btn" data-k="2">2</button>
+                            <button type="button" class="key-btn" data-k="3">3</button>
+                            <button type="button" class="key-btn" data-k="4">4</button>
+                            <button type="button" class="key-btn" data-k="5">5</button>
+                            <button type="button" class="key-btn" data-k="6">6</button>
+                            <button type="button" class="key-btn" data-k="7">7</button>
+                            <button type="button" class="key-btn" data-k="8">8</button>
+                            <button type="button" class="key-btn" data-k="9">9</button>
+                            <button type="button" class="key-btn key-action" data-k="C">C</button>
+                            <button type="button" class="key-btn" data-k="0">0</button>
+                            <button type="button" class="key-btn key-action" data-k="B">Back</button>
+                        </div>
+                    </div>
+                    <div class="eur-entry-panel">
+                        <label class="form-label text-uppercase small fw-semibold">Enter EUR received</label>
+                        <div class="input-group eur-input-group">
+                            <span class="input-group-text">&euro;</span>
+                            <input type="text" id="eurReceivedInput" class="form-control" inputmode="decimal" autocomplete="off" value="0.00">
+                            <button type="button" class="btn btn-outline-secondary" id="eurUseExpectedBtn">Use expected</button>
+                        </div>
+                    </div>
+                    <div class="eur-summary-panel">
+                        <div class="eur-diff-card">
+                            <div class="text-muted text-uppercase small fw-semibold">Status</div>
+                            <div id="eurDifferenceStatus" class="eur-diff-status">Select a rate to continue.</div>
+                        </div>
+                        <div class="eur-diff-card">
+                            <div class="text-muted text-uppercase small fw-semibold">Sterling impact</div>
+                            <div id="eurSterlingImpact" class="eur-diff-sterling">--</div>
+                        </div>
+                        <div class="eur-diff-card">
+                            <div class="text-muted text-uppercase small fw-semibold">Applied equivalent</div>
+                            <div id="eurActualGbp" class="eur-diff-sterling">&euro;0.00 &asymp; &pound;0.00</div>
+                        </div>
+                        <button type="button" id="eurApplyBtn" class="btn btn-primary btn-lg w-100 mt-3" disabled>Apply EUR Tender</button>
                     </div>
                 </div>
             </div>
@@ -412,12 +487,12 @@
                         <div class="fw-semibold mb-2">Denominations</div>
                         <div id="denomsGrid" class="row g-2">
                             <!-- Denomination controls: readonly qty with +1 / -1 buttons -->
-                            <div class="col-6 col-md-4"><label class="form-label">£50</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="50" type="button">-1</button><input data-denom="50" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="50" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">£20</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="20" type="button">-1</button><input data-denom="20" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="20" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">£10</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="10" type="button">-1</button><input data-denom="10" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="10" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">£5</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="5" type="button">-1</button><input data-denom="5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="5" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">£2</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="2" type="button">-1</button><input data-denom="2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="2" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">£1</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="1" type="button">-1</button><input data-denom="1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="1" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£50</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="50" type="button">-1</button><input data-denom="50" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="50" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£20</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="20" type="button">-1</button><input data-denom="20" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="20" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£10</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="10" type="button">-1</button><input data-denom="10" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="10" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£5</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="5" type="button">-1</button><input data-denom="5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="5" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£2</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="2" type="button">-1</button><input data-denom="2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="2" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£1</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="1" type="button">-1</button><input data-denom="1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="1" type="button">+1</button></div></div>
                             <div class="col-6 col-md-4"><label class="form-label">50p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.5" type="button">-1</button><input data-denom="0.5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.5" type="button">+1</button></div></div>
                             <div class="col-6 col-md-4"><label class="form-label">20p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.2" type="button">-1</button><input data-denom="0.2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.2" type="button">+1</button></div></div>
                             <div class="col-6 col-md-4"><label class="form-label">10p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.1" type="button">-1</button><input data-denom="0.1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.1" type="button">+1</button></div></div>
@@ -432,16 +507,16 @@
                     <div class="card p-3">
                         <div class="fw-semibold mb-2">Summary</div>
                         <div id="reconSummary" style="display:none;">
-                            <div class="d-flex justify-content-between"><div>Opening Float</div><div id="sumOpening">£0.00</div></div>
-                            <div class="d-flex justify-content-between"><div>Cash Sales (net)</div><div id="sumCashSales">£0.00</div></div>
-                            <div class="d-flex justify-content-between"><div>Card Sales (net)</div><div id="sumCardSales">£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Opening Float</div><div id="sumOpening">Ã‚Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Cash Sales (net)</div><div id="sumCashSales">Ã‚Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Card Sales (net)</div><div id="sumCardSales">Ã‚Â£0.00</div></div>
                             <div class="d-flex justify-content-between"><div>Payouts</div><div>
                                 <input type="number" step="0.01" id="sumPayoutsInput" class="form-control form-control-sm" placeholder="0.00" style="max-width: 140px;">
                             </div></div>
                             <hr>
-                            <div class="d-flex justify-content-between"><div>Expected Till</div><div id="sumExpected">£0.00</div></div>
-                            <div class="d-flex justify-content-between"><div>Counted (denoms)</div><div id="sumCounted">£0.00</div></div>
-                            <div class="d-flex justify-content-between fw-semibold"><div>Variance</div><div id="sumVariance">£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Expected Till</div><div id="sumExpected">Ã‚Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Counted (denoms)</div><div id="sumCounted">Ã‚Â£0.00</div></div>
+                            <div class="d-flex justify-content-between fw-semibold"><div>Variance</div><div id="sumVariance">Ã‚Â£0.00</div></div>
                         </div>
                         <div id="reconResult" class="mt-2" style="display:none;"></div>
                         <div class="d-grid mt-3">
@@ -701,7 +776,7 @@
                     <div class="row mb-4">
                         <div class="col-md-6">
                             <h6 class="text-muted">GBP Total</h6>
-                            <h3 id="eurOverlayGbpTotal" class="text-dark">£0.00</h3>
+                            <h3 id="eurOverlayGbpTotal" class="text-dark">Ã‚Â£0.00</h3>
                         </div>
                         <div class="col-md-6">
                             <h6 class="text-muted">Store Rate (1 GBP)</h6>
@@ -712,15 +787,15 @@
                         <div class="row">
                             <div class="col-md-4">
                                 <small class="text-muted">Exact EUR</small>
-                                <div id="eurOverlayExact" class="h5 font-monospace">€0.00</div>
+                                <div id="eurOverlayExact" class="h5 font-monospace">Ã¢â€šÂ¬0.00</div>
                             </div>
                             <div class="col-md-4">
-                                <small class="text-muted">Round Up (€5)</small>
-                                <div id="eurOverlayRoundUp" class="h5 font-monospace">€0.00</div>
+                                <small class="text-muted">Round Up (Ã¢â€šÂ¬5)</small>
+                                <div id="eurOverlayRoundUp" class="h5 font-monospace">Ã¢â€šÂ¬0.00</div>
                             </div>
                             <div class="col-md-4">
-                                <small class="text-muted">Round Down (€5)</small>
-                                <div id="eurOverlayRoundDown" class="h5 font-monospace">€0.00</div>
+                                <small class="text-muted">Round Down (Ã¢â€šÂ¬5)</small>
+                                <div id="eurOverlayRoundDown" class="h5 font-monospace">Ã¢â€šÂ¬0.00</div>
                             </div>
                         </div>
                     </div>
@@ -728,20 +803,20 @@
                         <div class="col-md-6">
                             <button id="eurSelectRoundUp" class="btn btn-primary btn-lg w-100" onclick="eurApplyRounding('up')">
                                 <div>Use Rounded Up</div>
-                                <small id="eurSelectRoundUpLabel" class="d-block">€0.00</small>
+                                <small id="eurSelectRoundUpLabel" class="d-block">Ã¢â€šÂ¬0.00</small>
                             </button>
                         </div>
                         <div class="col-md-6">
                             <button id="eurSelectRoundDown" class="btn btn-success btn-lg w-100" onclick="eurApplyRounding('down')">
                                 <div>Use Rounded Down</div>
-                                <small id="eurSelectRoundDownLabel" class="d-block">€0.00</small>
+                                <small id="eurSelectRoundDownLabel" class="d-block">Ã¢â€šÂ¬0.00</small>
                             </button>
                         </div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Or Enter Custom EUR Amount</label>
                         <div class="input-group">
-                            <span class="input-group-text">€</span>
+                            <span class="input-group-text">Ã¢â€šÂ¬</span>
                             <input type="number" id="eurCustomInput" class="form-control form-control-lg" placeholder="0.00" step="0.01" min="0">
                             <button class="btn btn-outline-secondary" onclick="eurApplyCustom()">Apply Custom</button>
                         </div>
@@ -769,11 +844,12 @@
             };
         })();
     </script>
-    <script src="{{ url_for('static', filename='js/script.js', v='5') }}"></script>
+    <script src="{{ url_for('static', filename='js/script.js', v='6') }}"></script>
     <script src="{{ url_for('static', filename='js/resume_patch.js', v='2') }}"></script>
     <script src="{{ url_for('static', filename='js/bootstrap_fix.js', v='1') }}"></script>
 </body>
 </html>
+
 
 
 

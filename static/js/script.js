@@ -61,6 +61,11 @@ let barcodeFeedbackTimer = null;
 let eurConversionData = null;  // { eur_exact, eur_round_up, eur_round_down, store_rate, gbp_total }
 let eurConversionActive = false;  // Whether EUR conversion is currently being used
 let saleEffectiveRate = null;  // Effective rate chosen for this sale (eur_target / gbp_total)
+let eurSelectedMode = null;
+let eurExpectedAmount = 0;
+if (typeof window !== 'undefined') {
+  window.saleEurMetadata = null;
+}
 function pickAttribute(attrs, keys){
   if(!attrs) return '';
   for(const key of keys){
@@ -131,78 +136,280 @@ async function fetchEurSuggestions(gbpTotal, storeRate) {
   }
 }
 
-async function computeEffectiveRate(gbpTotal, eurTarget) {
-  /**
-   * Compute effective_rate = eurTarget / gbpTotal.
-   * This rate will be used for all EUR payment conversions in this sale.
-   */
+function resetEurTenderState() {
+  eurSelectedMode = null;
+  eurExpectedAmount = 0;
+  if (!eurConversionActive) {
+    saleEffectiveRate = null;
+  }
+  const input = document.getElementById('eurReceivedInput');
+  if (input) {
+    resetNumericInput(input, '0.00');
+  }
+  const applyBtn = document.getElementById('eurApplyBtn');
+  if (applyBtn) {
+    applyBtn.textContent = 'Apply EUR Tender';
+    applyBtn.disabled = true;
+  }
+  const status = document.getElementById('eurOverlayStatus');
+  if (status) status.textContent = 'Select a rate option to begin.';
+  updateEurOptionUI();
+  updateEurEffectiveRateDisplay();
+  updateEurDifferenceUI();
+}
+
+function showEurOverlay() {
+  const overlay = document.getElementById('eurConverterOverlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  overlay.style.visibility = 'visible';
+  overlay.style.opacity = '1';
+}
+
+function hideEurOverlay() {
+  const overlay = document.getElementById('eurConverterOverlay');
+  if (!overlay) return;
+  overlay.style.display = 'none';
+  overlay.style.visibility = 'hidden';
+  overlay.style.opacity = '0';
+  resetEurTenderState();
+}
+
+function isEurOverlayVisible() {
+  const overlay = document.getElementById('eurConverterOverlay');
+  if (!overlay) return false;
+  return overlay.style.display && overlay.style.display !== 'none';
+}
+
+function updateEurOptionUI() {
   try {
-    const resp = await fetch('/api/currency/effective-rate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gbp_total: gbpTotal, eur_target: eurTarget })
+    document.querySelectorAll('[data-eur-option]').forEach(btn => {
+      const mode = btn.getAttribute('data-eur-option');
+      btn.classList.toggle('active', mode === eurSelectedMode);
     });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data.status === 'success' ? data.effective_rate : null;
-  } catch (e) {
-    err('Failed to compute effective rate:', e);
-    return null;
+  } catch (_){}
+  const expectedEl = document.getElementById('eurExpectedAmount');
+  if (expectedEl) {
+    expectedEl.textContent = eurExpectedAmount > 0 ? `€${eurExpectedAmount.toFixed(2)}` : '--';
   }
 }
 
-function applyEurConversion(eurTarget) {
-  /**
-   * User has chosen a EUR target (rounded up, down, or custom).
-   * Compute effective_rate and record it in the sale.
-   * Create an applied payment with both GBP and EUR amounts.
-   * Update UI to reflect that EUR mode is active.
-   */
-  if (!eurConversionData) return;
-
+function selectEurOption(mode) {
+  if (!eurConversionData) {
+    alert('No EUR conversion data available. Close and retry.');
+    return;
+  }
   const gbpTotal = eurConversionData.gbp_total || 0;
   if (gbpTotal <= 0) {
     alert('Invalid GBP total');
     return;
   }
+  let target = 0;
+  if (mode === 'exact') {
+    target = eurConversionData.eur_exact || 0;
+  } else if (mode === 'up') {
+    target = eurConversionData.eur_round_up || 0;
+  } else {
+    target = eurConversionData.eur_round_down || 0;
+  }
+  if (target <= 0) {
+    alert('Unable to use this rate option. Please choose another.');
+    return;
+  }
+  eurSelectedMode = mode;
+  eurExpectedAmount = Number(target.toFixed(2));
+  saleEffectiveRate = Number((eurExpectedAmount / gbpTotal).toFixed(4));
+  updateEurOptionUI();
+  updateEurEffectiveRateDisplay();
+  updateEurDifferenceUI();
+}
 
-  // Compute and store the effective rate
-  saleEffectiveRate = Number((eurTarget / gbpTotal).toFixed(4));
-  
-  // Record in sale metadata
-  window.saleEurMetadata = {
-    store_rate: eurConversionData.store_rate,
-    effective_rate: saleEffectiveRate,
-    eur_target: Number(eurTarget.toFixed(2)),
-    gbp_total: Number(gbpTotal.toFixed(2)),
-    eur_exact: eurConversionData.eur_exact
-  };
+function getEurReceivedAmount() {
+  const input = document.getElementById('eurReceivedInput');
+  if (!input) return 0;
+  const raw = Number(input.value || 0);
+  return Number.isFinite(raw) ? raw : 0;
+}
 
-  // Create payment record with both GBP and EUR amounts
-  const gbpEquivalent = Number((eurTarget / saleEffectiveRate).toFixed(2));
+function updateEurDifferenceUI() {
+  const statusEl = document.getElementById('eurDifferenceStatus');
+  const sterlingEl = document.getElementById('eurSterlingImpact');
+  const actualEl = document.getElementById('eurActualGbp');
+  const applyBtn = document.getElementById('eurApplyBtn');
+  const actual = getEurReceivedAmount();
+  const effectiveRate = saleEffectiveRate || 0;
+  let statusText = 'Select a rate to continue.';
+  let sterlingText = '--';
+  if (actualEl) {
+    if (effectiveRate > 0 && actual > 0) {
+      const gbp = Number((actual / effectiveRate).toFixed(2));
+      actualEl.textContent = `€${actual.toFixed(2)} ≈ £${gbp.toFixed(2)}`;
+    } else {
+      actualEl.textContent = '€0.00 ≈ £0.00';
+    }
+  }
+  if (!eurSelectedMode || eurExpectedAmount <= 0 || effectiveRate <= 0) {
+    if (statusEl) statusEl.textContent = statusText;
+    const overlayStatus = document.getElementById('eurOverlayStatus');
+    if (overlayStatus) overlayStatus.textContent = statusText;
+    if (sterlingEl) sterlingEl.textContent = sterlingText;
+    if (applyBtn) {
+      applyBtn.textContent = 'Apply EUR Tender';
+      applyBtn.disabled = true;
+    }
+    return;
+  }
+  if (actual <= 0) {
+    statusText = 'Enter the EUR amount presented.';
+    if (statusEl) statusEl.textContent = statusText;
+    const overlayStatus = document.getElementById('eurOverlayStatus');
+    if (overlayStatus) overlayStatus.textContent = statusText;
+    if (sterlingEl) sterlingEl.textContent = sterlingText;
+    if (applyBtn) {
+      applyBtn.textContent = 'Apply EUR Tender';
+      applyBtn.disabled = true;
+    }
+    return;
+  }
+  const eurDiff = Number((actual - eurExpectedAmount).toFixed(2));
+  const gbpDiff = Number((eurDiff / effectiveRate).toFixed(2));
+  if (Math.abs(eurDiff) < 0.01) {
+    statusText = 'Exact amount received.';
+    sterlingText = 'No GBP adjustment required.';
+  } else if (eurDiff > 0) {
+    statusText = `Over by €${eurDiff.toFixed(2)}`;
+    sterlingText = `Give £${Math.abs(gbpDiff).toFixed(2)} change`;
+  } else {
+    statusText = `Short by €${Math.abs(eurDiff).toFixed(2)}`;
+    sterlingText = `Still due £${Math.abs(gbpDiff).toFixed(2)}`;
+  }
+  if (statusEl) statusEl.textContent = statusText;
+  const overlayStatus = document.getElementById('eurOverlayStatus');
+  if (overlayStatus) overlayStatus.textContent = statusText;
+  if (sterlingEl) sterlingEl.textContent = sterlingText;
+  if (applyBtn) {
+    applyBtn.textContent = `Apply €${actual.toFixed(2)}`;
+    applyBtn.disabled = false;
+  }
+}
+
+function fillEurWithExpected() {
+  if (eurExpectedAmount <= 0) return;
+  const input = document.getElementById('eurReceivedInput');
+  if (!input) return;
+  const cents = Math.round(eurExpectedAmount * 100);
+  _setFromCents(input, cents);
+  updateEurDifferenceUI();
+}
+
+function applySelectedEurTender() {
+  if (!eurConversionData) {
+    alert('No EUR conversion data available');
+    return;
+  }
+  if (!eurSelectedMode || eurExpectedAmount <= 0 || !saleEffectiveRate) {
+    alert('Select a rate before applying.');
+    return;
+  }
+  const actual = getEurReceivedAmount();
+  if (actual <= 0) {
+    alert('Enter the EUR amount received.');
+    return;
+  }
+  const gbpTotal = eurConversionData.gbp_total || 0;
+  const gbpEquivalent = Number((actual / saleEffectiveRate).toFixed(2));
+  const eurDiff = Number((actual - eurExpectedAmount).toFixed(2));
+  const gbpDiff = Number((gbpEquivalent - gbpTotal).toFixed(2));
   appliedPayments.push({
     mode_of_payment: 'Cash',
-    amount: gbpEquivalent,  // This is the GBP equivalent (what we record in accounts)
+    amount: gbpEquivalent,
     reference_no: null,
-    currency: 'EUR',        // Mark this as EUR payment
-    amount_eur: Number(eurTarget.toFixed(2)),
+    currency: 'EUR',
+    amount_eur: Number(actual.toFixed(2)),
     eur_rate: saleEffectiveRate,
     meta: {
       currency: 'EUR',
-      eur_amount: Number(eurTarget.toFixed(2)),
+      eur_amount: Number(actual.toFixed(2)),
       eur_rate: saleEffectiveRate,
-      gbp_equivalent: gbpEquivalent
+      gbp_equivalent: gbpEquivalent,
+      eur_expected: eurExpectedAmount,
+      eur_diff: eurDiff,
+      gbp_diff: gbpDiff
     }
   });
-
+  window.saleEurMetadata = {
+    store_rate: eurConversionData.store_rate,
+    effective_rate: saleEffectiveRate,
+    eur_target: eurExpectedAmount,
+    gbp_total: Number(gbpTotal.toFixed(2)),
+    eur_exact: eurConversionData.eur_exact,
+    eur_received: Number(actual.toFixed(2)),
+    gbp_equivalent: gbpEquivalent,
+    eur_difference: eurDiff,
+    gbp_difference: gbpDiff,
+    selection_mode: eurSelectedMode
+  };
   eurConversionActive = true;
-  
-  // Hide the EUR panel and suggestions
-  const eurSection = document.getElementById('eurSuggestionsDiv');
-  if (eurSection) eurSection.style.display = 'none';
-  
+  hideEurOverlay();
   updateCashSection();
   resetTenderInputs();
+}
+
+function updateEurEffectiveRateDisplay() {
+  const el = document.getElementById('eurEffectiveRateDisplay');
+  if (!el) return;
+  if (!saleEffectiveRate) {
+    el.textContent = '1 GBP = -- EUR';
+    return;
+  }
+  el.textContent = `1 GBP = ${saleEffectiveRate.toFixed(4)} EUR`;
+}
+
+function clearSaleFxState() {
+  eurConversionActive = false;
+  saleEffectiveRate = null;
+  eurConversionData = null;
+  eurSelectedMode = null;
+  eurExpectedAmount = 0;
+  if (typeof window !== 'undefined') {
+    window.saleEurMetadata = null;
+  }
+  hideEurOverlay();
+}
+
+function summarizeFxFromPayments(payments, gbpTotal) {
+  const rows = (payments || []).filter(p => {
+    const cur = (p.currency || '').toUpperCase();
+    return cur === 'EUR' && p.amount_eur != null;
+  });
+  if (!rows.length) return null;
+  const totalEur = rows.reduce((sum, row) => sum + Math.abs(Number(row.amount_eur || 0)), 0);
+  const totalGbp = rows.reduce((sum, row) => sum + Math.abs(Number(row.amount || 0)), 0);
+  const meta = window.saleEurMetadata || null;
+  const expectedEur = meta && meta.eur_target != null ? Number(meta.eur_target) : null;
+  const gbpBase = typeof gbpTotal === 'number'
+    ? Math.abs(Number(gbpTotal))
+    : (meta && meta.gbp_total != null ? Number(meta.gbp_total) : null);
+  const differenceEur = meta && meta.eur_difference != null
+    ? Number(meta.eur_difference)
+    : (expectedEur != null ? Number((totalEur - expectedEur).toFixed(2)) : 0);
+  const differenceGbp = meta && meta.gbp_difference != null
+    ? Number(meta.gbp_difference)
+    : (gbpBase != null ? Number((totalGbp - gbpBase).toFixed(2)) : 0);
+  const effectiveRate = meta && meta.effective_rate
+    ? Number(meta.effective_rate)
+    : (rows.find(r => r.eur_rate)?.eur_rate || (totalGbp > 0 ? Number((totalEur / totalGbp).toFixed(4)) : null));
+  return {
+    eur_amount: Number(totalEur.toFixed(2)),
+    gbp_equivalent: Number(totalGbp.toFixed(2)),
+    effective_rate: effectiveRate,
+    store_rate: meta && meta.store_rate != null ? Number(meta.store_rate) : null,
+    expected_eur: expectedEur,
+    gbp_total: gbpBase != null ? Number(gbpBase.toFixed(2)) : null,
+    difference_eur: differenceEur,
+    difference_gbp: differenceGbp,
+    selection_mode: meta && meta.selection_mode ? meta.selection_mode : null
+  };
 }
 
 async function openEurConversionOverlay(gbpTotal) {
@@ -225,95 +432,22 @@ async function openEurConversionOverlay(gbpTotal) {
   // Store in global for later use
   eurConversionData = suggestions;
 
-  // Populate overlay elements
-  document.getElementById('eurOverlayGbpTotal').textContent = `£${gbpTotal.toFixed(2)}`;
-  document.getElementById('eurOverlayStoreRate').textContent = `${storeRate.toFixed(4)} EUR`;
-  document.getElementById('eurOverlayExact').textContent = `€${(suggestions.eur_exact || 0).toFixed(2)}`;
-  document.getElementById('eurOverlayRoundUp').textContent = `€${(suggestions.eur_round_up || 0).toFixed(2)}`;
-  document.getElementById('eurOverlayRoundDown').textContent = `€${(suggestions.eur_round_down || 0).toFixed(2)}`;
+  // Populate panel elements
+  const gbpEl = document.getElementById('eurOverlayGbpTotal');
+  if (gbpEl) gbpEl.textContent = `£${gbpTotal.toFixed(2)}`;
+  const rateEl = document.getElementById('eurOverlayStoreRate');
+  if (rateEl) rateEl.textContent = `${storeRate.toFixed(4)} EUR`;
+  const exactEl = document.getElementById('eurOverlayExact');
+  if (exactEl) exactEl.textContent = `€${(suggestions.eur_exact || 0).toFixed(2)}`;
+  const upEl = document.getElementById('eurOverlayRoundUp');
+  if (upEl) upEl.textContent = `€${(suggestions.eur_round_up || 0).toFixed(2)}`;
+  const downEl = document.getElementById('eurOverlayRoundDown');
+  if (downEl) downEl.textContent = `€${(suggestions.eur_round_down || 0).toFixed(2)}`;
 
-  // Update button labels
-  document.getElementById('eurSelectRoundUpLabel').textContent = `€${(suggestions.eur_round_up || 0).toFixed(2)}`;
-  document.getElementById('eurSelectRoundDownLabel').textContent = `€${(suggestions.eur_round_down || 0).toFixed(2)}`;
-
-  // Clear custom input
-  const customInput = document.getElementById('eurCustomInput');
-  if (customInput) customInput.value = '';
-
-  // Show the modal
-  const modal = new bootstrap.Modal(document.getElementById('eurConversionOverlay'));
-  modal.show();
-}
-
-const _eurModalElement = document.getElementById('eurConversionOverlay');
-if (_eurModalElement) {
-  _eurModalElement.addEventListener('shown.bs.modal', () => {
-    document.querySelectorAll('.modal-backdrop').forEach(el => el.classList.add('eur-modal-backdrop'));
-  });
-  _eurModalElement.addEventListener('hidden.bs.modal', () => {
-    document.querySelectorAll('.modal-backdrop.eur-modal-backdrop').forEach(el => el.classList.remove('eur-modal-backdrop'));
-  });
-}
-
-function eurApplyRounding(roundMode) {
-  /**
-   * User selected "Round Up" or "Round Down" button.
-   * Apply the corresponding EUR amount and close the modal.
-   */
-  if (!eurConversionData) {
-    alert('No EUR conversion data available');
-    return;
-  }
-
-  const eurTarget = roundMode === 'up' ? eurConversionData.eur_round_up : eurConversionData.eur_round_down;
-  
-  // Close modal
-  const modal = bootstrap.Modal.getInstance(document.getElementById('eurConversionOverlay'));
-  if (modal) modal.hide();
-
-  // Apply the conversion
-  applyEurConversion(eurTarget);
-}
-
-function eurApplyCustom() {
-  /**
-   * User entered a custom EUR amount.
-   * Apply it and close the modal.
-   */
-  const customInput = document.getElementById('eurCustomInput');
-  const eurTarget = parseFloat(customInput?.value || 0);
-
-  if (eurTarget <= 0) {
-    alert('Please enter a valid EUR amount');
-    return;
-  }
-
-  if (!eurConversionData) {
-    alert('No EUR conversion data available');
-    return;
-  }
-
-  // Close modal
-  const modal = bootstrap.Modal.getInstance(document.getElementById('eurConversionOverlay'));
-  if (modal) modal.hide();
-
-  // Apply the conversion
-  applyEurConversion(eurTarget);
-}
-
-function updateEurEffectiveRateDisplay(eurTarget) {
-  /**
-   * Display the effective rate that will be used for this sale.
-   */
-  if (!eurConversionData) return;
-
-  const gbpTotal = eurConversionData.gbp_total || 0;
-  if (gbpTotal <= 0) return;
-
-  const effectiveRate = (eurTarget / gbpTotal).toFixed(4);
-  const display = `1 GBP = ${effectiveRate} EUR`;
-  const el = document.getElementById('eurEffectiveRateDisplay');
-  if (el) el.textContent = display;
+  resetEurTenderState();
+  const status = document.getElementById('eurOverlayStatus');
+  if (status) status.textContent = `Total £${gbpTotal.toFixed(2)} — choose a EUR target.`;
+  showEurOverlay();
 }
 
 // App settings and receipt state
@@ -607,6 +741,8 @@ const receiptPrintAdapter = (()=>{
     }
     separator();
     const items = Array.isArray(info.items) ? info.items : [];
+    const vatInclusive = info.vat_inclusive!=null ? !!info.vat_inclusive : !!settings.vat_inclusive;
+    let vatTotal = 0;
     items.forEach(item=>{
       const nameLines = wrapText(item.name || item.item_name || item.code || 'Item');
       if(!nameLines.length) nameLines.push('Item');
@@ -614,6 +750,7 @@ const receiptPrintAdapter = (()=>{
       const qty = Number(item.qty||0);
       const rate = Number(item.rate||0);
       const lineTotal = Number(item.amount!=null ? item.amount : qty * rate * (item.refund ? -1 : 1));
+      vatTotal += calcVatPortion(lineTotal, effectiveVatRate(item.vat_rate), vatInclusive);
       if(gift){
         write(`Qty: ${qty}${item.refund ? ' (refund)' : ''}`);
       }else{
@@ -622,25 +759,16 @@ const receiptPrintAdapter = (()=>{
       }
     });
     separator();
-    const vatRate = Number(info.vat_rate!=null ? info.vat_rate : (settings.vat_rate||0));
-    const vatInclusive = info.vat_inclusive!=null ? !!info.vat_inclusive : !!settings.vat_inclusive;
     const gross = Number(info.total||0);
     let net = gross;
-    let vatAmount = 0;
-    if(vatRate>0){
-      const ratio = vatRate/100;
-      if(vatInclusive){
-        net = gross / (1 + ratio);
-        vatAmount = gross - net;
-      }else{
-        net = gross;
-        vatAmount = gross * ratio;
-      }
+    const vatAmount = vatTotal;
+    if(vatInclusive){
+      net = gross - vatAmount;
     }
     if(!gift){
       write(padLine('Net', moneyFmt(net)));
-      if(vatRate>0){
-        write(padLine(`VAT ${vatRate.toFixed(1)}%`, moneyFmt(vatAmount)));
+      if(vatAmount){
+        write(padLine('VAT', moneyFmt(vatAmount)));
       }
     }
     write(padLine(info.isRefund ? 'Refund Total' : 'Total', moneyFmt(gross)));
@@ -676,6 +804,38 @@ const receiptPrintAdapter = (()=>{
     return buffer;
   }
 
+  function buildFxSlip(summary){
+    if(!summary) throw new Error('Missing FX summary payload');
+    let buffer = ESC + '@';
+    const write = (line='')=>{ buffer += (line||'') + '\n'; };
+    const separator = ()=> write('-'.repeat(RECEIPT_LINE_WIDTH));
+    buffer += ESC + '!' + '\x30';
+    write(centerText('EUR WRAP SLIP'));
+    buffer += ESC + '!' + '\x00';
+    const timestamp = new Date().toLocaleString();
+    write(centerText(timestamp));
+    separator();
+    write(padLine('EUR accepted:', `€${Number(summary.eur_amount || 0).toFixed(2)}`));
+    write(padLine('GBP equivalent:', `£${Number(summary.gbp_equivalent || 0).toFixed(2)}`));
+    if(summary.effective_rate){
+      write(padLine('Rate used:', `1 GBP = ${Number(summary.effective_rate).toFixed(4)} EUR`));
+    }
+    if(summary.store_rate && (!summary.effective_rate || Math.abs(Number(summary.store_rate) - Number(summary.effective_rate || 0)) > 0.0001)){
+      write(padLine('Store ref:', `1 GBP = ${Number(summary.store_rate).toFixed(4)} EUR`));
+    }
+    if(summary.difference_gbp){
+      const diff = Number(summary.difference_gbp);
+      if(Math.abs(diff) >= 0.01){
+        write(padLine(diff > 0 ? 'Change due:' : 'Still due:', `£${Math.abs(diff).toFixed(2)}`));
+      }
+    }
+    separator();
+    write(centerText('Wrap euro float with this slip'));
+    buffer += '\n\n';
+    buffer += GS + 'V' + '\x01';
+    return buffer;
+  }
+
   async function send(raw){
     await ensureConnection();
     try{ await qz.serial.closePort(RECEIPT_SERIAL_PORT); }catch(_){}
@@ -701,6 +861,11 @@ const receiptPrintAdapter = (()=>{
     async print(info, opts = {}){
       const payload = buildReceipt(info, opts);
       await send(payload);
+    },
+    async printFxSlip(summary){
+      if(!summary) return;
+      const payload = buildFxSlip(summary);
+      await send(payload);
     }
   };
 })();
@@ -721,6 +886,9 @@ async function tryDirectReceiptPrint(info, opts = {}){
   if(!info || !receiptPrintAdapter.isAvailable()) return false;
   try{
     await receiptPrintAdapter.print(info, opts);
+    if(!opts.gift && info.fx_summary){
+      await receiptPrintAdapter.printFxSlip(info.fx_summary);
+    }
     return true;
   }catch(e){
     err('direct receipt print failed', e);
@@ -767,6 +935,49 @@ function handleReceiptPrintRequest(info, wantsGift){
 const CURRENCY = 'GBP';
 const fmt = new Intl.NumberFormat(undefined, { style: 'currency', currency: CURRENCY });
 const money = v => fmt.format(Number(v || 0));
+
+function normalizeVatRate(value){
+  if(value === undefined || value === null || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function effectiveVatRate(value){
+  const direct = normalizeVatRate(value);
+  if(direct !== null) return direct;
+  return normalizeVatRate(settings?.vat_rate);
+}
+
+function calcVatPortion(amount, vatRate, inclusive = null){
+  const rate = normalizeVatRate(vatRate);
+  if(rate === null || rate <= 0) return 0;
+  const amt = Number(amount || 0);
+  const inclusiveFlag = inclusive !== null ? !!inclusive : !!settings.vat_inclusive;
+  if(inclusiveFlag){
+    return amt * (rate / (100 + rate));
+  }
+  return amt * (rate / 100);
+}
+
+function tenderTargetAmount(){
+  const total = getCartTotal();
+  return total < 0 ? Math.abs(total) : total;
+}
+
+function tenderPaidTotal(){
+  return appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+}
+
+function tenderRemainingAmount(){
+  return Math.max(0, tenderTargetAmount() - tenderPaidTotal());
+}
+
+function fillInputWithRemainingAmount(el){
+  if(!el) return;
+  const remaining = tenderRemainingAmount();
+  el.value = Number(remaining).toFixed(2);
+  el.dispatchEvent(new Event('input', { bubbles:true }));
+}
 
 // Monetary keypad helpers: maintain cents and render as 0.00
 function _getCents(el){
@@ -848,16 +1059,6 @@ function _ensureZAggToday(){
   }
   return settings.z_agg[d];
 }
-function _vatPortion(amount){
-  const rate = Math.max(0, Number(settings.vat_rate||0));
-  if(rate<=0) return 0;
-  const amt = Number(amount||0);
-  if(settings.vat_inclusive){
-    return amt * (rate/(100+rate));
-  } else {
-    return amt * (rate/100);
-  }
-}
 function updateZAggWithSale(ctx){
   // ctx: { net, lines:[{qty,rate,original_rate,refund,brand,item_group}], payments:[{mode_of_payment,amount}], cashier:{code,name} }
   try{
@@ -877,8 +1078,10 @@ function updateZAggWithSale(ctx){
       const lineNet = sign * qty * rate;
       const lineGrossAbs = qty * rate;
       const lineDisc = Math.max(0, (orig - rate) * qty);
-      if(ln.refund){ discReturns += lineDisc; vatReturns += _vatPortion(lineNet); }
-      else { discSales += lineDisc; vatSales += _vatPortion(lineNet); }
+      const lineVatRate = effectiveVatRate(ln.vat_rate);
+      const lineVat = calcVatPortion(lineNet, lineVatRate);
+      if(ln.refund){ discReturns += lineDisc; vatReturns += lineVat; }
+      else { discSales += lineDisc; vatSales += lineVat; }
       gross += Math.abs(lineGrossAbs) * (ln.refund?-1:1);
       itemsQty += qty * (ln.refund?-1:1);
       const groupKey = ln.item_group || ln.brand || 'Ungrouped';
@@ -979,6 +1182,7 @@ async function loadItems(){
         } else {
           entry.barcode = String(entry.barcode).trim();
         }
+        entry.vat_rate = normalizeVatRate(entry.vat_rate);
         return entry;
       });
       renderItems(items);
@@ -993,24 +1197,33 @@ function renderItems(list){
   const grid=document.getElementById('itemsGrid'); if(!grid) return; grid.innerHTML='';
   list.forEach(it=>{
     const d=document.createElement('div'); d.className='col';
-    // Determine price display: prefer explicit standard_rate; otherwise show variant min-max when available
-    let priceHtml = '';
-    if(it.price_min != null && it.price_max != null){
-      if(Number(it.price_min) === Number(it.price_max)){
-        priceHtml = money(it.price_min);
-      } else {
-        priceHtml = `${money(it.price_min)} - ${money(it.price_max)}`;
-      }
-    } else if(it.standard_rate != null){
-      priceHtml = money(it.standard_rate);
-    } else {
-      priceHtml = '—';
-    }
+    const priceHtml = formatItemPrice(it);
     const stockNote = (it.variant_stock != null) ? `<p class="card-text"><small>Stock: ${it.variant_stock}</small></p>` : `<p class="card-text"><small>${it.stock_uom}</small></p>`;
     d.innerHTML = `<div class="card item-card h-100"><div class="card-body"><h5 class="card-title">${it.item_name}</h5><p class="card-text">${priceHtml}</p>${stockNote}</div></div>`;
     d.onclick=()=>openProduct(it);
     grid.appendChild(d);
   });
+}
+
+function formatItemPrice(it){
+  const min = it.price_min;
+  const max = it.price_max;
+  if(min != null && max != null){
+    if(Number(min) === Number(max)){
+      return money(min);
+    }
+    return `${money(min)} - ${money(max)}`;
+  }
+  if(min != null){
+    return money(min);
+  }
+  if(max != null){
+    return money(max);
+  }
+  if(it.standard_rate != null){
+    return money(it.standard_rate);
+  }
+  return '-';
 }
 
 function addToCart(item) {
@@ -1185,7 +1398,8 @@ async function tryAddVariantByBarcode(code){
       image: null,
       variant: v.attributes || {},
       brand: null,
-      item_group: null,
+      item_group: v.item_group || null,
+      vat_rate: effectiveVatRate(v.vat_rate),
       refund: false
     });
   }
@@ -1404,19 +1618,23 @@ function bindEvents(){
     const applyCashBtn = document.getElementById('applyCashBtn');
     if(applyCashBtn){
       applyCashBtn.addEventListener('click', ()=>{
-        if(getCartTotal() < 0){
-          alert('Refunds return money to the customer. No payments can be applied.');
-          resetCashEntry();
-          updateCashSection();
-          return;
-        }
         const cashField=document.getElementById('cashInputField');
-        const val = Number((cashField && cashField.value) || cashInput || 0) || 0;
+        const val = Math.abs(Number((cashField && cashField.value) || cashInput || 0) || 0);
         if(val>0){
           appliedPayments.push({ mode_of_payment:'Cash', amount: val });
           resetCashEntry();
           updateCashSection();
         }
+      });
+    }
+    const cashRemainingBtn = document.getElementById('cashFullAmountBtn');
+    if(cashRemainingBtn){
+      cashRemainingBtn.addEventListener('click', ()=>{
+        const cashField = document.getElementById('cashInputField');
+        if(!cashField) return;
+        fillInputWithRemainingAmount(cashField);
+        cashEntryDirty = true;
+        updateCashSection();
       });
     }
     
@@ -1432,14 +1650,7 @@ function bindEvents(){
           return;
         }
 
-        // Pre-fill cash field so the amount is visible
-        const cashField = document.getElementById('cashInputField');
-        if(cashField){
-          cashField.value = amountDue.toFixed(2);
-          cashField.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-
-        // Open the EUR conversion modal
+        // Open the EUR conversion overlay
         await openEurConversionOverlay(amountDue);
       });
     }
@@ -1447,14 +1658,8 @@ function bindEvents(){
     const applyOtherBtn = document.getElementById('applyOtherBtn');
     if(applyOtherBtn){
       applyOtherBtn.addEventListener('click', ()=>{
-        if(getCartTotal() < 0){
-          alert('Refunds return money to the customer. No payments can be applied.');
-          resetOtherEntry();
-          updateCashSection();
-          return;
-        }
         const amtEl=document.getElementById('otherAmountInput');
-        const val=Number(amtEl && amtEl.value) || 0;
+        const val=Math.abs(Number(amtEl && amtEl.value) || 0);
         if(val>0){
           const mode = (currentTender==='card')?'Card':'Other';
           appliedPayments.push({ mode_of_payment: mode, amount: val });
@@ -1464,15 +1669,47 @@ function bindEvents(){
       });
     }
     
-    const eurCustomInput = document.getElementById('eurCustomInput');
-    if (eurCustomInput) {
-      eurCustomInput.addEventListener('input', () => {
-        const eurTarget = parseFloat(eurCustomInput.value || 0);
-        if (eurTarget > 0) {
-          updateEurEffectiveRateDisplay(eurTarget);
-        }
+    document.querySelectorAll('[data-eur-option]').forEach(btn=>{
+      btn.addEventListener('click', ()=> selectEurOption(btn.getAttribute('data-eur-option')));
+    });
+    const eurInput = document.getElementById('eurReceivedInput');
+    if (eurInput) {
+      eurInput.addEventListener('focus', ()=> eurInput.select());
+      eurInput.addEventListener('input', updateEurDifferenceUI);
+    }
+    const eurKeypad = document.getElementById('eurKeypad');
+    if (eurKeypad) {
+      eurKeypad.querySelectorAll('.key-btn').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+          const target = document.getElementById('eurReceivedInput');
+          applyMoneyKey(target, btn.getAttribute('data-k'));
+          updateEurDifferenceUI();
+        });
       });
     }
+    const eurApplyBtn = document.getElementById('eurApplyBtn');
+    if (eurApplyBtn) {
+      eurApplyBtn.addEventListener('click', applySelectedEurTender);
+    }
+    const eurUseExpectedBtn = document.getElementById('eurUseExpectedBtn');
+    if (eurUseExpectedBtn) {
+      eurUseExpectedBtn.addEventListener('click', fillEurWithExpected);
+    }
+    const eurOverlayCloseBtn = document.getElementById('eurOverlayCloseBtn');
+    if (eurOverlayCloseBtn) {
+      eurOverlayCloseBtn.addEventListener('click', hideEurOverlay);
+    }
+    const eurOverlay = document.getElementById('eurConverterOverlay');
+    if (eurOverlay) {
+      eurOverlay.addEventListener('click', e=>{
+        if (e.target === eurOverlay) hideEurOverlay();
+      });
+    }
+    document.addEventListener('keydown', e=>{
+      if (e.key === 'Escape' && isEurOverlayVisible()) {
+        hideEurOverlay();
+      }
+    });
     
     if(cs) cs.addEventListener('click',completeSaleFromOverlay);
   }
@@ -1591,10 +1828,7 @@ function bindEvents(){
     otherFullBtn.addEventListener('click', ()=>{
       const amtEl = document.getElementById('otherAmountInput');
       if(!amtEl) return;
-      const total = getCartTotal();
-      const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
-      const remaining = Math.max(0, total - paid);
-      _setFromCents(amtEl, Math.round(remaining * 100));
+      fillInputWithRemainingAmount(amtEl);
       otherEntryDirty = true;
       updateCashSection();
     });
@@ -1705,7 +1939,36 @@ function showSearchOverlay(q=''){ const o=document.getElementById('searchOverlay
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} const brands=[...new Set(items.map(it=>it.brand||'Unbranded'))].sort(); b.innerHTML='<option value="">All Brands</option>'+brands.map(x=>`<option value="${x}">${x}</option>`).join(''); i.value=q; renderSearchResults(); setTimeout(()=>i.focus(),0);} 
 function hideSearchOverlay(){ const o=document.getElementById('searchOverlay'); if(o) o.style.display='none'; }
-function renderSearchResults(){ const g=document.getElementById('searchGrid'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter'); if(!g) return; let list=items.slice(); const q=(i&&i.value||'').toLowerCase(); const br=(b&&b.value)||''; if(q) list=list.filter(x=>x.item_name.toLowerCase().includes(q)); if(br) list=list.filter(x=>(x.brand||'Unbranded')===br); g.innerHTML=''; list.forEach(it=>{ const c=document.createElement('div'); c.className='col'; const imgStyle=it.image?`style="background-image:url('${it.image}')"`:''; c.innerHTML=`<div class="product-card" onclick='selectProduct("${it.name}")'><div class="product-img" ${imgStyle}></div><div class="fw-semibold">${it.item_name}</div><div class="text-muted small">${it.brand||'Unbranded'}</div><div class="mt-1">${money(it.standard_rate)}</div></div>`; g.appendChild(c); }); }
+function itemMatchesSearch(item, needle){
+  if(!needle) return true;
+  const terms=[];
+  const push=val=>{ if(val===undefined||val===null) return; const txt=String(val).trim(); if(txt) terms.push(txt.toLowerCase()); };
+  push(item.item_name);
+  push(item.brand);
+  push(item.custom_style_code);
+  push(item.custom_simple_colour);
+  const attrs=item.attributes;
+  if(attrs){
+    if(typeof attrs==='string'){
+      push(attrs);
+    }else if(Array.isArray(attrs)){
+      attrs.forEach(push);
+    }else if(typeof attrs==='object'){
+      Object.entries(attrs).forEach(([k,v])=>{
+        push(k);
+        if(Array.isArray(v)){
+          v.forEach(push);
+        }else if(v&&typeof v==='object'){
+          Object.values(v).forEach(push);
+        }else{
+          push(v);
+        }
+      });
+    }
+  }
+  return terms.some(t=>t.includes(needle));
+}
+function renderSearchResults(){ const g=document.getElementById('searchGrid'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter'); if(!g) return; let list=items.slice(); const q=(i&&i.value||'').trim().toLowerCase(); const br=(b&&b.value)||''; if(q) list=list.filter(x=>itemMatchesSearch(x,q)); if(br) list=list.filter(x=>(x.brand||'Unbranded')===br); g.innerHTML=''; list.forEach(it=>{ const c=document.createElement('div'); c.className='col'; const imgStyle=it.image?`style="background-image:url('${it.image}')"`:''; const priceHtml=formatItemPrice(it); c.innerHTML=`<div class="product-card" onclick='selectProduct("${it.name}")'><div class="product-img" ${imgStyle}></div><div class="fw-semibold">${it.item_name}</div><div class="text-muted small">${it.brand||'Unbranded'}</div><div class="mt-1">${priceHtml}</div></div>`; g.appendChild(c); }); }
 function selectProduct(name){ const it=items.find(x=>x.name===name); if(it) openProduct(it); }
 
 // Product detail overlay
@@ -1781,7 +2044,9 @@ function addVariantToCart(item, variant, cellEl, variantRec){
       amount: rate,
       image: variantImage,
       brand: item.brand || null,
+      item_group: item.item_group || null,
       variant,
+      vat_rate: effectiveVatRate((variantRec && variantRec.vat_rate) || item.vat_rate),
       refund: false
     });
   }
@@ -1923,36 +2188,32 @@ function updateCashSection() {
   const otherFullBtn = document.getElementById('otherFullAmountBtn');
   const total = getCartTotal();
   const isRefund = total < 0;
-  if (isRefund && (appliedPayments.length || vouchers.length)){
-    appliedPayments = [];
-    vouchers = [];
-    resetTenderInputs();
-    eurConversionActive = false;
-    saleEffectiveRate = null;
-    window.saleEurMetadata = null;
-  }
+  const targetAmount = isRefund ? Math.abs(total) : total;
   const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
-  const paidCash = appliedPayments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
-  const remaining = total - paid;
-  if (due) due.textContent = money(total);
-  if (tenderDueEl) tenderDueEl.textContent = money(remaining);
+  const paidCash = appliedPayments.filter(p=>/cash/i.test(p.mode_of_payment||'')).reduce((s,p)=> s + Number(p.amount||0), 0);
+  const remaining = Math.max(0, targetAmount - paid);
+  if (due) due.textContent = money(isRefund ? -targetAmount : targetAmount);
+  if (tenderDueEl) tenderDueEl.textContent = money(isRefund ? -remaining : remaining);
   if (cashEl) cashEl.textContent = money(paidCash);
   if (cashEnteredEl) cashEnteredEl.textContent = money(Number(cashInput||0));
   const dueOther = document.getElementById('amountDueOther');
   if (dueOther) dueOther.textContent = money(remaining);
-  const changeVal = Math.max(0, paid - total);
+  const changeVal = isRefund ? 0 : Math.max(0, paid - targetAmount);
   if (changeEl) changeEl.textContent = money(changeVal);
   const cashVal = Number(cashInput || 0);
-  if (cashBtn) cashBtn.textContent = isRefund ? 'Refund' : `${money(cashVal)} Cash`;
+  if (cashBtn){
+    const labelAmount = Math.abs(cashVal||0);
+    cashBtn.textContent = isRefund ? `Refund ${money(labelAmount)}` : `${money(cashVal)} Cash`;
+  }
   if (clear) clear.onclick = () => { resetCashEntry(); updateCashSection(); };
-  if (applyCashBtn) applyCashBtn.disabled = isRefund;
-  if (applyOtherBtn) applyOtherBtn.disabled = isRefund;
+  if (applyCashBtn) applyCashBtn.disabled = false;
+  if (applyOtherBtn) applyOtherBtn.disabled = false;
   if (voucherBtn){
     const voucherCount = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length;
     voucherBtn.textContent = voucherCount>0 ? `Voucher (${voucherCount})` : 'Voucher';
     voucherBtn.disabled = isRefund;
   }
-  if (otherFullBtn) otherFullBtn.disabled = isRefund;
+  if (otherFullBtn) otherFullBtn.disabled = false;
   
   renderAppliedPayments();
 }
@@ -1975,6 +2236,7 @@ function selectTender(t){
       cashSection.style.display = (t === 'cash') ? 'block' : 'none';
       if (t !== 'cash') {
         cashSection.classList.remove('show-keypad');
+        hideEurOverlay();
       }
     }
 
@@ -1989,7 +2251,7 @@ function selectTender(t){
         otherLabel.textContent = (t === 'card') ? 'Card Amount' : 'Amount';
       }
       if (otherFullBtn){
-        otherFullBtn.style.display = (t === 'card') ? 'inline-block' : 'none';
+        otherFullBtn.style.display = isOther ? 'inline-block' : 'none';
       }
     }
 
@@ -2021,49 +2283,62 @@ async function completeSaleFromOverlay() {
 
   const total = getCartTotal();
   const isRefund = total < 0;
-  if (isRefund && (appliedPayments.length || vouchers.length)){
-    appliedPayments = [];
-    vouchers = [];
-    resetTenderInputs();
-    updateCashSection();
-  }
+  const refundDue = Math.abs(total);
   const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
   if (!isRefund && paid + 1e-9 < total) { alert('Please apply full payment before completing the sale.'); return; }
+  if (isRefund){
+    if (appliedPayments.length === 0){ alert('Apply the refund tender(s) before completing.'); return; }
+    if (Math.abs(paid - refundDue) > 0.01){ alert('Refund tender total must match the refund amount.'); return; }
+  }
 
-  const payments = isRefund ? [] : appliedPayments.map(p=>({ 
-    mode_of_payment: p.mode_of_payment, 
-    amount: Number(p.amount||0),
-    amount_gbp: Number(p.amount||0),  // Always recorded in GBP
-    amount_eur: p.amount_eur ? Number(p.amount_eur) : undefined,
-    currency: p.currency || 'GBP',
-    eur_rate: p.eur_rate ? Number(p.eur_rate) : undefined,
-    reference_no: p.reference_no || undefined,
-    currency_rate: p.currency_rate || undefined
-  }));
+  const payments = appliedPayments.map(p=>{
+    const rawAmount = Number(p.amount||0);
+    const signedAmount = isRefund ? -Math.abs(rawAmount) : rawAmount;
+    return {
+      mode_of_payment: p.mode_of_payment,
+      amount: signedAmount,
+      amount_gbp: signedAmount,
+      amount_eur: p.amount_eur ? Number(p.amount_eur) * (isRefund ? -1 : 1) : undefined,
+      currency: p.currency || 'GBP',
+      eur_rate: p.eur_rate ? Number(p.eur_rate) : undefined,
+      reference_no: p.reference_no || undefined,
+      currency_rate: p.currency_rate || undefined
+    };
+  });
   const voucherList = isRefund ? [] : appliedPayments.filter(p=>p.mode_of_payment==='Voucher').map(p=>({ code: p.reference_no||'', amount: Number(p.amount||0) }));
-  const tender = isRefund ? 'refund' : ((payments.length>1) ? 'split' : (payments[0]?.mode_of_payment||currentTender||''));
-  const cashGiven = isRefund ? 0 : payments.filter(p=>/cash/i.test(p.mode_of_payment)).reduce((s,p)=> s + Number(p.amount||0), 0);
-  const changeVal = Math.max(0, paid - Math.max(0,total));
+  const tender = isRefund
+    ? ((payments.length>1) ? 'refund_split' : (payments[0]?.mode_of_payment || 'refund'))
+    : ((payments.length>1) ? 'split' : (payments[0]?.mode_of_payment||currentTender||''));
+  const cashGiven = payments.filter(p=>/cash/i.test(p.mode_of_payment||'')).reduce((s,p)=> s + (isRefund ? Math.abs(Number(p.amount||0)) : Math.max(0, Number(p.amount||0))), 0);
+  const targetAmount = isRefund ? refundDue : total;
+  const changeVal = isRefund ? 0 : Math.max(0, paid - targetAmount);
+  const fxMetadata = (eurConversionActive && window.saleEurMetadata) ? { ...window.saleEurMetadata } : null;
+  const currencyRateUsed = fxMetadata && fxMetadata.effective_rate
+    ? Number(fxMetadata.effective_rate)
+    : (eurConversionActive
+        ? (saleEffectiveRate || (eurConversionData && eurConversionData.store_rate) || 1.0)
+        : 1.0);
 
   const payload = {
     customer,
     items: cart.map(i => ({
       item_code: i.item_code,
       qty: i.refund ? -Math.abs(i.qty) : i.qty,
-      rate: i.rate
+      rate: i.rate,
+      vat_rate: effectiveVatRate(i.vat_rate)
     })),
     payments,
     tender,
     cash_given: cashGiven,
-    change: isRefund ? Math.abs(total) : changeVal,
+    change: isRefund ? refundDue : changeVal,
     total: total,
     vouchers: voucherList,
     till_number: settings.till_number,
     cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
     // Currency information - include full FX metadata if EUR conversion was active
-    currency_used: eurConversionActive ? 'EUR' : 'GBP',
-    currency_rate_used: eurConversionActive && eurConversionData ? eurConversionData.store_rate : 1.0,
-    fx_metadata: eurConversionActive && window.saleEurMetadata ? window.saleEurMetadata : null
+    currency_used: fxMetadata ? 'EUR' : 'GBP',
+    currency_rate_used: fxMetadata ? Number(currencyRateUsed) : 1.0,
+    fx_metadata: fxMetadata
   };
 
   try {
@@ -2099,7 +2374,8 @@ async function completeSaleFromOverlay() {
           original_rate: (i.original_rate!=null?i.original_rate:i.rate),
           refund: !!i.refund,
           brand: i.brand || null,
-          item_group: i.item_group || null
+          item_group: i.item_group || null,
+          vat_rate: effectiveVatRate(i.vat_rate)
         }))
       };
       updateZAggWithSale(saleCtx);
@@ -2110,14 +2386,16 @@ async function completeSaleFromOverlay() {
       qty: item.qty,
       rate: Number(item.rate||0),
       refund: !!item.refund,
-      amount: Number(item.qty||0) * Number(item.rate||0) * (item.refund ? -1 : 1)
+      amount: Number(item.qty||0) * Number(item.rate||0) * (item.refund ? -1 : 1),
+      vat_rate: effectiveVatRate(item.vat_rate)
     }));
     const receiptPayments = payments.map(p=>({
       mode: p.mode_of_payment,
       mode_of_payment: p.mode_of_payment,
-      amount: Number(p.amount||0),
+      amount: Math.abs(Number(p.amount||0)),
       reference: p.reference_no || ''
     }));
+    const fxSummary = summarizeFxFromPayments(payments, total);
     const info = {
       invoice: data.invoice_name || 'N/A',
       change: isRefund ? Math.abs(total) : changeVal,
@@ -2138,7 +2416,8 @@ async function completeSaleFromOverlay() {
       vat_inclusive: settings.vat_inclusive,
       header: settings.receipt_header,
       footer: settings.receipt_footer,
-      cash_given: cashGiven
+      cash_given: cashGiven,
+      fx_summary: fxSummary
     };
     appliedPayments = [];
     vouchers = [];
@@ -2146,6 +2425,7 @@ async function completeSaleFromOverlay() {
     updateCashSection();
     lastReceiptInfo = info;
     showReceiptOverlay(info);
+    clearSaleFxState();
       if (settings.auto_print) {
         scheduleAutoReceiptPrint(info);
       }
@@ -2209,7 +2489,7 @@ async function holdCurrentTransaction(){
     if (!customer) customer = getDefaultCustomerValue();
     const payload = {
       customer,
-      cart: cart.map(i=>({ item_code:i.item_code, item_name:i.item_name, qty:i.qty, rate:i.rate, refund: !!i.refund })),
+      cart: cart.map(i=>({ item_code:i.item_code, item_name:i.item_name, qty:i.qty, rate:i.rate, refund: !!i.refund, vat_rate: effectiveVatRate(i.vat_rate) })),
       vouchers: Array.isArray(vouchers)?vouchers:[],
       cashier: { code: currentCashier.code, name: currentCashier.name },
       till_number: settings.till_number || null,
@@ -2475,17 +2755,18 @@ function renderDiscountItems(){
   const rows = Array.isArray(__discountWork)?__discountWork:[];
   rows.forEach((it, idx)=>{
     const id = `disc_${idx}`;
-    const disabled = !!it.refund;
+    const isRefund = !!it.refund;
     const row = document.createElement('label');
-    row.className = 'list-group-item d-flex justify-content-between align-items-center' + (disabled?' text-muted':'');
+    row.className = 'list-group-item d-flex justify-content-between align-items-center';
+    if(isRefund) row.classList.add('refund');
     const base = Number(it.base||it.orig||0);
     const curr = Number(it.curr||0);
     const perAmt = Math.max(0, (base - curr) * it.qty);
     const perPct = base>0 ? ((base - curr)/base*100) : 0;
     row.innerHTML = `
       <div class="form-check">
-        <input class="form-check-input" type="checkbox" id="${id}" data-code="${it.code}" ${disabled?'disabled checked':''}>
-        <span class="ms-2">${it.name}${disabled?' (refund)': ''}</span>
+        <input class="form-check-input" type="checkbox" id="${id}" data-code="${it.code}">
+        <span class="ms-2">${it.name}${isRefund?' (refund)': ''}</span>
       </div>
       <div class="text-end small ${perAmt>0?'text-danger':'text-muted'}">
         <div>${it.qty} ? ${money(curr)}${perAmt>0?` (was ${money(base)})`:''}</div>
@@ -2495,8 +2776,8 @@ function renderDiscountItems(){
   });
   // Summary totals
   if(__discountSummaryEl){
-    const totBase = rows.filter(r=>!r.refund).reduce((s,r)=>s + r.qty * Number(r.base||r.orig||0), 0);
-    const totCurr = rows.filter(r=>!r.refund).reduce((s,r)=>s + r.qty * Number(r.curr||0), 0);
+    const totBase = rows.reduce((s,r)=>s + r.qty * Number(r.base||r.orig||0), 0);
+    const totCurr = rows.reduce((s,r)=>s + r.qty * Number(r.curr||0), 0);
     const discAmt = Math.max(0, totBase - totCurr);
     const discPct = totBase>0 ? (discAmt/totBase*100) : 0;
     __discountSummaryEl.innerHTML = discAmt>0
@@ -2520,7 +2801,6 @@ function applyDiscountsToSelected(){
     .filter(Boolean);
   if(!chosen.length){ alert('Select at least one item'); return; }
   (__discountWork||[]).forEach(it=>{
-    if(it.refund) return;
     if(!chosen.includes(it.code)) return;
     let newRate = Number(it.curr||0);
     if(mode==='amount') newRate = Math.max(0, newRate - raw);
@@ -2537,7 +2817,6 @@ function commitDiscountsAndClose(){
   // Apply working rates to cart and persist original_rate if not recorded
   const map = new Map(__discountWork.map(r=>[r.code, r]));
   cart.forEach(it=>{
-    if(it.refund) return;
     const w = map.get(it.item_code);
     if(!w) return;
     const newRate = Number(w.curr||it.rate||0);
@@ -2629,7 +2908,7 @@ function renderReturnResult(sale){
     const rate = Number(ln.rate||0);
     const total = qty*rate;
     const row = make('label','list-group-item d-flex justify-content-between align-items-center');
-    row.innerHTML = `<div class=\"form-check\">\n        <input class=\"form-check-input\" type=\"checkbox\" id=\"${id}\" data-code=\"${ln.item_code}\" data-name=\"${ln.item_name}\" data-qty=\"${qty}\" data-rate=\"${rate}\" checked>\n        <span class=\"ms-2\">${ln.item_name}</span>\n      </div>\n      <div class=\"text-end small text-muted\">\n        <div>${qty} ? ${money(rate)}</div>\n        <div class=\"fw-semibold\">${money(total)}</div>\n      </div>`;
+    row.innerHTML = `<div class=\"form-check\">\n        <input class=\"form-check-input\" type=\"checkbox\" id=\"${id}\" data-code=\"${ln.item_code}\" data-name=\"${ln.item_name}\" data-qty=\"${qty}\" data-rate=\"${rate}\" data-vat=\"${vatRate ?? ''}\" checked>\n        <span class=\"ms-2\">${ln.item_name}</span>\n      </div>\n      <div class=\"text-end small text-muted\">\n        <div>${qty} × ${money(rate)}</div>\n        <div class=\"fw-semibold\">${money(total)}</div>\n      </div>`;
     list.appendChild(row);
   });
   wrap.appendChild(list);
@@ -2650,7 +2929,20 @@ function loadReturnAsRefund(){
     const qty = Number(chk.getAttribute('data-qty')||0);
     const rate = Number(chk.getAttribute('data-rate')||0);
     if(!code || qty<=0) return;
-    cart.push({ item_code: code, item_name: name || code, qty: qty, rate: rate, amount: qty*rate, image: null, variant: {}, refund: true });
+    const vatAttr = chk.getAttribute('data-vat');
+    cart.push({
+      item_code: code,
+      item_name: name || code,
+      qty: qty,
+      rate: rate,
+      original_rate: rate,
+      amount: qty*rate,
+      image: null,
+      variant: {},
+      item_group: null,
+      vat_rate: effectiveVatRate(vatAttr === null || vatAttr === '' ? null : Number(vatAttr)),
+      refund: true
+    });
   });
   updateCartDisplay();
   if(overlay) overlay.style.display='none';
@@ -2733,13 +3025,48 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
-  const printBtn=document.getElementById('printReceiptBtn'); const doneBtn=document.getElementById('receiptDoneBtn'); const closeBtn=document.getElementById('receiptCloseBtn');
+  const printBtn=document.getElementById('printReceiptBtn'); const doneBtn=document.getElementById('receiptDoneBtn'); const closeBtn=document.getElementById('receiptCloseBtn'); const reprintBtn=document.getElementById('receiptReprintBtn');
   const returnBtn=document.getElementById('receiptReturnBtn');
+  const giftEl = document.getElementById('giftReceiptCheckbox');
+  const fxWrap = document.getElementById('receiptFxSummary');
+  if (fxWrap) {
+    const summary = info && info.fx_summary;
+    if (summary && summary.eur_amount) {
+      fxWrap.style.display = 'block';
+      const eurEl = document.getElementById('receiptFxEur');
+      const gbpEl = document.getElementById('receiptFxGbp');
+      const rateEl = document.getElementById('receiptFxRate');
+      const noteEl = document.getElementById('receiptFxNote');
+      if (eurEl) eurEl.textContent = `€${Number(summary.eur_amount || 0).toFixed(2)} accepted`;
+      if (gbpEl) gbpEl.textContent = `≈ £${Number(summary.gbp_equivalent || 0).toFixed(2)} recorded`;
+      if (rateEl) {
+        const parts = [];
+        if (summary.effective_rate) parts.push(`1 GBP = ${Number(summary.effective_rate).toFixed(4)} EUR`);
+        if (summary.store_rate && (!summary.effective_rate || Math.abs(Number(summary.store_rate) - Number(summary.effective_rate || 0)) > 0.0001)) {
+          parts.push(`Store ref: ${Number(summary.store_rate).toFixed(4)}`);
+        }
+        rateEl.textContent = parts.length ? `Rate used: ${parts.join(' | ')}` : 'Rate used: --';
+      }
+      if (noteEl) {
+        const diff = Number(summary.difference_gbp || 0);
+        if (Math.abs(diff) < 0.01) {
+          noteEl.textContent = 'Exact EUR amount received.';
+        } else if (diff > 0) {
+          noteEl.textContent = `Give £${diff.toFixed(2)} change in GBP.`;
+        } else {
+          noteEl.textContent = `Still due £${Math.abs(diff).toFixed(2)} in GBP.`;
+        }
+      }
+    } else {
+      fxWrap.style.display = 'none';
+    }
+  }
+  const triggerPrint = ()=>{ handleReceiptPrintRequest(info, giftEl ? !!giftEl.checked : false); };
   if(printBtn) printBtn.onclick = ()=>{
     const giftEl = document.getElementById('giftReceiptCheckbox');
-    const wantsGift = giftEl ? !!giftEl.checked : false;
-    handleReceiptPrintRequest(info, wantsGift);
+    handleReceiptPrintRequest(info, giftEl ? !!giftEl.checked : false);
   };
+  if(reprintBtn) reprintBtn.onclick = triggerPrint;
   if(returnBtn) returnBtn.onclick = ()=>{
     try{
       o.style.display='none';
@@ -3090,6 +3417,66 @@ async function openInvoiceDetail(invId){
     }
   }catch(e){ err('load invoice detail failed', e); }
 }
+function buildReceiptInfoFromInvoice(inv){
+  if(!inv) return null;
+  const vatInclusive = inv.vat_inclusive!=null ? !!inv.vat_inclusive : !!settings.vat_inclusive;
+  const items = (inv.items||[]).map(it=>{
+    const qtyRaw = Number(it.qty||0);
+    const qty = Math.abs(qtyRaw);
+    const rate = Number(it.rate||0);
+    const refund = qtyRaw < 0;
+    const name = it.display_name || it.item_name || it.item_code || 'Item';
+    return {
+      code: it.item_code || it.code,
+      item_name: name,
+      name,
+      qty: qty,
+      rate,
+      refund,
+      amount: qty * rate * (refund ? -1 : 1),
+      vat_rate: effectiveVatRate(it.vat_rate)
+    };
+  });
+  const totalProvided = Number(inv.total!=null ? inv.total : items.reduce((s,r)=> s + r.amount, 0));
+  const isRefund = totalProvided < 0;
+  const payments = (inv.payments||[]).map(p=>{
+    const amount = Math.abs(Number(p.amount||0));
+    return {
+      mode: p.method || p.mode_of_payment || 'Payment',
+      mode_of_payment: p.method || p.mode_of_payment || 'Payment',
+      amount,
+      reference: p.ref || p.reference || ''
+    };
+  });
+  const paid = payments.reduce((s,p)=> s + Number(p.amount||0), 0);
+  const tender = payments.length>1
+    ? (isRefund ? 'refund_split' : 'split')
+    : (payments[0]?.mode || payments[0]?.mode_of_payment || (isRefund ? 'refund' : ''));
+  const changeRaw = inv.change!=null ? Number(inv.change) : (isRefund ? Math.abs(totalProvided) : Math.max(0, paid - totalProvided));
+  return {
+    invoice: inv.id || inv.erp_docname || '',
+    change: isRefund ? Math.abs(changeRaw||0) : changeRaw,
+    total: totalProvided,
+    items,
+    payments,
+    paid,
+    tender,
+    customer: inv.customer || '',
+    branch: settings.branch_name || '',
+    till: settings.till_number || '',
+    till_number: settings.till_number || '',
+    cashier: inv.cashier ? { name: inv.cashier } : null,
+    created: inv.created_at || inv.created || new Date().toISOString(),
+    vouchers: inv.vouchers || [],
+    isRefund,
+    vat_rate: inv.vat_rate!=null ? inv.vat_rate : settings.vat_rate,
+    vat_inclusive: vatInclusive,
+    header: settings.receipt_header,
+      footer: settings.receipt_footer,
+      vat_inclusive: vatInclusive
+  };
+}
+
 function renderInvoiceDetail(inv){
   try{
     const title = document.getElementById('invDetailTitle');
@@ -3149,6 +3536,17 @@ function renderInvoiceDetail(inv){
           openReturnOverlay();
           const scan = document.getElementById('returnScanInput');
           if(scan){ scan.value = inv.id||''; findReturnSale(); }
+        };
+      }
+      const printBtn = document.getElementById('invDetailPrintBtn');
+      if(printBtn){
+        printBtn.onclick = ()=>{
+          const info = buildReceiptInfoFromInvoice(inv);
+          if(!info){
+            alert('Unable to prepare receipt for printing.');
+            return;
+          }
+          handleReceiptPrintRequest(info, false);
         };
       }
     }catch(_){ }
@@ -3252,6 +3650,7 @@ document.addEventListener('keydown', (e)=>{
     }
   }catch(_){ /* ignore */ }
 });
+
 
 
 
