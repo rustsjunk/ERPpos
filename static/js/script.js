@@ -955,6 +955,23 @@ const receiptAgentClient = (() => {
   };
 })();
 
+const FX_SLIP_WAIT_AFTER_RECEIPT_MS = 150;
+const FX_SLIP_WAIT_AFTER_FIRST_CUT_MS = 80;
+const FX_SLIP_WAIT_AFTER_SLIP_MS = 140;
+
+function waitFor(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function cutReceiptIfReady() {
+  if(!receiptAgentClient || typeof receiptAgentClient.cut !== 'function') return;
+  try {
+    await receiptAgentClient.cut();
+  } catch(err) {
+    warn('Receipt agent cut failed', err);
+  }
+}
+
 async function sendTextToReceiptAgent(text, opts = {}) {
   if(!text || !receiptAgentClient || !receiptAgentClient.isReady()) return false;
   const sendOpts = Object.assign({ line_feeds: 4 }, opts);
@@ -980,13 +997,12 @@ async function tryReceiptAgentPrint(info, opts = {}){
     const ok = await receiptAgentClient.print(info, receiptOpts);
     if(!ok) return false;
     if(needsFxSlip){
-      if(receiptAgentClient && typeof receiptAgentClient.cut === 'function'){
-        await receiptAgentClient.cut();
-      }
+      await waitFor(FX_SLIP_WAIT_AFTER_RECEIPT_MS);
+      await cutReceiptIfReady();
+      await waitFor(FX_SLIP_WAIT_AFTER_FIRST_CUT_MS);
       await receiptAgentClient.printFxSlip(info.fx_summary, { cut: false });
-      if(receiptAgentClient && typeof receiptAgentClient.cut === 'function'){
-        await receiptAgentClient.cut();
-      }
+      await waitFor(FX_SLIP_WAIT_AFTER_SLIP_MS);
+      await cutReceiptIfReady();
     }
     return true;
   }catch(err){

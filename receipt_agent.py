@@ -95,6 +95,14 @@ def print_receipt():
         hex_commands = list(hex_commands)
     extra_line_feeds = int(payload.get("line_feeds", LINE_FEEDS))
     cut = payload.get("cut", CUT_AFTER_PRINT)
+    cleaned_preview = text.strip().replace("\n", "\\n")
+    logging.info(
+        "Preparing receipt: text len=%d snippet=%s",
+        len(text),
+        cleaned_preview[:120]
+    )
+    if hex_commands:
+        logging.info("Printing extra hex commands: %s", hex_commands)
 
     @_with_serial
     def _send(ser: Serial) -> None:
