@@ -663,15 +663,6 @@ const receiptBuilder = (() => {
     return (n<0?'-':'') + 'EUR ' + Math.abs(n).toFixed(2);
   }
 
-  const CODE39_SANITIZER = /[^A-Z0-9\-\. \$\/\+\%]/gi;
-  function buildBarcode(value){
-    if(!value) return '';
-    const safe = String(value || '').toUpperCase().replace(/\s+/g, '').replace(CODE39_SANITIZER, '');
-    if(!safe) return '';
-    const truncated = safe.slice(0, 42);
-    return GS + 'k' + '\x04' + truncated + '\x00' + '\n' + truncated + '\n';
-  }
-
   function buildEuroSlip(summary){
     if(!summary) throw new Error('Missing FX summary payload');
     const lines = [];
@@ -720,12 +711,23 @@ const receiptBuilder = (() => {
     return RECEIPT_DEFAULT_FOOTER_LINES.slice();
   }
 
+  const CODE39_SANITIZER = /[^A-Z0-9\-\. \$\/\+\%]/gi;
   function buildBarcode(value){
     if(!value) return '';
-    const data = String(value || '').trim().replace(/\s+/g, '');
-    if(!data) return '';
-    const safe = data.slice(0, 255);
-    return GS + 'k' + '\x49' + String.fromCharCode(safe.length) + safe + '\n' + safe;
+    const normalized = String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
+    const safe = normalized.replace(CODE39_SANITIZER, '');
+    if(!safe) return '';
+    const truncated = safe.slice(0, 42);
+
+    let out = '\n';
+    out += GS + 'h' + '\x50';   // set barcode height (~80 dots)
+    out += GS + 'w' + '\x02';   // set narrow bar width
+    out += GS + 'H' + '\x02';   // human-readable text below
+    out += GS + 'k' + '\x04' + truncated + '\x00'; // Code 39 (Function A)
+    out += '\n';
+    out += `Invoice: ${truncated}`;
+    out += '\n';
+    return out;
   }
 
   function buildReceipt(info, opts){
@@ -841,9 +843,13 @@ const receiptBuilder = (() => {
     }
     buffer += '\n';
     if(info.invoice){
-      buffer += '\n';
-      write(`Invoice: ${info.invoice}`);
-      buffer += buildBarcode(info.invoice);
+      const barcodeChunk = buildBarcode(info.invoice);
+      if(barcodeChunk){
+        buffer += barcodeChunk;
+      } else {
+        buffer += '\n';
+        write(`Invoice: ${info.invoice}`);
+      }
     }
     return buffer;
   }
