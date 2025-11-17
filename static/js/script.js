@@ -658,12 +658,13 @@ const receiptBuilder = (() => {
     return (n<0?'-':'') + 'GBP ' + Math.abs(n).toFixed(2);
   }
 
+  const CODE39_SANITIZER = /[^A-Z0-9\-\. \$\/\+\%]/gi;
   function buildBarcode(value){
     if(!value) return '';
-    const safe = String(value || '').trim().replace(/\s+/g, '');
+    const safe = String(value || '').toUpperCase().replace(/\s+/g, '').replace(CODE39_SANITIZER, '');
     if(!safe) return '';
     const truncated = safe.slice(0, 42);
-    return GS + 'k' + '\x00' + truncated + '\x00' + '\n';
+    return GS + 'k' + '\x04' + truncated + '\x00' + '\n' + truncated + '\n';
   }
 
   function buildEuroSlip(summary){
@@ -866,7 +867,7 @@ const receiptAgentClient = (() => {
       return await send({ text, line_feeds: opts.line_feeds ?? 4, ...opts });
     },
     async cut() {
-      return await send({ text: '', hex: ['1d5600'], line_feeds: 0, cut: false });
+      return await send({ text: '', line_feeds: 0, cut: true });
     }
   };
 })();
