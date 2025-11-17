@@ -638,9 +638,8 @@ const receiptBuilder = (() => {
   function centerText(text){
     const t = String(text||'').trim();
     if(!t) return '';
-    if(t.length >= RECEIPT_LINE_WIDTH) return t;
-    const pad = Math.max(0, Math.floor((RECEIPT_LINE_WIDTH - t.length)/2));
-    return ' '.repeat(pad) + t;
+    const trimmed = t.length > RECEIPT_LINE_WIDTH ? t.slice(0, RECEIPT_LINE_WIDTH) : t;
+    return ESC + 'a' + '\x01' + trimmed + ESC + 'a' + '\x00';
   }
 
   function padLine(left, right){
@@ -851,13 +850,23 @@ const receiptAgentClient = (() => {
   return {
     isReady: () => !!endpoint,
     async print(info, opts = {}) {
-      return await send({ text: receiptBuilder.buildReceiptPayload(info, opts), line_feeds: opts.line_feeds ?? 6 });
+      const payload = {
+        text: receiptBuilder.buildReceiptPayload(info, opts),
+        line_feeds: opts.line_feeds ?? 6
+      };
+      if(Object.prototype.hasOwnProperty.call(opts, 'cut')){
+        payload.cut = opts.cut;
+      }
+      return await send(payload);
     },
     async printFxSlip(summary) {
       return await send({ text: receiptBuilder.buildFxSlipPayload(summary), line_feeds: 6 });
     },
     async printText(text, opts = {}) {
       return await send({ text, line_feeds: opts.line_feeds ?? 4, ...opts });
+    }
+    async cut() {
+      return await send({ text: '', hex: ['1d5600'], line_feeds: 0, cut: false });
     }
   };
 })();
@@ -879,6 +888,9 @@ async function tryReceiptAgentPrint(info, opts = {}){
     const ok = await receiptAgentClient.print(info, opts);
     if(!ok) return false;
     if(!opts.gift && info.fx_summary){
+      if(typeof receiptAgentClient.cut === 'function'){
+        await receiptAgentClient.cut();
+      }
       await receiptAgentClient.printFxSlip(info.fx_summary);
     }
     return true;
