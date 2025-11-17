@@ -855,14 +855,25 @@ const receiptBuilder = (() => {
   }
 
   function buildFxSlip(summary){
-    return buildEuroSlip(summary);
+    const slip = buildEuroSlip(summary);
+    const header = headerLinesFrom(summary);
+    const footer = footerLinesFrom(summary);
+    return assembleLineSections(slip, header, footer);
   }
 
   return {
     buildReceiptPayload: buildReceipt,
-    buildFxSlipPayload: buildFxSlip
+    buildFxSlipPayload: buildFxSlip,
+    headerLinesFrom,
+    footerLinesFrom
   };
 })();
+
+function decorateWithReceiptLayout(body, info = {}) {
+  const header = receiptBuilder.headerLinesFrom(info);
+  const footer = receiptBuilder.footerLinesFrom(info);
+  return assembleLineSections(body, header, footer);
+}
 
 const receiptAgentClient = (() => {
   const rawUrl = (typeof window !== 'undefined' ? window.POS_PRINT_AGENT_URL : '') || '';
@@ -932,6 +943,9 @@ async function tryReceiptAgentPrint(info, opts = {}){
         await receiptAgentClient.cut();
       }
       await receiptAgentClient.printFxSlip(info.fx_summary);
+      if(receiptAgentClient && typeof receiptAgentClient.cut === 'function'){
+        await receiptAgentClient.cut();
+      }
     }
     return true;
   }catch(err){
@@ -2633,17 +2647,27 @@ function backspaceOpeningDigit(){ openingDigits = (openingDigits||''); if(openin
 async function printFloatReceipt(info) {
   try{
     if(!info) throw new Error('Missing float info');
-    const lines = [
-      `${info.type} Float Receipt`,
-      `Date: ${info.date}`,
-      settings.till_number ? `Till: ${settings.till_number}` : '',
-      currentCashier ? `Cashier: ${currentCashier.name || ''}` : '',
-      '',
-      `Amount: ${money(info.amount)}`,
-      '',
-      `Printed: ${new Date().toLocaleString()}`
-    ].filter(Boolean).join('\n');
-    const ok = await sendTextToReceiptAgent(lines, { line_feeds: 5 });
+    const ESC = '\x1B';
+    const big = ESC + '!' + '\x11';
+    const normal = ESC + '!' + '\x00';
+    const lines = [];
+    lines.push(`${big}${info.type} Float Receipt${normal}`);
+    lines.push(`Date: ${info.date || todayStr()}`);
+    if(settings.till_number){
+      lines.push(`Till: ${settings.till_number}`);
+    }
+    if(currentCashier){
+      const cashierName = String(currentCashier.name || currentCashier.code || '').trim();
+      if(cashierName){
+        lines.push(`Cashier: ${cashierName}`);
+      }
+    }
+    lines.push('');
+    lines.push(`${big}Amount: ${money(info.amount)}${normal}`);
+    lines.push('');
+    lines.push(`Printed: ${new Date().toLocaleString()}`);
+    const payload = decorateWithReceiptLayout(lines.join('\n'), info);
+    const ok = await sendTextToReceiptAgent(payload, { line_feeds: 5 });
     if(!ok) throw new Error('Receipt agent not ready');
   }catch(err){
     err('float print failed', err);
@@ -2758,7 +2782,8 @@ async function printReconciliation(){
       '',
       `Card to check: ${money(cardSales)}`
     ];
-    const ok = await sendTextToReceiptAgent(lines.join('\n'), { line_feeds: 5 });
+    const decorated = decorateWithReceiptLayout(lines.join('\n'));
+    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5 });
     if(!ok) throw new Error('Receipt agent not ready');
     const closingOverlayEl = document.getElementById('closingOverlay'); if(closingOverlayEl) closingOverlayEl.style.display='none';
   }catch(e){
@@ -3256,7 +3281,8 @@ async function printZRead(){
       'By Item Group',
       ...(groupLines.length ? groupLines : ['  No data'])
     ];
-    const ok = await sendTextToReceiptAgent(lines.join('\n'), { line_feeds: 5 });
+    const decorated = decorateWithReceiptLayout(lines.join('\n'));
+    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5 });
     if(!ok) throw new Error('Receipt agent not ready');
 
     try{
@@ -3335,7 +3361,8 @@ async function printXRead(){
       'By Item Group',
       ...(groupLines.length ? groupLines : ['  No data'])
     ];
-    const ok = await sendTextToReceiptAgent(lines.join('\n'), { line_feeds: 5 });
+    const decorated = decorateWithReceiptLayout(lines.join('\n'));
+    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5 });
     if(!ok) throw new Error('Receipt agent not ready');
   }catch(e){
     err('x-read print failed', e);
@@ -3693,6 +3720,25 @@ document.addEventListener('keydown', (e)=>{
     }
   }catch(_){ /* ignore */ }
 });
+
+function assembleLineSections(body, headerLines = [], footerLines = []) {
+  const segments = [];
+  const content = typeof body === 'string'
+    ? body
+    : (Array.isArray(body) ? body.join('\n') : '');
+  if(headerLines.length){
+    segments.push(headerLines.join('\n'));
+  }
+  if(content){
+    if(segments.length) segments.push('');
+    segments.push(content);
+  }
+  if(footerLines.length){
+    if(segments.length) segments.push('');
+    segments.push(footerLines.join('\n'));
+  }
+  return segments.join('\n');
+}
 
 
 
