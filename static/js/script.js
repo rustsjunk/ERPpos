@@ -864,7 +864,7 @@ const receiptAgentClient = (() => {
     },
     async printText(text, opts = {}) {
       return await send({ text, line_feeds: opts.line_feeds ?? 4, ...opts });
-    }
+    },
     async cut() {
       return await send({ text: '', hex: ['1d5600'], line_feeds: 0, cut: false });
     }
@@ -888,7 +888,7 @@ async function tryReceiptAgentPrint(info, opts = {}){
     const ok = await receiptAgentClient.print(info, opts);
     if(!ok) return false;
     if(!opts.gift && info.fx_summary){
-      if(typeof receiptAgentClient.cut === 'function'){
+      if(receiptAgentClient && typeof receiptAgentClient.cut === 'function'){
         await receiptAgentClient.cut();
       }
       await receiptAgentClient.printFxSlip(info.fx_summary);
