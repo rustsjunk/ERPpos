@@ -55,7 +55,11 @@ def _sequence_to_bytes(sequence: Sequence[str]) -> Iterable[bytes]:
 def _write_text(ser: Serial, text: str) -> None:
     if not text:
         return
-    ser.write(text.encode("ascii", errors="ignore"))
+    data = text.encode("ascii", errors="ignore")
+    # DEBUG: log as hex
+    logging.info("[AGENT] TEXT HEX: %s", data.hex(" "))
+    ser.write(data)
+
 
 
 def _write_custom_hex(ser: Serial, hex_commands: Sequence[str]) -> None:
