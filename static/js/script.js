@@ -658,6 +658,11 @@ const receiptBuilder = (() => {
     return (n<0?'-':'') + 'GBP ' + Math.abs(n).toFixed(2);
   }
 
+  function eurFmt(value){
+    const n = Number(value||0);
+    return (n<0?'-':'') + 'EUR ' + Math.abs(n).toFixed(2);
+  }
+
   const CODE39_SANITIZER = /[^A-Z0-9\-\. \$\/\+\%]/gi;
   function buildBarcode(value){
     if(!value) return '';
@@ -687,6 +692,10 @@ const receiptBuilder = (() => {
       lines.push(`${label}: ${moneyFmt(diff)}`);
     }
     lines.push('');
+    if(summary.invoice){
+      lines.push(`Invoice: ${summary.invoice}`);
+      lines.push('');
+    }
     lines.push('Please retain this slip for future reference.');
     lines.push('');
     lines.push(`Printed: ${new Date().toLocaleString()}`);
@@ -799,6 +808,30 @@ const receiptBuilder = (() => {
       }
       if(info.tender){
         write(padLine('Tender', String(info.tender).toUpperCase()));
+      }
+
+      if(info.fx_summary){
+        const fx = info.fx_summary;
+        write('');
+        const header = centerText('EUR PAYMENT');
+        write(header);
+        if(fx.eur_amount != null){
+          write(padLine('EUR accepted', eurFmt(fx.eur_amount)));
+        }
+        if(fx.gbp_equivalent != null){
+          write(padLine('GBP recorded', moneyFmt(fx.gbp_equivalent)));
+        }
+        if(fx.effective_rate){
+          write(`Rate used: 1 GBP = ${Number(fx.effective_rate).toFixed(4)} EUR`);
+        }
+        if(fx.store_rate && (!fx.effective_rate || Math.abs(Number(fx.store_rate) - Number(fx.effective_rate || 0)) > 0.0001)){
+          write(`Store ref: 1 GBP = ${Number(fx.store_rate).toFixed(4)} EUR`);
+        }
+        const fxDiff = Number(fx.difference_gbp || 0);
+        if(Math.abs(fxDiff) >= 0.01){
+          const diffLabel = fxDiff > 0 ? 'Change due' : 'Still due';
+          write(padLine(diffLabel, moneyFmt(fxDiff)));
+        }
       }
     }
     const footerLines = footerLinesFrom(info);
@@ -2418,6 +2451,9 @@ async function completeSaleFromOverlay() {
       reference: p.reference_no || ''
     }));
     const fxSummary = summarizeFxFromPayments(payments, total);
+    if(fxSummary){
+      fxSummary.invoice = data.invoice_name || fxSummary.invoice || '';
+    }
     const info = {
       invoice: data.invoice_name || 'N/A',
       change: isRefund ? Math.abs(total) : changeVal,

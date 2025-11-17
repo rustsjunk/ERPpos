@@ -310,6 +310,11 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
     raw_change = _as_float(sale.get("change"))
     net_collected = pay_total - raw_change if total >= 0 else pay_total
     pay_status = "paid" if abs(net_collected - total) < 0.005 else ("partially_paid" if abs(net_collected) > 0 else "unpaid")
+    till_number = sale.get("till") or sale.get("till_number")
+    if isinstance(till_number, str):
+        till_number = till_number.strip()
+    if not till_number:
+        till_number = None
 
     payload = {
         "sale_id": sale_id,
@@ -326,6 +331,8 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
         "tender": sale.get("tender"),
         "cash_given": sale.get("cash_given"),
         "change": sale.get("change"),
+        "till": till_number,
+        "till_number": till_number,
     }
 
     try:

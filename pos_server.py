@@ -764,6 +764,20 @@ def _generate_invoice_name(prefix: str) -> str:
     return f"{prefix}-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}"
 
 
+def _extract_till_number(data: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not isinstance(data, dict):
+        return None
+    for key in ('till_number', 'till', 'till_id'):
+        value = data.get(key)
+        if value is None or value == '':
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+        if value:
+            return value
+    return None
+
+
 def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
     """Persist the JSON receipt for audit/replay."""
     try:
@@ -778,6 +792,7 @@ def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
                 'vat_rate': it.get('vat_rate')
             }
             items_payload.append(entry)
+        till_number = _extract_till_number(data)
         record = {
             'invoice_name': invoice_name,
             'sale_id': invoice_name,
@@ -794,7 +809,9 @@ def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
             'cashier': data.get('cashier'),
             'currency_used': data.get('currency_used', 'GBP'),
             'currency_rate_used': data.get('currency_rate_used', 1.0),
-            'fx_metadata': data.get('fx_metadata')
+            'fx_metadata': data.get('fx_metadata'),
+            'till_number': till_number,
+            'till': till_number
         }
         with open(os.path.join('invoices', f"{invoice_name}.json"), 'w', encoding='utf-8') as f:
             _json.dump(record, f, ensure_ascii=False, indent=2)
@@ -861,6 +878,7 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
     change_due = _safe_float(data.get('change'))
 
     cashier = (data.get('cashier') or {}).get('code') or (data.get('cashier') or {}).get('name')
+    till_number = _extract_till_number(data)
 
     return {
         'sale_id': sale_id,
@@ -875,6 +893,8 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
         'tender': tender,
         'cash_given': cash_given,
         'change': change_due,
+        'till': till_number,
+        'till_number': till_number,
     }
 
 
