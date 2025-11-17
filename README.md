@@ -82,6 +82,44 @@ With `USE_MOCK=0`, ERPpos now auto-initializes `POS_DB_PATH` using `schema.sql` 
 - To refresh catalog stock and price-list rates from ERPNext, run `python pos_service.py --sync --warehouse Shop --price-list Retail` (or substitute `Shop`/`Retail` with `POS_WAREHOUSE`/`POS_PRICE_LIST`). That sync writes the selected warehouse Bin levels into `stock` and applies the price list to `items.price`.
 - The app is intentionally simple to be run behind a process manager (systemd, NSSM on Windows) or inside a container.
 
+## Local receipt printing helper
+
+ERPpos now sends ESC/POS directly to `receipt_agent.py`, so run the helper on the till to talk to the local COM port without any QZ Tray dependency. Set `RECEIPT_AGENT_AUTO_START=1` in `.env` if you want `python main.py` to launch the helper on start (it only spawns once per process, so it still works with the Flask reloader).
+
+1. On the till install the dependencies (the helper only needs Flask + pyserial; `python-escpos` is optional but not used here):
+
+```powershell
+pip install flask pyserial python-escpos
+```
+
+2. Start the agent (customise `RECEIPT_SERIAL_PORT`/`RECEIPT_SERIAL_BAUD` as needed):
+
+```powershell
+$env:RECEIPT_SERIAL_PORT = "COM3"
+$env:RECEIPT_SERIAL_BAUD = "9600"
+python receipt_agent.py
+```
+
+3. Send receipts to the helper:
+
+```javascript
+fetch("http://127.0.0.1:5001/print", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    text: "Russells of Omagh\nThanks for shopping!\nGBP 59.99\n",
+    line_feeds: 3,
+    cut: true
+  })
+});
+```
+
+The endpoint also accepts a `hex` array (hex strings) for ESC/POS sequences; the helper appends `line_feeds` (default 2) and a full cut (`GS V 0`) unless `cut` is disabled.
+
+The POS UI now injects the helper URL via `RECEIPT_AGENT_URL` (tune `RECEIPT_AGENT_HOST`, `RECEIPT_AGENT_PORT`, `RECEIPT_AGENT_PATH`, `RECEIPT_AGENT_USE_HTTPS` in `.env` if the helper runs on another host). Every print flow (receipt, floats, Z/X reads, reconciliation) sends text to the helper, the invoice footer prints a CODE39 barcode (so it’s scannable), and the helper pads extra feeds so the cutter doesn't drive too early; the euro slip prints after the receipt with a longer summary and centered headers.
+
+The Admin overlay now exposes a 'Receipt serial port' dropdown that lists every connected COM port (via `/api/serial-ports`). Pick the port your printer is attached to, hit refresh when ports change, and the choice is persisted locally so the helper uses the correct device.
+
 ## Where to go next
 
 - `project_plan.md` — high-level roadmap and acceptance criteria.

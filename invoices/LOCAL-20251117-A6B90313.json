@@ -1,0 +1,50 @@
+{
+  "invoice_name": "LOCAL-20251117-A6B90313",
+  "sale_id": "LOCAL-20251117-A6B90313",
+  "created_at": "2025-11-17T10:14:05.322717",
+  "mode": "local",
+  "customer": "Walk-in Customer",
+  "items": [
+    {
+      "item_code": "Adesso-Raine-A8183-Jungle Gleam-36 EU",
+      "item_name": null,
+      "qty": 1,
+      "rate": 110,
+      "vat_rate": 20
+    }
+  ],
+  "payments": [
+    {
+      "mode_of_payment": "Cash",
+      "amount": 110,
+      "amount_gbp": 110,
+      "amount_eur": 125,
+      "currency": "EUR",
+      "eur_rate": 1.1364,
+      "currency_rate": 1.1364
+    }
+  ],
+  "tender": "Cash",
+  "cash_given": 110,
+  "change": 0,
+  "total": 110,
+  "vouchers": [],
+  "cashier": {
+    "code": "19",
+    "name": "Josh Russell"
+  },
+  "currency_used": "EUR",
+  "currency_rate_used": 1.1364,
+  "fx_metadata": {
+    "store_rate": 1.1304544426859597,
+    "effective_rate": 1.1364,
+    "eur_target": 125,
+    "gbp_total": 110,
+    "eur_exact": 124.35,
+    "eur_received": 125,
+    "gbp_equivalent": 110,
+    "eur_difference": 0,
+    "gbp_difference": 0,
+    "selection_mode": "up"
+  }
+}

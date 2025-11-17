@@ -32,6 +32,10 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
         _ensure_item_extras(conn)
     except Exception:
         pass
+    try:
+        _ensure_customer_table(conn)
+    except Exception:
+        pass
     return conn
 
 def init_db(conn: sqlite3.Connection, schema_path: str):
@@ -57,6 +61,20 @@ def _ensure_item_extras(conn: sqlite3.Connection):
         conn.execute(sql)
     if alters:
         conn.commit()
+
+
+def _ensure_customer_table(conn: sqlite3.Connection):
+    """Make sure the optional customers cache table exists."""
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS customers (
+      name TEXT PRIMARY KEY,
+      customer_name TEXT,
+      email TEXT,
+      phone TEXT,
+      disabled INTEGER NOT NULL DEFAULT 0,
+      modified_utc TEXT
+    )
+    """)
 
 # ---------- UPSERT HELPERS ----------
 def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]):
@@ -91,6 +109,54 @@ def _serialize_item_attributes(attributes: Any) -> Optional[str]:
         attr = attributes.strip()
         return attr or None
     return str(attributes)
+
+
+def _normalize_customer_disabled(value: Any) -> int:
+    if value in (1, "1", True, "true", "True", "yes", "Yes"):
+        return 1
+    return 0
+
+
+def upsert_customers(conn: sqlite3.Connection, customers: List[Dict[str, Any]]) -> int:
+    """Cache or refresh ERPNext Customer entries in the local DB."""
+    if not customers:
+        return 0
+    now = iso_now()
+    stored = 0
+    for row in customers:
+        name = (row.get("name") or row.get("customer_id") or "").strip()
+        if not name:
+            continue
+        customer_name = (row.get("customer_name") or row.get("customer") or name).strip()
+        email = (row.get("email_id") or row.get("email") or "").strip()
+        phone = (row.get("mobile_no") or row.get("phone") or row.get("mobile") or "").strip()
+        disabled = _normalize_customer_disabled(row.get("disabled"))
+        modified = row.get("modified") or row.get("modified_utc") or now
+        conn.execute("""
+            INSERT INTO customers (name, customer_name, email, phone, disabled, modified_utc)
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET
+                customer_name=COALESCE(NULLIF(excluded.customer_name,''), customers.customer_name),
+                email=COALESCE(NULLIF(excluded.email,''), customers.email),
+                phone=COALESCE(NULLIF(excluded.phone,''), customers.phone),
+                disabled=excluded.disabled,
+                modified_utc=excluded.modified_utc
+        """, (name, customer_name or name, email or None, phone or None, disabled, modified))
+        stored += 1
+    if stored:
+        conn.commit()
+    return stored
+
+
+def fetch_customers(conn: sqlite3.Connection, include_disabled: bool = False) -> List[Dict[str, str]]:
+    """Return cached customers for dropdowns."""
+    clause = "" if include_disabled else "WHERE disabled=0"
+    rows = conn.execute(f"SELECT name, customer_name FROM customers {clause} ORDER BY customer_name COLLATE NOCASE").fetchall()
+    result: List[Dict[str, str]] = []
+    for row in rows:
+        display = row["customer_name"] or row["name"]
+        result.append({"name": row["name"], "customer_name": display})
+    return result
 
 
 def ensure_item_for_sale_line(conn: sqlite3.Connection, line: Dict[str, Any]):

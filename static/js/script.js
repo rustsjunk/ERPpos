@@ -496,14 +496,6 @@ const RECEIPT_DEFAULT_FOOTER_LINES = [
 const RECEIPT_DEFAULT_HEADER = RECEIPT_DEFAULT_HEADER_LINES.join('\n');
 const RECEIPT_DEFAULT_FOOTER = RECEIPT_DEFAULT_FOOTER_LINES.join('\n');
 const RECEIPT_LINE_WIDTH = 42;
-const RECEIPT_SERIAL_PORT = 'COM3';
-const RECEIPT_DRAWER_PULSE = { m: 0x00, on: 50, off: 250 };
-const POS_QZ_CONFIG = (typeof window !== 'undefined' && window.POS_QZ_CONFIG) ? window.POS_QZ_CONFIG : {};
-const QZ_CERTIFICATE_PEM = typeof (POS_QZ_CONFIG && POS_QZ_CONFIG.certificate) === 'string' ? POS_QZ_CONFIG.certificate.trim() : '';
-const QZ_PRIVATE_KEY_PEM = typeof (POS_QZ_CONFIG && POS_QZ_CONFIG.privateKey) === 'string' ? POS_QZ_CONFIG.privateKey.trim() : '';
-const LEGACY_QZ_CERT = (typeof window !== 'undefined' && typeof window.QZ_CERT === 'string') ? window.QZ_CERT.trim() : '';
-const LEGACY_QZ_SIGN = (typeof window !== 'undefined' && typeof window.QZ_SIGN === 'function') ? window.QZ_SIGN : null;
-let qzPrivateKeyPromise = null;
 let settings = {
   till_number: '',
   branch_name: '',
@@ -526,146 +518,92 @@ let settings = {
   open_drawer_after_print: true
 };
 let lastReceiptInfo = null;
-
-function hasBundledQZCertificate(){
-  return !!(QZ_CERTIFICATE_PEM || LEGACY_QZ_CERT);
-}
-function activeQZCertificate(){
-  return QZ_CERTIFICATE_PEM || LEGACY_QZ_CERT || '';
-}
-function hasBundledQZPrivateKey(){
-  return !!QZ_PRIVATE_KEY_PEM;
-}
-function pemToArrayBuffer(pem){
+const RECEIPT_PORT_STORAGE_KEY = 'receipt_serial_port';
+const RECEIPT_DEFAULT_SERIAL_PORT = (typeof document !== 'undefined' && document.documentElement.dataset.receiptDefaultPort)
+  ? document.documentElement.dataset.receiptDefaultPort
+  : 'COM3';
+let receiptSerialPort = (()=> {
   try{
-    if(!pem) return null;
-    const clean = pem.replace(/-----BEGIN [^-]+-----/g, '').replace(/-----END [^-]+-----/g, '').replace(/\s+/g, '');
-    if(!clean) return null;
-    const binary = atob(clean);
-    const len = binary.length;
-    const buffer = new ArrayBuffer(len);
-    const view = new Uint8Array(buffer);
-    for(let i=0; i<len; i++){
-      view[i] = binary.charCodeAt(i);
+    if(typeof window !== 'undefined' && window.localStorage){
+      return window.localStorage.getItem(RECEIPT_PORT_STORAGE_KEY) || RECEIPT_DEFAULT_SERIAL_PORT;
     }
-    return buffer;
-  }catch(e){
-    err('Failed to convert PEM to ArrayBuffer', e);
-    return null;
+  }catch(_){}
+  return RECEIPT_DEFAULT_SERIAL_PORT;
+})();
+let receiptPortSelectEl = null;
+let receiptPortStatusEl = null;
+
+function setReceiptSerialPort(port, { persist = true } = {}) {
+  if(!port) return;
+  receiptSerialPort = port;
+  if(persist){
+    try{
+      if(typeof window !== 'undefined' && window.localStorage){
+        window.localStorage.setItem(RECEIPT_PORT_STORAGE_KEY, port);
+      }
+    }catch(_){}
   }
-}
-function arrayBufferToBase64(buffer){
-  if(!buffer) return '';
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  for(let i=0; i<bytes.length; i++){
-    binary += String.fromCharCode(bytes[i]);
+  if(receiptPortSelectEl){
+    receiptPortSelectEl.value = port;
   }
-  return btoa(binary);
+  updateReceiptPortStatus(`Using ${port}.`);
 }
-async function importQZPrivateKey(pem){
+
+function updateReceiptPortStatus(message){
+  if(!receiptPortStatusEl) return;
+  receiptPortStatusEl.textContent = message || `Using ${receiptSerialPort}.`;
+}
+
+async function refreshSerialPortOptions(){
+  if(!receiptPortSelectEl) return;
+  receiptPortSelectEl.disabled = true;
+  const busyOption = document.createElement('option');
+  busyOption.value = '';
+  busyOption.textContent = 'Detecting serial ports...';
+  receiptPortSelectEl.innerHTML = '';
+  receiptPortSelectEl.appendChild(busyOption);
+  updateReceiptPortStatus('Detecting serial ports...');
   try{
-    if(!pem || !window.crypto || !window.crypto.subtle) return null;
-    const keyBuffer = pemToArrayBuffer(pem);
-    if(!keyBuffer) return null;
-    return await crypto.subtle.importKey(
-      'pkcs8',
-      keyBuffer,
-      { name: 'RSASSA-PKCS1-v1_5', hash: { name: 'SHA-256' } },
-      false,
-      ['sign']
-    );
-  }catch(e){
-    err('Failed to import QZ private key', e);
-    return null;
-  }
-}
-function ensureQZPrivateKey(){
-  if(!hasBundledQZPrivateKey()) return Promise.resolve(null);
-  if(!qzPrivateKeyPromise){
-    qzPrivateKeyPromise = importQZPrivateKey(QZ_PRIVATE_KEY_PEM).catch(e=>{
-      err('QZ private key import error', e);
-      return null;
-    });
-  }
-  return qzPrivateKeyPromise;
-}
-function hasQZCertificateConfig(){
-  return activeQZCertificate().length > 0;
-}
-
-const receiptPrintAdapter = (()=>{
-  const ESC = '\x1B';
-  const GS = '\x1D';
-  let securityPrepared = false;
-  let connectPromise = null;
-
-  function isAvailable(){
-    return typeof window !== 'undefined' && window.qz && qz.serial;
-  }
-
-  function prepareSecurity(){
-    if(securityPrepared || !isAvailable() || !qz.security) return;
-    const cert = activeQZCertificate();
-    if(cert && typeof qz.security.setCertificatePromise === 'function'){
-      qz.security.setCertificatePromise((resolve)=>resolve(cert));
-    }
-    if(typeof qz.security.setSignaturePromise === 'function'){
-      if(hasBundledQZPrivateKey()){
-        qz.security.setSignaturePromise((toSign)=>{
-          return new Promise((resolve, reject)=>{
-            ensureQZPrivateKey().then(key=>{
-              if(!key) return null;
-              const encoder = new TextEncoder();
-              return crypto.subtle.sign(
-                { name: 'RSASSA-PKCS1-v1_5' },
-                key,
-                encoder.encode(toSign)
-              );
-            }).then(signature=>{
-              if(signature){
-                resolve(arrayBufferToBase64(signature));
-              }else{
-                resolve(null);
-              }
-            }).catch(errSig=>{
-              err('QZ signature error', errSig);
-              reject(errSig);
-            });
-          });
-        });
-      }else if(LEGACY_QZ_SIGN){
-        qz.security.setSignaturePromise((toSign)=>{
-          return new Promise((resolve, reject)=>{
-            try{
-              const maybePromise = LEGACY_QZ_SIGN(toSign);
-              if(maybePromise && typeof maybePromise.then === 'function'){
-                maybePromise.then(resolve).catch(reject);
-              }else{
-                resolve(maybePromise);
-              }
-            }catch(errLegacy){
-              reject(errLegacy);
-            }
-          });
-        });
+    const response = await fetch('/api/serial-ports', { cache: 'no-store' });
+    if(!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    const data = await response.json();
+    const ports = Array.isArray(data?.ports) ? data.ports : [];
+    receiptPortSelectEl.innerHTML = '';
+    if(!ports.length){
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'No serial ports detected';
+      receiptPortSelectEl.appendChild(option);
+      updateReceiptPortStatus(`No serial ports detected; using ${receiptSerialPort}.`);
+    }else{
+      ports.forEach(port=>{
+        const option = document.createElement('option');
+        option.value = port.device || '';
+        option.textContent = port.description ? `${port.device} (${port.description})` : (port.device || 'Unknown port');
+        receiptPortSelectEl.appendChild(option);
+      });
+      if(!ports.some(p=>p.device === receiptSerialPort)){
+        setReceiptSerialPort(ports[0].device, { persist:false });
+      }else{
+        receiptPortSelectEl.value = receiptSerialPort;
+        updateReceiptPortStatus(`Using ${receiptSerialPort}.`);
       }
     }
-    securityPrepared = true;
+  }catch(err){
+    receiptPortSelectEl.innerHTML = '';
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'Error listing ports';
+    receiptPortSelectEl.appendChild(option);
+    updateReceiptPortStatus(`Port list error: ${err.message}`);
+  }finally{
+    receiptPortSelectEl.disabled = false;
   }
+}
 
-  async function ensureConnection(){
-    if(!isAvailable()) throw new Error('QZ Tray not available');
-    prepareSecurity();
-    if(qz.websocket.isActive()) return;
-    if(!connectPromise){
-      connectPromise = qz.websocket.connect().catch(errConnect=>{
-        connectPromise = null;
-        throw errConnect;
-      });
-    }
-    return connectPromise;
-  }
+const receiptBuilder = (() => {
+  const ESC = '\x1B';
+  const GS = '\x1D';
 
   function parseLines(value){
     if(typeof value !== 'string') return [];
@@ -721,6 +659,40 @@ const receiptPrintAdapter = (()=>{
     return (n<0?'-':'') + 'GBP ' + Math.abs(n).toFixed(2);
   }
 
+  function buildBarcode(value){
+    if(!value) return '';
+    const safe = String(value || '').trim().replace(/\s+/g, '');
+    if(!safe) return '';
+    const truncated = safe.slice(0, 42);
+    return GS + 'k' + '\x00' + truncated + '\x00' + '\n';
+  }
+
+  function buildEuroSlip(summary){
+    if(!summary) throw new Error('Missing FX summary payload');
+    const lines = [];
+    lines.push(centerText('EUR WRAP SLIP'));
+    lines.push(centerText('Russells of Omagh'));
+    lines.push('');
+    lines.push(`EUR accepted: ${moneyFmt(summary.eur_amount || 0).replace('GBP', 'EUR')}`);
+    lines.push(`GBP equivalent: ${moneyFmt(summary.gbp_equivalent || 0)}`);
+    if(summary.effective_rate){
+      lines.push(`Rate used: 1 GBP = ${Number(summary.effective_rate).toFixed(4)} EUR`);
+    }
+    if(summary.store_rate){
+      lines.push(`Store ref: 1 GBP = ${Number(summary.store_rate).toFixed(4)} EUR`);
+    }
+    const diff = Number(summary.difference_gbp || 0);
+    if(Math.abs(diff) >= 0.01){
+      const label = diff > 0 ? 'Change due' : 'Still due';
+      lines.push(`${label}: ${moneyFmt(diff)}`);
+    }
+    lines.push('');
+    lines.push('Please retain this slip for future reference.');
+    lines.push('');
+    lines.push(`Printed: ${new Date().toLocaleString()}`);
+    return lines.join('\n');
+  }
+
   function headerLinesFrom(info){
     const headerSrc = typeof info?.header === 'string'
       ? info.header
@@ -739,10 +711,17 @@ const receiptPrintAdapter = (()=>{
     return RECEIPT_DEFAULT_FOOTER_LINES.slice();
   }
 
+  function buildBarcode(value){
+    if(!value) return '';
+    const data = String(value || '').trim().replace(/\s+/g, '');
+    if(!data) return '';
+    const safe = data.slice(0, 255);
+    return GS + 'k' + '\x49' + String.fromCharCode(safe.length) + safe + '\n' + safe;
+  }
+
   function buildReceipt(info, opts){
     if(!info) throw new Error('Missing receipt payload');
     const gift = !!opts.gift;
-    const wantsDrawerPulse = !!opts.openDrawer;
     let buffer = ESC + '@';
     const write = (line='')=>{ buffer += (line||'') + '\n'; };
     const separator = ()=> write('-'.repeat(RECEIPT_LINE_WIDTH));
@@ -827,112 +806,90 @@ const receiptPrintAdapter = (()=>{
       separator();
       footerLines.forEach(line=> write(centerText(line)));
     }
-    buffer += '\n\n';
-    buffer += GS + 'V' + '\x01';
-    if(wantsDrawerPulse){
-      buffer += ESC + 'p' + String.fromCharCode(
-        RECEIPT_DRAWER_PULSE.m,
-        RECEIPT_DRAWER_PULSE.on,
-        RECEIPT_DRAWER_PULSE.off
-      );
+    buffer += '\n';
+    if(info.invoice){
+      buffer += '\n';
+      write(`Invoice: ${info.invoice}`);
+      buffer += buildBarcode(info.invoice);
     }
     return buffer;
   }
 
   function buildFxSlip(summary){
-    if(!summary) throw new Error('Missing FX summary payload');
-    let buffer = ESC + '@';
-    const write = (line='')=>{ buffer += (line||'') + '\n'; };
-    const separator = ()=> write('-'.repeat(RECEIPT_LINE_WIDTH));
-    buffer += ESC + '!' + '\x30';
-    write(centerText('EUR WRAP SLIP'));
-    buffer += ESC + '!' + '\x00';
-    const timestamp = new Date().toLocaleString();
-    write(centerText(timestamp));
-    separator();
-    write(padLine('EUR accepted:', `€${Number(summary.eur_amount || 0).toFixed(2)}`));
-    write(padLine('GBP equivalent:', `£${Number(summary.gbp_equivalent || 0).toFixed(2)}`));
-    if(summary.effective_rate){
-      write(padLine('Rate used:', `1 GBP = ${Number(summary.effective_rate).toFixed(4)} EUR`));
-    }
-    if(summary.store_rate && (!summary.effective_rate || Math.abs(Number(summary.store_rate) - Number(summary.effective_rate || 0)) > 0.0001)){
-      write(padLine('Store ref:', `1 GBP = ${Number(summary.store_rate).toFixed(4)} EUR`));
-    }
-    if(summary.difference_gbp){
-      const diff = Number(summary.difference_gbp);
-      if(Math.abs(diff) >= 0.01){
-        write(padLine(diff > 0 ? 'Change due:' : 'Still due:', `£${Math.abs(diff).toFixed(2)}`));
-      }
-    }
-    separator();
-    write(centerText('Wrap euro float with this slip'));
-    buffer += '\n\n';
-    buffer += GS + 'V' + '\x01';
-    return buffer;
-  }
-
-  async function send(raw){
-    await ensureConnection();
-    try{ await qz.serial.closePort(RECEIPT_SERIAL_PORT); }catch(_){}
-    await qz.serial.openPort(RECEIPT_SERIAL_PORT);
-    try{
-      await qz.serial.sendData(RECEIPT_SERIAL_PORT, raw);
-    }finally{
-      try{ await qz.serial.closePort(RECEIPT_SERIAL_PORT); }catch(_){}
-    }
-  }
-
-  async function warmup(){
-    try{
-      await ensureConnection();
-    }catch(e){
-      warn('QZ Tray warmup failed', e);
-    }
+    return buildEuroSlip(summary);
   }
 
   return {
-    isAvailable,
-    warmup,
-    async print(info, opts = {}){
-      const payload = buildReceipt(info, opts);
-      await send(payload);
+    buildReceiptPayload: buildReceipt,
+    buildFxSlipPayload: buildFxSlip
+  };
+})();
+
+const receiptAgentClient = (() => {
+  const rawUrl = (typeof window !== 'undefined' ? window.POS_PRINT_AGENT_URL : '') || '';
+  const endpoint = rawUrl.trim();
+  if(!endpoint) return null;
+
+  async function send(payload) {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      cache: 'no-store',
+      body: JSON.stringify(payload)
+    });
+    if(!response.ok){
+      const text = await response.text().catch(()=> '');
+      throw new Error(`Receipt agent ${response.status}: ${text}`);
+    }
+    const data = await response.json().catch(()=> null);
+    return data?.ok !== false;
+  }
+
+  return {
+    isReady: () => !!endpoint,
+    async print(info, opts = {}) {
+      return await send({ text: receiptBuilder.buildReceiptPayload(info, opts), line_feeds: opts.line_feeds ?? 6 });
     },
-    async printFxSlip(summary){
-      if(!summary) return;
-      const payload = buildFxSlip(summary);
-      await send(payload);
+    async printFxSlip(summary) {
+      return await send({ text: receiptBuilder.buildFxSlipPayload(summary), line_feeds: 6 });
+    },
+    async printText(text, opts = {}) {
+      return await send({ text, line_feeds: opts.line_feeds ?? 4, ...opts });
     }
   };
 })();
 
-if(typeof window !== 'undefined'){
-  window.addEventListener('DOMContentLoaded', ()=>{
-    try{
-      if(receiptPrintAdapter && typeof receiptPrintAdapter.warmup === 'function'){
-        receiptPrintAdapter.warmup();
-      }
-    }catch(e){
-      warn('Failed to warmup QZ Tray connection', e);
-    }
-  });
+async function sendTextToReceiptAgent(text, opts = {}) {
+  if(!text || !receiptAgentClient || !receiptAgentClient.isReady()) return false;
+  const sendOpts = Object.assign({ line_feeds: 4 }, opts);
+  try{
+    return await receiptAgentClient.printText(text, sendOpts);
+  }catch(err){
+    warn('Receipt agent text print failed', err);
+    return false;
+  }
 }
 
-async function tryDirectReceiptPrint(info, opts = {}){
-  if(!info || !receiptPrintAdapter.isAvailable()) return false;
+async function tryReceiptAgentPrint(info, opts = {}){
+  if(!info || !receiptAgentClient || !receiptAgentClient.isReady()) return false;
   try{
-    await receiptPrintAdapter.print(info, opts);
+    const ok = await receiptAgentClient.print(info, opts);
+    if(!ok) return false;
     if(!opts.gift && info.fx_summary){
-      await receiptPrintAdapter.printFxSlip(info.fx_summary);
+      await receiptAgentClient.printFxSlip(info.fx_summary);
     }
     return true;
-  }catch(e){
-    err('direct receipt print failed', e);
+  }catch(err){
+    warn('Local receipt agent print failed', err);
     return false;
   }
 }
 
 async function ensureReceiptPrinted(info, opts = {}){
-  return tryDirectReceiptPrint(info, opts);
+  return await tryReceiptAgentPrint(info, opts);
 }
 
 function scheduleAutoReceiptPrint(info){
@@ -940,7 +897,7 @@ function scheduleAutoReceiptPrint(info){
   setTimeout(async ()=>{
     const ok = await ensureReceiptPrinted(info, { gift:false, openDrawer: wantsDrawerPulseFor(info) });
     if(!ok){
-      alert('Unable to print receipt via QZ Tray. Please ensure QZ Tray is running and connected.');
+      alert('Unable to print receipt. Please ensure the local receipt agent is running and try again.');
     }
   }, 75);
 }
@@ -955,12 +912,12 @@ function handleReceiptPrintRequest(info, wantsGift){
       const giftOk = await ensureReceiptPrinted(target, { gift:true, openDrawer:false });
       const standardOk = await ensureReceiptPrinted(target, { gift:false, openDrawer: wantsDrawerPulseFor(target) });
       if(!giftOk || !standardOk){
-        alert('Gift or standard receipt failed to print via QZ Tray. Please retry.');
+        alert('Gift or standard receipt failed to print. Please retry with the local receipt agent.');
       }
     }else{
       const ok = await ensureReceiptPrinted(target, { gift:false, openDrawer: wantsDrawerPulseFor(target) });
       if(!ok){
-        alert('Receipt failed to print via QZ Tray. Please retry.');
+        alert('Receipt failed to print. Please retry with the local receipt agent.');
       }
     }
   })().catch(e=> err('receipt print handler failed', e));
@@ -1460,6 +1417,9 @@ function bindEvents(){
   const openAdminBtn=document.getElementById('openAdminBtn');
   const adminView=document.getElementById('adminView');
   const adminBackBtn=document.getElementById('adminBackBtn');
+  const receiptPortSelect=document.getElementById('receiptPortSelect');
+  const receiptPortRefreshBtn=document.getElementById('receiptPortRefreshBtn');
+  const receiptPortStatus=document.getElementById('receiptPortStatus');
   const settingsSaveBtn=document.getElementById('settingsSaveBtn');
   const settingsBackBtn=document.getElementById('settingsBackBtn');
   const reprintLastBtn=document.getElementById('reprintLastBtn');
@@ -1496,7 +1456,7 @@ function bindEvents(){
   const cashMenuXReadBtn=document.getElementById('cashMenuXReadBtn');
   if(cashMenuXReadBtn){ cashMenuXReadBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; printXRead(); }); }
   if(cashMenuFloatBtn){ cashMenuFloatBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; showClosingOverlay(); }); }
-  if(openAdminBtn){ openAdminBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView) settingsView.style.display='none'; if(adminView) adminView.style.display='block'; }); }
+  if(openAdminBtn){ openAdminBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView) settingsView.style.display='none'; if(adminView) adminView.style.display='block'; refreshSerialPortOptions().catch(e=>warn('refresh serial ports failed', e)); }); }
   if(adminBackBtn){ adminBackBtn.addEventListener('click',()=>{ if(adminView) adminView.style.display='none'; if(menuView) menuView.style.display='block'; }); }
   // Opening/Closing overlays
   const openingOverlay=document.getElementById('openingOverlay');
@@ -1561,6 +1521,17 @@ function bindEvents(){
   const adminSyncBtn=document.getElementById('adminSyncBtn');
   const adminStatusBtn=document.getElementById('adminStatusBtn');
   const adminStatusOut=document.getElementById('adminStatusOut');
+  receiptPortSelectEl = receiptPortSelect;
+  receiptPortStatusEl = receiptPortStatus;
+  if(receiptPortStatusEl){
+    updateReceiptPortStatus();
+  }
+  if(receiptPortSelect){
+    receiptPortSelect.addEventListener('change', ()=>{ setReceiptSerialPort(receiptPortSelect.value); });
+  }
+  if(receiptPortRefreshBtn){
+    receiptPortRefreshBtn.addEventListener('click', ()=>{ refreshSerialPortOptions().catch(e=>warn('refresh serial ports failed', e)); });
+  }
   const showStatus=(text)=>{ if(adminStatusOut){ adminStatusOut.textContent = text; } };
   async function postJson(url){
     try{
@@ -2604,42 +2575,25 @@ function setOpeningFromDigits(){ const input=document.getElementById('openingFlo
 function appendOpeningDigit(k){ openingDigits = (openingDigits||''); if(k>='0'&&k<='9'){ if(openingDigits.length>12) return; openingDigits = openingDigits + k; } }
 function backspaceOpeningDigit(){ openingDigits = (openingDigits||''); if(openingDigits.length>0) openingDigits = openingDigits.slice(0,-1); }
 // Print a float receipt (opening/closing)
-function printFloatReceipt(info) {
-  // Store current body classes to restore after print
-  const currentClasses = document.body.className;
-  // Add float-receipt class for CSS to show only float info
-  document.body.className = 'float-receipt';
-  
-  // Create receipt content
-  const receipt = document.createElement('div');
-  receipt.className = 'float-receipt-content';
-  receipt.innerHTML = `
-    <div class="receipt-header">
-      <h3>${info.type} Float</h3>
-      <div>Date: ${info.date}</div>
-      ${settings.till_number ? `<div>Till: ${settings.till_number}</div>` : ''}
-      ${currentCashier ? `<div>Cashier: ${currentCashier.name}</div>` : ''}
-    </div>
-    <div class="receipt-body">
-      <div class="amount-line">
-        <span>Amount:</span>
-        <span>${money(info.amount)}</span>
-      </div>
-    </div>
-    <div class="receipt-footer">
-      <div>${new Date().toLocaleString()}</div>
-    </div>
-  `;
-  
-  // Add to body temporarily
-  document.body.appendChild(receipt);
-  
-  // Print
-  window.print();
-  
-  // Cleanup
-  document.body.removeChild(receipt);
-  document.body.className = currentClasses;
+async function printFloatReceipt(info) {
+  try{
+    if(!info) throw new Error('Missing float info');
+    const lines = [
+      `${info.type} Float Receipt`,
+      `Date: ${info.date}`,
+      settings.till_number ? `Till: ${settings.till_number}` : '',
+      currentCashier ? `Cashier: ${currentCashier.name || ''}` : '',
+      '',
+      `Amount: ${money(info.amount)}`,
+      '',
+      `Printed: ${new Date().toLocaleString()}`
+    ].filter(Boolean).join('\n');
+    const ok = await sendTextToReceiptAgent(lines, { line_feeds: 5 });
+    if(!ok) throw new Error('Receipt agent not ready');
+  }catch(err){
+    err('float print failed', err);
+    alert('Failed to print float receipt.');
+  }
 }
 
 // Save and print opening float
@@ -2715,37 +2669,47 @@ function computeReconciliation(reveal){
     }
   }
 }
-function printReconciliation(){
+async function printReconciliation(){
   try{
     const opening = Number(settings.opening_float||0);
     const cashSales = Number(settings.net_cash||0);
     const cardSales = Number(settings.net_card||0);
     const payouts = Number(document.getElementById('sumPayoutsInput')?.value||0) || 0;
     const expected = opening + cashSales - payouts;
-    let counted = 0; const lines=[];
-    document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{ const qty = Number(el.value||0) || 0; const denom = Number(el.getAttribute('data-denom')||0) || 0; if(qty>0){ lines.push({denom, qty, total: qty*denom}); counted += qty*denom; } });
+    let counted = 0; const denomLines=[];
+    document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{ 
+      const qty = Number(el.value||0) || 0; 
+      const denom = Number(el.getAttribute('data-denom')||0) || 0; 
+      if(qty>0){ denomLines.push(`${qty} x ${money(denom)} = ${money(qty*denom)}`); counted += qty*denom; } 
+    });
     const variance = counted - expected;
-    const fmtLine = l => `${l.qty} ? ${money(l.denom)} = ${money(l.total)}`;
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Reconciliation</title><style>body{font-family:system-ui,Segoe UI,Arial;font-size:12px;padding:16px} h2{margin:0 0 8px 0} .muted{color:#666} .line{display:flex;justify-content:space-between} .mt{margin-top:8px}</style></head><body>
-      <h2>End of Day Reconciliation</h2>
-      <div class="line"><div>Date</div><div>${new Date().toLocaleString()}</div></div>
-      <div class="line"><div>Till</div><div>${settings.till_number||''}</div></div>
-      <hr>
-      <div class="line"><div>Opening Float</div><div>${money(opening)}</div></div>
-      <div class="line"><div>Cash Sales (net)</div><div>${money(cashSales)}</div></div>
-      <div class="line"><div>Card Sales (net)</div><div>${money(cardSales)}</div></div>
-      <div class="line"><div>Payouts</div><div>${money(payouts)}</div></div>
-      <div class="line"><div>Expected Till</div><div>${money(expected)}</div></div>
-      <div class="mt"><strong>Denominations</strong></div>
-      ${lines.map(fmtLine).join('<br>')}
-      <div class="mt line"><div>Counted</div><div>${money(counted)}</div></div>
-      <div class="line"><div>Variance</div><div>${money(variance)}</div></div>
-      <hr>
-      <div class="line"><div>Card to check</div><div>${money(cardSales)}</div></div>
-    </body></html>`;
-    const w = window.open('', 'recon-print'); w.document.write(html); w.document.close(); w.focus(); w.print(); setTimeout(()=>{ try{ w.close(); }catch(_){} }, 100);
+    const lines = [
+      'End of Day Reconciliation',
+      `Date: ${new Date().toLocaleString()}`,
+      `Till: ${settings.till_number||''}`,
+      '',
+      'Session Summary',
+      `Opening Float: ${money(opening)}`,
+      `Cash Sales (net): ${money(cashSales)}`,
+      `Card Sales (net): ${money(cardSales)}`,
+      `Payouts: ${money(payouts)}`,
+      `Expected Till: ${money(expected)}`,
+      '',
+      'Denominations:',
+      ...denomLines,
+      '',
+      `Counted: ${money(counted)}`,
+      `Variance: ${money(variance)}`,
+      '',
+      `Card to check: ${money(cardSales)}`
+    ];
+    const ok = await sendTextToReceiptAgent(lines.join('\n'), { line_feeds: 5 });
+    if(!ok) throw new Error('Receipt agent not ready');
     const closingOverlayEl = document.getElementById('closingOverlay'); if(closingOverlayEl) closingOverlayEl.style.display='none';
-  }catch(e){ alert('Failed to print reconciliation'); }
+  }catch(e){
+    err('reconciliation print failed', e);
+    alert('Failed to print reconciliation');
+  }
 }
 
 // Discount overlay API
@@ -3184,7 +3148,7 @@ async function enrichSaleItems(sale){
 
 
 
-function printZRead(){
+async function printZRead(){
   try{
     const opening = Number(settings.opening_float||0);
     const cashSales = Number(settings.net_cash||0);
@@ -3198,82 +3162,72 @@ function printZRead(){
     const tenders = Object.assign({Cash:cashSales, Card:cardSales, Voucher:voucher, Other:0}, agg.tenders||{});
     const perCashier = agg.perCashier || {};
     const perGroup = agg.perGroup || {};
+    const tenderLines = Object.entries(tenders)
+      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
+      .map(([k,v])=>`  ${k}: ${money(v)}`);
+    const cashierLines = Object.entries(perCashier)
+      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
+      .map(([k,v])=>`  ${k}: ${money(v)}`);
+    const groupLines = Object.entries(perGroup)
+      .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
+      .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
+    const lines = [
+      'Z-Read',
+      `Date: ${new Date().toLocaleString()}`,
+      `Branch: ${branch}`,
+      `Till: ${settings.till_number||''}`,
+      '',
+      'Session Totals',
+      `  Opening Float: ${money(opening)}`,
+      `  Cash (net): ${money(cashSales)}`,
+      `  Card (net): ${money(cardSales)}`,
+      `  Vouchers Redeemed: ${money(voucher)}`,
+      `  Gross Sales: ${money(totals.gross)}`,
+      `  Net Sales: ${money(totals.net)}`,
+      `  VAT Sales: ${money(totals.vat_sales)}`,
+      `  VAT Returns: ${money(totals.vat_returns)}`,
+      `  Returns Amount: ${money(totals.returns_amount)}`,
+      `  Transactions: ${totals.sale_count} sales, ${totals.return_count} returns`,
+      `  Items Sold: ${Number(totals.items_qty||0)}`,
+      `  Discounts Sales: ${money(discounts.sales)}`,
+      `  Discounts Returns: ${money(discounts.returns)}`,
+      '',
+      'By Tender',
+      ...tenderLines,
+      '',
+      'By Cashier',
+      ...(cashierLines.length ? cashierLines : ['  No data']),
+      '',
+      'By Item Group',
+      ...(groupLines.length ? groupLines : ['  No data'])
+    ];
+    const ok = await sendTextToReceiptAgent(lines.join('\n'), { line_feeds: 5 });
+    if(!ok) throw new Error('Receipt agent not ready');
 
-    const listPairs = (obj) => Object.entries(obj)
-      .filter(([k,v])=>Math.abs(Number(v||0))>0.0001)
-      .map(([k,v])=>`<div class="line"><div>${k}</div><div>${money(v)}</div></div>`)
-      .join('');
-    const listPairsQty = (obj) => Object.entries(obj)
-      .filter(([k,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
-      .map(([k,v])=>`<div class="line"><div>${k} (qty ${Number(v.qty||0)})</div><div>${money(Number(v.amount||0))}</div></div>`)
-      .join('');
-
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Z-Read</title><style>
-      body{font-family:system-ui,Segoe UI,Arial;font-size:12px;padding:16px}
-      h2{margin:0 0 8px 0}
-      h3{margin:12px 0 6px 0;font-size:13px}
-      .line{display:flex;justify-content:space-between}
-      .muted{color:#666}
-      .mt{margin-top:8px}
-      </style></head><body>
-      <h2>Z-Read Summary</h2>
-      <div class="line"><div>Date</div><div>${new Date().toLocaleString()}</div></div>
-      <div class="line"><div>Branch</div><div>${branch}</div></div>
-      <div class="line"><div>Till</div><div>${settings.till_number||''}</div></div>
-      <hr>
-      <h3>Session Totals</h3>
-      <div class="line"><div>Opening Float</div><div>${money(opening)}</div></div>
-      <div class="line"><div>Cash (net)</div><div>${money(cashSales)}</div></div>
-      <div class="line"><div>Card (net)</div><div>${money(cardSales)}</div></div>
-      <div class="line"><div>Vouchers Redeemed</div><div>${money(voucher)}</div></div>
-      <div class="line"><div>Gross Sales</div><div>${money(totals.gross)}</div></div>
-      <div class="line"><div>Net Sales</div><div>${money(totals.net)}</div></div>
-      <div class="line"><div>VAT on Sales</div><div>${money(totals.vat_sales)}</div></div>
-      <div class="line"><div>VAT on Returns</div><div>${money(totals.vat_returns)}</div></div>
-      <div class="line"><div>Returns (amount)</div><div>${money(totals.returns_amount)}</div></div>
-      <div class="line"><div>Transactions</div><div>${totals.sale_count} sales, ${totals.return_count} returns</div></div>
-      <div class="line"><div>Items Sold (net)</div><div>${Number(totals.items_qty||0)}</div></div>
-      <div class="line"><div>Discounts on Sales</div><div>${money(discounts.sales)}</div></div>
-      <div class="line"><div>Discounts on Returns</div><div>${money(discounts.returns)}</div></div>
-
-      <h3 class="mt">By Tender</h3>
-      ${listPairs(tenders)}
-
-      <h3 class="mt">By Cashier</h3>
-      ${listPairs(perCashier) || '<div class="muted">No data</div>'}
-
-      <h3 class="mt">By Item Group</h3>
-      ${listPairsQty(perGroup) || '<div class="muted">No data</div>'}
-    </body></html>`;
-    const w = window.open('', 'zread-print');
-    w.document.write(html); w.document.close(); w.focus(); w.print(); setTimeout(()=>{ try{ w.close(); }catch(_){} }, 100);
-
-    // After printing, clear current session totals and push to Opening Float
     try{
       settings.opening_float = 0;
       settings.opening_date = '';
       settings.net_cash = 0;
       settings.net_card = 0;
       settings.net_voucher = 0;
-      // Reset today's aggregates
-      try{
-        const d=todayStr();
-        if(settings.z_agg && settings.z_agg[d]) delete settings.z_agg[d];
-      }catch(_){ }
+      const d = todayStr();
+      if(settings.z_agg && settings.z_agg[d]) delete settings.z_agg[d];
       saveSettings();
     }catch(_){ }
 
-    // Close any cash/reconciliation overlays and show opening float
     try{
       const cashMenu = document.getElementById('cashMenuOverlay'); if(cashMenu) cashMenu.style.display='none';
       const closingOverlay = document.getElementById('closingOverlay'); if(closingOverlay) closingOverlay.style.display='none';
       const closingMenu = document.getElementById('closingMenuOverlay'); if(closingMenu) closingMenu.style.display='none';
     }catch(_){ }
     showOpeningOverlay();
-  }catch(e){ alert('Failed to print Z-read'); }
+  }catch(e){
+    err('z-read print failed', e);
+    alert('Failed to print Z-read');
+  }
 }
 
-function printXRead(){
+async function printXRead(){
   try{
     const opening = Number(settings.opening_float||0);
     const cashSales = Number(settings.net_cash||0);
@@ -3287,55 +3241,51 @@ function printXRead(){
     const tenders = Object.assign({Cash:cashSales, Card:cardSales, Voucher:voucher, Other:0}, agg.tenders||{});
     const perCashier = agg.perCashier || {};
     const perGroup = agg.perGroup || {};
-    const listPairs = (obj) => Object.entries(obj)
-      .filter(([k,v])=>Math.abs(Number(v||0))>0.0001)
-      .map(([k,v])=>`<div class="line"><div>${k}</div><div>${money(v)}</div></div>`)
-      .join('');
-    const listPairsQty = (obj) => Object.entries(obj)
-      .filter(([k,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
-      .map(([k,v])=>`<div class="line"><div>${k} (qty ${Number(v.qty||0)})</div><div>${money(Number(v.amount||0))}</div></div>`)
-      .join('');
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>X-Read</title><style>
-      body{font-family:system-ui,Segoe UI,Arial;font-size:12px;padding:16px}
-      h2{margin:0 0 8px 0}
-      h3{margin:12px 0 6px 0;font-size:13px}
-      .line{display:flex;justify-content:space-between}
-      .muted{color:#666}
-      .mt{margin-top:8px}
-      </style></head><body>
-      <h2>X-Read (Preview)</h2>
-      <div class="line"><div>Date</div><div>${new Date().toLocaleString()}</div></div>
-      <div class="line"><div>Branch</div><div>${branch}</div></div>
-      <div class="line"><div>Till</div><div>${settings.till_number||''}</div></div>
-      <hr>
-      <h3>Session Totals</h3>
-      <div class="line"><div>Opening Float</div><div>${money(opening)}</div></div>
-      <div class="line"><div>Cash (net)</div><div>${money(cashSales)}</div></div>
-      <div class="line"><div>Card (net)</div><div>${money(cardSales)}</div></div>
-      <div class="line"><div>Vouchers Redeemed</div><div>${money(voucher)}</div></div>
-      <div class="line"><div>Gross Sales</div><div>${money(totals.gross)}</div></div>
-      <div class="line"><div>Net Sales</div><div>${money(totals.net)}</div></div>
-      <div class="line"><div>VAT on Sales</div><div>${money(totals.vat_sales)}</div></div>
-      <div class="line"><div>VAT on Returns</div><div>${money(totals.vat_returns)}</div></div>
-      <div class="line"><div>Returns (amount)</div><div>${money(totals.returns_amount)}</div></div>
-      <div class="line"><div>Transactions</div><div>${totals.sale_count} sales, ${totals.return_count} returns</div></div>
-      <div class="line"><div>Items Sold (net)</div><div>${Number(totals.items_qty||0)}</div></div>
-      <div class="line"><div>Discounts on Sales</div><div>${money(discounts.sales)}</div></div>
-      <div class="line"><div>Discounts on Returns</div><div>${money(discounts.returns)}</div></div>
-
-      <h3 class="mt">By Tender</h3>
-      ${listPairs(tenders)}
-
-      <h3 class="mt">By Cashier</h3>
-      ${listPairs(perCashier) || '<div class="muted">No data</div>'}
-
-      <h3 class="mt">By Item Group</h3>
-      ${listPairsQty(perGroup) || '<div class="muted">No data</div>'}
-      <div class="mt muted">Use browser print (Ctrl+P) to print this preview.</div>
-    </body></html>`;
-    const w = window.open('', 'xread-view');
-    w.document.write(html); w.document.close(); w.focus();
-  }catch(e){ alert('Failed to open X-read'); }
+    const tenderLines = Object.entries(tenders)
+      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
+      .map(([k,v])=>`  ${k}: ${money(v)}`);
+    const cashierLines = Object.entries(perCashier)
+      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
+      .map(([k,v])=>`  ${k}: ${money(v)}`);
+    const groupLines = Object.entries(perGroup)
+      .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
+      .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
+    const lines = [
+      'X-Read',
+      `Date: ${new Date().toLocaleString()}`,
+      `Branch: ${branch}`,
+      `Till: ${settings.till_number||''}`,
+      '',
+      'Session Totals',
+      `  Opening Float: ${money(opening)}`,
+      `  Cash (net): ${money(cashSales)}`,
+      `  Card (net): ${money(cardSales)}`,
+      `  Vouchers Redeemed: ${money(voucher)}`,
+      `  Gross Sales: ${money(totals.gross)}`,
+      `  Net Sales: ${money(totals.net)}`,
+      `  VAT Sales: ${money(totals.vat_sales)}`,
+      `  VAT Returns: ${money(totals.vat_returns)}`,
+      `  Returns: ${money(totals.returns_amount)}`,
+      `  Transactions: ${totals.sale_count} sales, ${totals.return_count} returns`,
+      `  Items Sold: ${Number(totals.items_qty||0)}`,
+      `  Discounts Sales: ${money(discounts.sales)}`,
+      `  Discounts Returns: ${money(discounts.returns)}`,
+      '',
+      'By Tender',
+      ...tenderLines,
+      '',
+      'By Cashier',
+      ...(cashierLines.length ? cashierLines : ['  No data']),
+      '',
+      'By Item Group',
+      ...(groupLines.length ? groupLines : ['  No data'])
+    ];
+    const ok = await sendTextToReceiptAgent(lines.join('\n'), { line_feeds: 5 });
+    if(!ok) throw new Error('Receipt agent not ready');
+  }catch(e){
+    err('x-read print failed', e);
+    alert('Failed to print X-read');
+  }
 }
 
 // Invoices overlay

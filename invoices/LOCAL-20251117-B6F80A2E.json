@@ -1,0 +1,36 @@
+{
+  "invoice_name": "LOCAL-20251117-B6F80A2E",
+  "sale_id": "LOCAL-20251117-B6F80A2E",
+  "created_at": "2025-11-17T10:38:59.429933",
+  "mode": "local",
+  "customer": "CUST-WALKIN",
+  "items": [
+    {
+      "item_code": "Adesso-Raine-A8184-Mariners Glow-36 EU",
+      "item_name": null,
+      "qty": 1,
+      "rate": 110,
+      "vat_rate": 20
+    }
+  ],
+  "payments": [
+    {
+      "mode_of_payment": "Card",
+      "amount": 110,
+      "amount_gbp": 110,
+      "currency": "GBP"
+    }
+  ],
+  "tender": "Card",
+  "cash_given": 0,
+  "change": 0,
+  "total": 110,
+  "vouchers": [],
+  "cashier": {
+    "code": "19",
+    "name": "Josh Russell"
+  },
+  "currency_used": "GBP",
+  "currency_rate_used": 1,
+  "fx_metadata": null
+}

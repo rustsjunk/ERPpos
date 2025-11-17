@@ -9,7 +9,12 @@ from datetime import datetime
 from uuid import uuid4
 import threading
 import re
-from typing import Optional, Tuple, Dict, Set, List
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+try:
+    from serial.tools import list_ports
+except ImportError:
+    list_ports = None
 
 # Load environment variables
 load_dotenv()
@@ -71,12 +76,30 @@ ATTRIBUTE_SYNONYMS = {
     'width': 'Width',
 }
 
-# Optional QZ Tray certificate + signing key (PEM strings)
-QZ_CERTIFICATE = os.getenv('QZ_CERTIFICATE', '').strip() or None
-QZ_PRIVATE_KEY = os.getenv('QZ_PRIVATE_KEY', '').strip() or None
+# Default COM port for the receipt pipeline (used by the UI)
+RECEIPT_DEFAULT_PORT = os.getenv('RECEIPT_SERIAL_PORT', 'COM3')
+
+# Local receipt helper configuration
+RECEIPT_AGENT_HOST = os.getenv('RECEIPT_AGENT_HOST')
+RECEIPT_AGENT_PORT = os.getenv('RECEIPT_AGENT_PORT')
+RECEIPT_AGENT_PATH = os.getenv('RECEIPT_AGENT_PATH', '/print')
+RECEIPT_AGENT_USE_HTTPS = os.getenv('RECEIPT_AGENT_USE_HTTPS', '0') == '1'
+RECEIPT_AGENT_URL = os.getenv('RECEIPT_AGENT_URL')
+if not RECEIPT_AGENT_URL and RECEIPT_AGENT_HOST and RECEIPT_AGENT_PORT:
+    scheme = 'https' if RECEIPT_AGENT_USE_HTTPS else 'http'
+    path = RECEIPT_AGENT_PATH if RECEIPT_AGENT_PATH.startswith('/') else f'/{RECEIPT_AGENT_PATH}'
+    RECEIPT_AGENT_URL = f"{scheme}://{RECEIPT_AGENT_HOST}:{RECEIPT_AGENT_PORT}{path}"
 
 # Force POS to stay in local queue-only mode even when ERP creds exist.
 POS_QUEUE_ONLY = os.getenv('POS_QUEUE_ONLY', '0') == '1'
+
+# Default customers for offline/mock usage.
+_DEFAULT_CUSTOMERS = [
+    {"name": "CUST-WALKIN", "customer_name": "Walk-in Customer"},
+    {"name": "CUST-ALPHA", "customer_name": "Alpha Ltd"},
+    {"name": "CUST-BETA", "customer_name": "Beta Inc"},
+    {"name": "CUST-JDOE", "customer_name": "John Doe"}
+]
 
 # Optional SQLite service helpers
 try:
@@ -525,10 +548,26 @@ def _as_bool(value):
 def _erp_headers():
     if not ERPNEXT_URL or not API_KEY or not API_SECRET:
         raise RuntimeError("Missing ERPNEXT_URL/ERPNEXT_API_KEY/ERPNEXT_API_SECRET in environment")
-    return {
+    headers = {
         'Authorization': f'token {API_KEY}:{API_SECRET}',
-        'Content-Type': 'application/json'
+        'Accept': 'application/json',
+        'Expect': ''
     }
+    headers['Content-Type'] = 'application/json'
+    return headers
+
+
+def _erp_session_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: float = 15):
+    """Use a prepared request to ensure Expect headers are stripped for ERPNext GETs."""
+    headers = _erp_headers()
+    session = requests.Session()
+    try:
+        req = requests.Request("GET", url, headers=headers, params=params)
+        prepped = session.prepare_request(req)
+        prepped.headers.pop('Expect', None)
+        return session.send(prepped, timeout=timeout)
+    finally:
+        session.close()
 
 def _absolute_image_url(path: Optional[str]) -> Optional[str]:
     if not path:
@@ -612,9 +651,27 @@ def index():
     """Render the main POS interface"""
     return render_template(
         'pos.html',
-        qz_certificate=QZ_CERTIFICATE,
-        qz_private_key=QZ_PRIVATE_KEY
+        receipt_agent_url=RECEIPT_AGENT_URL or '',
+        receipt_default_port=RECEIPT_DEFAULT_PORT
     )
+
+
+@app.route('/api/serial-ports')
+def api_serial_ports():
+    """Return available serial/COM ports for the till."""
+    if not list_ports:
+        return jsonify({'status': 'error', 'message': 'pyserial is not installed'}), 501
+    ports = []
+    try:
+        for port in list_ports.comports():
+            ports.append({
+                'device': port.device or '',
+                'description': port.description or '',
+                'hwid': port.hwid or ''
+            })
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+    return jsonify({'status': 'success', 'ports': ports})
 
 
 @app.route('/api/items')
@@ -954,31 +1011,67 @@ def create_sale():
 def get_customers():
     """Get all customers"""
     if USE_MOCK:
-        customers = [
-            {"name": "CUST-WALKIN", "customer_name": "Walk-in Customer"},
-            {"name": "CUST-ALPHA", "customer_name": "Alpha Ltd"},
-            {"name": "CUST-BETA", "customer_name": "Beta Inc"},
-            {"name": "CUST-JDOE", "customer_name": "John Doe"}
-        ]
-        return jsonify({'status': 'success', 'customers': customers})
+        return jsonify({'status': 'success', 'customers': _default_customer_list()})
+    conn = _db_connect()
     try:
-        response = requests.get(
+        response = _erp_session_get(
             f"{ERPNEXT_URL}/api/resource/Customer",
-            headers=_erp_headers(),
             params={
-                'fields': '["name", "customer_name"]',
+                'fields': '["name", "customer_name", "email_id", "phone", "disabled", "modified"]',
                 'filters': '[["disabled","=",0]]'
             },
             timeout=15
         )
         response.raise_for_status()
-        customers = response.json().get('data', [])
+        customers = response.json().get('data', []) or []
+        if customers:
+            _cache_customers(conn, customers)
+        else:
+            customers = _default_customer_list()
         return jsonify({'status': 'success', 'customers': customers})
     except requests.HTTPError as e:
-        return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        app.logger.warning('ERPNext customer fetch failed with HTTP error: %s', e)
+        return _fallback_customer_response(conn, 'ERPNext customer list unavailable (HTTP error).')
+    except Exception:
+        app.logger.exception('Failed to fetch customers from ERPNext')
+        return _fallback_customer_response(conn, 'ERPNext customer list unavailable.')
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
+
+def _default_customer_list():
+    return [dict(item) for item in _DEFAULT_CUSTOMERS]
+
+
+def _cache_customers(conn: Optional[sqlite3.Connection], customers: List[Dict[str, Any]]):
+    if not conn or not ps:
+        return
+    try:
+        ps.upsert_customers(conn, customers)
+    except Exception:
+        app.logger.exception('Failed to cache ERPNext customers')
+
+
+def _cached_customers(conn: Optional[sqlite3.Connection]) -> List[Dict[str, str]]:
+    if not conn or not ps:
+        return []
+    try:
+        return ps.fetch_customers(conn)
+    except Exception:
+        app.logger.exception('Failed to load cached customers')
+        return []
+
+
+def _fallback_customer_response(conn: Optional[sqlite3.Connection], note: Optional[str] = None):
+    customers = _cached_customers(conn) or _default_customer_list()
+    payload = {'status': 'success', 'customers': customers}
+    if note:
+        payload['note'] = note
+    return jsonify(payload)
 
 @app.route('/api/sales/status')
 def api_sales_status():

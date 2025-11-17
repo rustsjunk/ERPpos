@@ -219,6 +219,15 @@ CREATE TABLE IF NOT EXISTS cashiers (
   meta    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS customers (
+  name           TEXT PRIMARY KEY,
+  customer_name  TEXT,
+  email          TEXT,
+  phone          TEXT,
+  disabled       INTEGER NOT NULL DEFAULT 0,
+  modified_utc   TEXT
+);
+
 -- Optional: home screen cache for tiles
 CREATE TABLE IF NOT EXISTS home_tiles (
   item_id      TEXT PRIMARY KEY,     -- template id
