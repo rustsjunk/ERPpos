@@ -910,8 +910,15 @@ const receiptAgentClient = (() => {
       }
       return await send(payload);
     },
-    async printFxSlip(summary) {
-      return await send({ text: receiptBuilder.buildFxSlipPayload(summary), line_feeds: 6 });
+    async printFxSlip(summary, opts = {}) {
+      const payload = {
+        text: receiptBuilder.buildFxSlipPayload(summary),
+        line_feeds: opts.line_feeds ?? 6
+      };
+      if(Object.prototype.hasOwnProperty.call(opts, 'cut')){
+        payload.cut = opts.cut;
+      }
+      return await send(payload);
     },
     async printText(text, opts = {}) {
       return await send({ text, line_feeds: opts.line_feeds ?? 4, ...opts });
@@ -936,13 +943,21 @@ async function sendTextToReceiptAgent(text, opts = {}) {
 async function tryReceiptAgentPrint(info, opts = {}){
   if(!info || !receiptAgentClient || !receiptAgentClient.isReady()) return false;
   try{
-    const ok = await receiptAgentClient.print(info, opts);
+    const receiptOpts = Object.assign({}, opts);
+    if(!Object.prototype.hasOwnProperty.call(receiptOpts, 'cut')){
+      receiptOpts.cut = true;
+    }
+    const needsFxSlip = !opts.gift && !!info.fx_summary;
+    if(needsFxSlip){
+      receiptOpts.cut = false;
+    }
+    const ok = await receiptAgentClient.print(info, receiptOpts);
     if(!ok) return false;
-    if(!opts.gift && info.fx_summary){
+    if(needsFxSlip){
       if(receiptAgentClient && typeof receiptAgentClient.cut === 'function'){
         await receiptAgentClient.cut();
       }
-      await receiptAgentClient.printFxSlip(info.fx_summary);
+      await receiptAgentClient.printFxSlip(info.fx_summary, { cut: false });
       if(receiptAgentClient && typeof receiptAgentClient.cut === 'function'){
         await receiptAgentClient.cut();
       }
