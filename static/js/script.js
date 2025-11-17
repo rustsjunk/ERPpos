@@ -712,21 +712,47 @@ const receiptBuilder = (() => {
   }
 
   const CODE39_SANITIZER = /[^A-Z0-9\-\. \$\/\+\%]/gi;
-  function buildBarcode(value){
-    if(!value) return '';
-    const normalized = String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
-    const safe = normalized.replace(CODE39_SANITIZER, '');
-    if(!safe) return '';
-    const truncated = safe.slice(0, 42);
+  function bytesToHex(str){
+    if(!str) return '';
+    return Array.from(str).map(ch=> ch.charCodeAt(0).toString(16).padStart(2,'0')).join(' ');
+  }
 
-    let out = '\n';
-    out += GS + 'h' + '\x50';   // set barcode height (~80 dots)
-    out += GS + 'w' + '\x02';   // set narrow bar width
-    out += GS + 'H' + '\x02';   // human-readable text below
-    out += GS + 'k' + '\x04' + truncated + '\x00'; // Code 39 (Function A)
+  function buildBarcode(value) {
+    if (!value) return '';
+
+    const normalized = String(value || '')
+      .toUpperCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const safe = normalized.replace(CODE39_SANITIZER, '');
+    if (!safe) return '';
+
+    const truncated = safe.slice(0, 42);
+    const len = truncated.length;
+    if (!len) return '';
+
+    let out = '';
+
+    // Hard reset + ensure we’re at the start of a fresh line
+    out += '\x1b@';        // ESC @
     out += '\n';
-    out += `Invoice: ${truncated}`;
+
+    // Barcode parameters
+    out += GS + 'h' + '\x50';            // height
+    out += GS + 'w' + '\x02';            // width
+    out += GS + 'H' + '\x02';            // HRI below
+
+    // GS k 69 n data  (Code 39, Function B)
+    out += GS + 'k' + 'E';               // 69 decimal == 'E'
+    out += String.fromCharCode(len);     // n = number of bytes
+    out += truncated;                    // data
+
+    // Line break + text fallback
     out += '\n';
+    out += `Invoice: ${truncated}\n`;
+    log('buildBarcode', { invoice: value, sanitized: truncated, length: len, hex: bytesToHex(out) });
+
     return out;
   }
 
