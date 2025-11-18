@@ -74,6 +74,28 @@ def _build_barcode_sequence(m: int, value: str) -> list[str]:
         "0a",
     ]
 
+import re
+
+def _build_barcode_sequence_code39(value: str) -> list[str]:
+    """ESC/POS Function A Code39: GS k 4 d1..dk 00"""
+    # Code 39 allowed chars
+    allowed = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./"
+    value = value.upper()
+    value = "".join(c for c in value if c in allowed)
+    if not value:
+        value = "INV0001"
+
+    value_hex = " ".join(f"{ord(c):02x}" for c in value)
+
+    return [
+        "1b 40",        # ESC @ (init)
+        "1d 68 50",     # GS h 80 (height)
+        "1d 77 02",     # GS w 2 (module width)
+        "1d 48 02",     # GS H 2 (HRI text below)
+        f"1d 6b 04 {value_hex} 00",  # GS k 4 d1..dk NUL
+        "0a",           # LF
+    ]
+
 
 def _build_qr_payload(data: str) -> list[str]:
     """Build the ESC/POS command sequence for a QR code."""
@@ -124,13 +146,14 @@ def main() -> None:
 
     tests = [
         {
-            "name": "Code39 raw ESC/POS",
+            "name": "Code39 raw ESC/POS (Function A)",
             "payload": {
-                "text": "Test 1 - Code39 (GS k 0x45)\n",
-                "hex": _build_barcode_sequence(m=0x45, value="LOCAL-BARCODE-39"),
+                "text": "Test 1 - Code39 (GS k m=4 Function A)\n",
+                "hex": _build_barcode_sequence_code39("LOCAL-INV-123"),
                 "line_feeds": 4,
             },
         },
+
         {
             "name": "Code128 raw ESC/POS",
             "payload": {
