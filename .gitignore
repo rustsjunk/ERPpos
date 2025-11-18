@@ -143,6 +143,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+*.json
+erp.db
 
 # Spyder project settings
 .spyderproject

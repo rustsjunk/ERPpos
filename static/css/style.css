@@ -649,9 +649,29 @@ body.dark-mode .card,
 body.dark-mode .search-modal,
 body.dark-mode .login-modal,
 body.dark-mode .product-card,
+body.dark-mode .item-card,
 body.dark-mode .tender-panel { background: #1e1e1e; color: #e9ecef; border-color: #2a2a2a; }
 body.dark-mode .form-control, body.dark-mode .form-select { background: #2a2a2a; color: #e9ecef; border-color: #3a3a3a; }
+body.dark-mode .form-control::placeholder,
+body.dark-mode .form-select::placeholder { color: #adb5bd; }
 body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
+body.dark-mode .cashier-menu { background: #1e1e1e; border-color: #2a2a2a; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+body.dark-mode .app-topbar,
+body.dark-mode .action-footer { background: #1a1a1a; border-color: #2a2a2a; color: #e9ecef; }
+body.dark-mode .search-overlay,
+body.dark-mode .login-overlay { background: rgba(18, 18, 18, 0.78); }
+body.dark-mode .customer-select { background: #1e1e1e; color: #e9ecef; border-color: #2a2a2a; }
+body.dark-mode .cart-item { border-color: #2a2a2a; }
+body.dark-mode .btn-light { background: #2a2a2a; border-color: #3a3a3a; color: #e9ecef; }
+body.dark-mode .btn-outline-secondary { border-color: #4a4a4a; color: #e9ecef; }
+body.dark-mode .btn-outline-primary { border-color: #6ea8fe; color: #9ec5fe; }
+body.dark-mode .btn-outline-success { border-color: #75b798; color: #75b798; }
+body.dark-mode .btn-outline-danger { border-color: #ea868f; color: #f1aeb5; }
+body.dark-mode .btn-outline-warning { border-color: #ffda6a; color: #ffda6a; }
+body.dark-mode .text-muted,
+body.dark-mode .form-text { color: #adb5bd !important; }
+body.dark-mode a { color: #9ec5fe; }
+body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2a2a2a; }
 /* Ensure right column stretches to modal height */
 .checkout-modal .row { min-height: 0; }
 .checkout-modal .col-lg-5 { display: flex; flex-direction: column; }
@@ -1023,6 +1043,33 @@ body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
     text-align: center;
     margin-top: 10px;
     font-size: 0.85rem;
+}
+
+/* Festive snowfall (opt-in) */
+.snow-layer {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    z-index: 1900;
+}
+.snowflake {
+    position: absolute;
+    top: -10px;
+    color: rgba(255, 255, 255, 0.92);
+    text-shadow: 0 0 6px rgba(0, 0, 0, 0.25);
+    animation: snow-fall var(--fall-duration, 12s) linear infinite;
+    animation-delay: var(--fall-delay, 0s);
+    user-select: none;
+    will-change: transform;
+}
+body.dark-mode .snowflake {
+    color: rgba(255, 255, 255, 0.96);
+    text-shadow: 0 0 8px rgba(0, 0, 0, 0.4);
+}
+@keyframes snow-fall {
+    0% { transform: translate3d(0, -10px, 0); }
+    100% { transform: translate3d(var(--drift, 0px), 110vh, 0); }
 }
 
 @media print {

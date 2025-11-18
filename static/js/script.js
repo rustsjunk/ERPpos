@@ -500,6 +500,7 @@ let settings = {
   till_number: '',
   branch_name: '',
   dark_mode: false,
+  christmas_mode: false,
   auto_print: false,
   opening_float: 0,
   opening_date: '',
@@ -1991,6 +1992,7 @@ function loadSettings(){
         till_number:'',
         branch_name:'',
         dark_mode:false,
+        christmas_mode:false,
         auto_print:false,
         opening_float:0,
         opening_date:'',
@@ -2022,12 +2024,76 @@ function wantsDrawerPulseFor(info){
   if(info.isRefund) return false;
   return shouldOpenDrawerAfterPrint();
 }
+let snowLayerEl = null;
+let snowInterval = null;
+function ensureSnowLayer(){
+  try{
+    if(snowLayerEl && document.body && document.body.contains(snowLayerEl)) return snowLayerEl;
+    if(!document.body) return null;
+    const layer=document.createElement('div');
+    layer.id='snowLayer';
+    layer.className='snow-layer';
+    layer.setAttribute('aria-hidden','true');
+    document.body.appendChild(layer);
+    snowLayerEl = layer;
+    return layer;
+  }catch(e){
+    warn('ensureSnowLayer failed', e);
+    return null;
+  }
+}
+function spawnSnowflake(){
+  const layer = snowLayerEl || document.getElementById('snowLayer');
+  if(!layer) return;
+  const flake=document.createElement('div');
+  flake.className='snowflake';
+  flake.textContent='*';
+  const size = 0.6 + Math.random()*0.8;
+  flake.style.left = `${Math.random()*100}%`;
+  flake.style.fontSize = `${size.toFixed(2)}rem`;
+  flake.style.opacity = (0.6 + Math.random()*0.4).toFixed(2);
+  flake.style.setProperty('--fall-duration', `${8 + Math.random()*9}s`);
+  flake.style.setProperty('--fall-delay', `${(Math.random()*-10).toFixed(2)}s`);
+  flake.style.setProperty('--drift', `${(Math.random()*16 - 8).toFixed(2)}px`);
+  layer.appendChild(flake);
+  setTimeout(()=>{ try{ flake.remove(); }catch(_){ /* ignore */ } }, 20000);
+}
+function enableSnow(){
+  try{
+    const layer = ensureSnowLayer();
+    if(!layer) return;
+    layer.style.display = 'block';
+    for(let i=0;i<20;i++) spawnSnowflake();
+    if(snowInterval) clearInterval(snowInterval);
+    snowInterval = setInterval(spawnSnowflake, 450);
+  }catch(e){
+    warn('enableSnow failed', e);
+  }
+}
+function disableSnow(){
+  try{
+    if(snowInterval){
+      clearInterval(snowInterval);
+      snowInterval = null;
+    }
+    if(snowLayerEl && snowLayerEl.parentNode){
+      snowLayerEl.innerHTML = '';
+      snowLayerEl.remove();
+    }
+    snowLayerEl = null;
+  }catch(e){ /* ignore */ }
+}
+function setSnowEnabled(on){
+  if(on){ enableSnow(); }
+  else { disableSnow(); }
+}
 function populateSettingsForm(){
   const till=document.getElementById('tillNumberInput');
   const branch=document.getElementById('branchNameInput');
   const vat=document.getElementById('vatRateInput');
   const vatInc=document.getElementById('vatInclusiveSwitch');
   const dark=document.getElementById('darkModeSwitch');
+  const christmas=document.getElementById('christmasSwitch');
   const auto=document.getElementById('autoPrintSwitch');
   const drawer=document.getElementById('openDrawerSwitch');
   const header=document.getElementById('receiptHeaderInput');
@@ -2037,6 +2103,7 @@ function populateSettingsForm(){
   if(vat) vat.value = (settings.vat_rate!=null?settings.vat_rate:20);
   if(vatInc) vatInc.checked = !!settings.vat_inclusive;
   if(dark) dark.checked = !!settings.dark_mode;
+  if(christmas) christmas.checked = !!settings.christmas_mode;
   if(auto) auto.checked = !!settings.auto_print;
   if(drawer) drawer.checked = settings.open_drawer_after_print !== false;
   if(header) header.value = (settings.receipt_header!=null?settings.receipt_header:RECEIPT_DEFAULT_HEADER);
@@ -2048,6 +2115,7 @@ function saveSettingsFromForm(){
   const vat=document.getElementById('vatRateInput');
   const vatInc=document.getElementById('vatInclusiveSwitch');
   const dark=document.getElementById('darkModeSwitch');
+  const christmas=document.getElementById('christmasSwitch');
   const auto=document.getElementById('autoPrintSwitch');
   const drawer=document.getElementById('openDrawerSwitch');
   const header=document.getElementById('receiptHeaderInput');
@@ -2057,13 +2125,17 @@ function saveSettingsFromForm(){
   settings.vat_rate = vat ? Math.max(0, Number(vat.value||0)) : 20;
   settings.vat_inclusive = vatInc ? !!vatInc.checked : true;
   settings.dark_mode = dark ? !!dark.checked : false;
+  settings.christmas_mode = christmas ? !!christmas.checked : false;
   settings.auto_print = auto ? !!auto.checked : false;
   settings.open_drawer_after_print = drawer ? !!drawer.checked : true;
   if(header) settings.receipt_header = normalizeMultilineInput(header.value||'');
   if(footer) settings.receipt_footer = normalizeMultilineInput(footer.value||'');
   saveSettings();
 }
-function applySettings(){ document.body.classList.toggle('dark-mode', !!settings.dark_mode); }
+function applySettings(){
+  document.body.classList.toggle('dark-mode', !!settings.dark_mode);
+  setSnowEnabled(!!settings.christmas_mode);
+}
 
 // Search overlay
 function showSearchOverlay(q=''){ const o=document.getElementById('searchOverlay'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter'); if(!o||!i||!b) return; o.style.display='flex';
@@ -3796,6 +3868,8 @@ function assembleLineSections(body, headerLines = [], footerLines = []) {
   }
   return segments.join('\n');
 }
+
+
 
 
 
