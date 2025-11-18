@@ -819,6 +819,49 @@ def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
         pass
 
 
+def _sanitize_barcode_value(value: Optional[str]) -> str:
+    if not value:
+        return ''
+    normalized = re.sub(r'\s+', ' ', str(value).upper()).strip()
+    safe = re.sub(r'[^A-Z0-9\-\. \$\/\+\%]', '', normalized)
+    return safe[:42]
+
+
+def _build_barcode_sequence_code39(value: str) -> List[str]:
+    clean = str(value).strip()
+    if not clean:
+        return []
+    value_hex = " ".join(f"{ord(c):02x}" for c in clean)
+    return [
+        "1b 40",
+        "1d 68 50",
+        "1d 77 02",
+        "1d 48 02",
+        f"1d 6b 04 {value_hex} 00",
+        "0a",
+    ]
+
+
+def _receipt_barcode_context(invoice_name: str) -> dict:
+    clean_value = _sanitize_barcode_value(invoice_name)
+    if not clean_value:
+        return {'invoice_barcode_value': '', 'invoice_barcode_hex': []}
+    return {
+        'invoice_barcode_value': clean_value,
+        'invoice_barcode_hex': _build_barcode_sequence_code39(clean_value)
+    }
+
+
+def _receipt_success_payload(invoice_name: str, message: str) -> dict:
+    payload = {
+        'status': 'success',
+        'message': message,
+        'invoice_name': invoice_name
+    }
+    payload.update(_receipt_barcode_context(invoice_name))
+    return payload
+
+
 def _build_sale_payload(data: dict, sale_id: str) -> dict:
     """Normalize incoming checkout data for the local SQLite queue."""
     items = data.get('items') or []
@@ -981,12 +1024,12 @@ def create_sale():
         prefix = 'LOCAL'
         mode_label = 'local'
         invoice_name = _persist_local_sale(data, prefix, mode_label)
-        return jsonify({'status': 'success', 'message': 'Sale recorded (queued locally for sync)', 'invoice_name': invoice_name})
+        return jsonify(_receipt_success_payload(invoice_name, 'Sale recorded (queued locally for sync)'))
     if USE_MOCK:
         prefix = 'MOCK'
         mode_label = 'mock'
         invoice_name = _persist_local_sale(data, prefix, mode_label)
-        return jsonify({'status': 'success', 'message': 'Sale recorded (mock)', 'invoice_name': invoice_name})
+        return jsonify(_receipt_success_payload(invoice_name, 'Sale recorded (mock)'))
 
     try:
         invoice_data = {
@@ -1020,7 +1063,7 @@ def create_sale():
         submit_response.raise_for_status()
 
         _save_invoice_file(invoice['name'], data, 'erpnext')
-        return jsonify({'status': 'success', 'message': 'Sale completed successfully', 'invoice_name': invoice['name']})
+        return jsonify(_receipt_success_payload(invoice['name'], 'Sale completed successfully'))
     except requests.HTTPError as e:
         return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500
     except Exception as e:

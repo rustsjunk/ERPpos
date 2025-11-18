@@ -757,6 +757,20 @@ const receiptBuilder = (() => {
     return out;
   }
 
+  function invoiceBarcodeValue(info){
+    const raw = info?.barcode_value || info?.invoice || '';
+    if(!raw) return '';
+    return String(raw).trim();
+  }
+
+  function barcodeHexFrom(info){
+    const raw = info?.barcode_hex;
+    if(!Array.isArray(raw)) return [];
+    return raw
+      .map(chunk => String(chunk || '').trim())
+      .filter(Boolean);
+  }
+
   function buildReceipt(info, opts){
     if(!info) throw new Error('Missing receipt payload');
     const gift = !!opts.gift;
@@ -868,14 +882,20 @@ const receiptBuilder = (() => {
       separator();
       footerLines.forEach(line=> write(centerText(line)));
     }
-    buffer += '\n';
-    if(info.invoice){
-      const barcodeChunk = buildBarcode(info.invoice);
+    const sanitizedBarcodeValue = invoiceBarcodeValue(info);
+    const barcodeHex = barcodeHexFrom(info);
+    if(barcodeHex.length){
+      buffer += '\n';
+      if(sanitizedBarcodeValue){
+        write(`Invoice: ${sanitizedBarcodeValue}`);
+      }
+    } else if(sanitizedBarcodeValue){
+      buffer += '\n';
+      const barcodeChunk = buildBarcode(sanitizedBarcodeValue);
       if(barcodeChunk){
         buffer += barcodeChunk;
       } else {
-        buffer += '\n';
-        write(`Invoice: ${info.invoice}`);
+        write(`Invoice: ${sanitizedBarcodeValue}`);
       }
     }
     return buffer;
@@ -892,7 +912,8 @@ const receiptBuilder = (() => {
     buildReceiptPayload: buildReceipt,
     buildFxSlipPayload: buildFxSlip,
     headerLinesFrom,
-    footerLinesFrom
+    footerLinesFrom,
+    barcodeHexFrom
   };
 })();
 
@@ -932,6 +953,10 @@ const receiptAgentClient = (() => {
         text: receiptBuilder.buildReceiptPayload(info, opts),
         line_feeds: opts.line_feeds ?? 6
       };
+      const extraHex = receiptBuilder.barcodeHexFrom(info);
+      if(extraHex.length){
+        payload.hex = extraHex;
+      }
       if(Object.prototype.hasOwnProperty.call(opts, 'cut')){
         payload.cut = opts.cut;
       }
@@ -2603,6 +2628,10 @@ async function completeSaleFromOverlay() {
     if(fxSummary){
       fxSummary.invoice = data.invoice_name || fxSummary.invoice || '';
     }
+    const barcodeValue = (data.invoice_barcode_value || data.invoice_name || '').toString().trim();
+    const barcodeHex = Array.isArray(data.invoice_barcode_hex)
+      ? data.invoice_barcode_hex.filter(entry => typeof entry === 'string' && entry.trim())
+      : [];
     const info = {
       invoice: data.invoice_name || 'N/A',
       change: isRefund ? Math.abs(total) : changeVal,
@@ -2623,6 +2652,8 @@ async function completeSaleFromOverlay() {
       vat_inclusive: settings.vat_inclusive,
       header: settings.receipt_header,
       footer: settings.receipt_footer,
+      barcode_value: barcodeValue,
+      barcode_hex: barcodeHex,
       cash_given: cashGiven,
       fx_summary: fxSummary
     };
