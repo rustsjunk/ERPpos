@@ -93,18 +93,18 @@ def _build_qr_payload(data: str) -> list[str]:
     return chunks
 
 
-def _build_barcode_bitmap(width: int, height: int) -> bytes:
+def _build_barcode_bitmap(width: int, height: int, scale: int = 2) -> bytes:
     """Create a simple bitmap that approximates a barcode pattern."""
     bars = [(3, True), (5, False), (2, True), (4, False), (6, True), (4, False)]
     pattern = []
     while len(pattern) < width:
         for chunk_width, filled in bars:
-            pattern.extend([1 if filled else 0] * chunk_width)
+            pattern.extend([1 if filled else 0] * (chunk_width * scale))
             if len(pattern) >= width:
                 break
-    pattern = pattern[:width]
-
-    width_bytes = width // 8
+    width_bits = ((width + 7) // 8) * 8
+    pattern = pattern[:width_bits]
+    width_bytes = width_bits // 8
     header = b"\x1d\x76\x30\x00" + width_bytes.to_bytes(2, "little") + height.to_bytes(2, "little")
     data = bytearray()
     for _ in range(height):
@@ -112,9 +112,7 @@ def _build_barcode_bitmap(width: int, height: int) -> bytes:
             byte = 0
             for bit_index in range(8):
                 pixel_index = byte_index * 8 + bit_index
-                if pixel_index >= width:
-                    continue
-                bit = pattern[pixel_index]
+                bit = pattern[pixel_index] if pixel_index < len(pattern) else 0
                 byte |= (bit & 1) << (7 - bit_index)
             data.append(byte)
     return header + bytes(data)
@@ -122,7 +120,7 @@ def _build_barcode_bitmap(width: int, height: int) -> bytes:
 
 def main() -> None:
     _start_receipt_agent()
-    bitmap_hex = _hex_bytes(_build_barcode_bitmap(width=64, height=48))
+    bitmap_hex = _hex_bytes(_build_barcode_bitmap(width=192, height=96, scale=3))
 
     tests = [
         {
