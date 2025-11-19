@@ -46,6 +46,9 @@ let items = [];
 let cart = [];
 let customers = [];
 let currentCashier = null;
+let currentCashierSession = null;
+let sessionPingTimer = null;
+let sessionPingIntervalMs = 60 * 1000;
 const FEATURED_ITEM_LIMIT = 12;
 const RECENT_SALES_LIMIT = 3;
 let recentSalesHistory = [];
@@ -1266,7 +1269,88 @@ const CASHIER_CODES = { '1111':'Alice','2222':'Bob','3333':'Charlie' };
 
 // Idle
 const IDLE_TIMEOUT_MS = 120000; let idleTimer=null;
-function resetIdleTimer(){ if(idleTimer) clearTimeout(idleTimer); if(currentCashier) idleTimer=setTimeout(()=>logoutToLogin('Session timed out due to inactivity'),IDLE_TIMEOUT_MS);} 
+function resetIdleTimer(){
+  if(idleTimer) clearTimeout(idleTimer);
+  if(currentCashier){
+    idleTimer=setTimeout(()=>logoutToLogin('Session timed out due to inactivity'),IDLE_TIMEOUT_MS);
+    if(currentCashierSession) pingCashierSession().catch(()=>{});
+  }
+}
+
+function setCashierSession(token, intervalSeconds){
+  currentCashierSession = token || null;
+  if(!currentCashierSession){
+    stopCashierSessionPing();
+    return;
+  }
+  const seconds = Number(intervalSeconds || 60);
+  sessionPingIntervalMs = Math.max(15000, (isNaN(seconds) ? 60 : seconds) * 1000);
+  startCashierSessionPing();
+}
+
+function startCashierSessionPing(){
+  if(!currentCashierSession) return;
+  stopCashierSessionPing();
+  const tick = ()=>{ pingCashierSession().catch(()=>{}); };
+  tick();
+  sessionPingTimer = setInterval(tick, sessionPingIntervalMs);
+}
+
+function stopCashierSessionPing(){
+  if(sessionPingTimer){
+    clearInterval(sessionPingTimer);
+    sessionPingTimer = null;
+  }
+}
+
+async function pingCashierSession(){
+  if(!currentCashierSession) return;
+  try{
+    await fetch('/api/cashier/ping', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ session: currentCashierSession })
+    });
+  }catch(e){
+    warn('session ping failed', e);
+    throw e;
+  }
+}
+
+async function notifyCashierLogout(){
+  if(!currentCashierSession) return;
+  const payload = JSON.stringify({ session: currentCashierSession });
+  try{
+    if(typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function'){
+      const blob = new Blob([payload], { type:'application/json' });
+      navigator.sendBeacon('/api/cashier/logout', blob);
+    }else{
+      await fetch('/api/cashier/logout', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: payload
+      });
+    }
+  }catch(e){
+    warn('cashier logout notify failed', e);
+  }finally{
+    currentCashierSession = null;
+    stopCashierSessionPing();
+  }
+}
+
+if(typeof window !== 'undefined'){
+  window.addEventListener('beforeunload', ()=>{
+    if(!currentCashierSession) return;
+    try{
+      const payload = JSON.stringify({ session: currentCashierSession });
+      if(typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function'){
+        const blob = new Blob([payload], { type:'application/json' });
+        navigator.sendBeacon('/api/cashier/logout', blob);
+      }
+    }catch(_){}
+  });
+}
 
 document.addEventListener('DOMContentLoaded',()=>{
   log('DOMContentLoaded fired');
@@ -3392,6 +3476,7 @@ async function attemptLogin(){
       return;
     }
     currentCashier = { code: d.cashier.code, name: d.cashier.name };
+    setCashierSession(d.session || null, d.session_ping_interval || 60);
     updateCashierInfo();
     hideLogin();
     resetIdleTimer();
@@ -3439,7 +3524,26 @@ function hideLogin(){
   if (o) o.style.display = 'none';
   focusBarcodeInput();
 }
-function logoutToLogin(reason){ cart=[]; updateCartDisplay(); setDefaultCustomer(); const s=document.getElementById('itemSearch'); if(s) s.value=''; currentCashier=null; updateCashierInfo(); showLogin(); if(reason){ const e=document.getElementById('loginError'); if(e){ e.textContent=reason; e.style.display='block'; } } }
+function logoutToLogin(reason){
+  cart=[];
+  updateCartDisplay();
+  setDefaultCustomer();
+  const s=document.getElementById('itemSearch');
+  if(s) s.value='';
+  if(currentCashierSession){
+    notifyCashierLogout().catch(()=>{});
+  }
+  currentCashier=null;
+  updateCashierInfo();
+  showLogin();
+  if(reason){
+    const e=document.getElementById('loginError');
+    if(e){
+      e.textContent=reason;
+      e.style.display='block';
+    }
+  }
+}
 
 // Receipt overlay
 function showReceiptOverlay(info){ const o=document.getElementById('receiptOverlay'); const inv=document.getElementById('receiptInvoice'); const ch=document.getElementById('receiptChange'); if(!o){ err('loginOverlay element missing'); return; }

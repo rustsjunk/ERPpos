@@ -9,6 +9,8 @@ from datetime import datetime
 from uuid import uuid4
 import threading
 import re
+import time
+import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
@@ -31,6 +33,16 @@ def _env_string(name: str, default: Optional[str] = None) -> Optional[str]:
 
 app = Flask(__name__)
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # disable static caching during development
+
+_LOG_LEVEL_NAME = (os.getenv('POS_LOG_LEVEL') or 'INFO').strip().upper()
+try:
+    app.logger.setLevel(getattr(logging, _LOG_LEVEL_NAME, logging.INFO))
+except Exception:
+    app.logger.setLevel(logging.INFO)
+try:
+    logging.getLogger('werkzeug').setLevel(getattr(logging, _LOG_LEVEL_NAME, logging.INFO))
+except Exception:
+    pass
 
 # Behavior flags
 USE_MOCK = (_env_string('USE_MOCK', '1') == '1')  # default to mock POS with no ERP dependency
@@ -111,6 +123,30 @@ _DEFAULT_CUSTOMERS = [
     {"name": "CUST-JDOE", "customer_name": "John Doe"}
 ]
 
+# Idle/background task configuration
+IDLE_TASKS_ENABLED = os.getenv('POS_IDLE_TASKS_ENABLED', '1') == '1'
+try:
+    IDLE_TASK_INTERVAL = int(os.getenv('POS_IDLE_TASK_INTERVAL', '300'))
+except ValueError:
+    IDLE_TASK_INTERVAL = 300
+IDLE_TASK_INTERVAL = max(30, IDLE_TASK_INTERVAL)
+try:
+    SESSION_PING_INTERVAL = int(os.getenv('POS_SESSION_PING_INTERVAL', '60'))
+except ValueError:
+    SESSION_PING_INTERVAL = 60
+SESSION_PING_INTERVAL = max(15, SESSION_PING_INTERVAL)
+try:
+    SESSION_TTL_SECONDS = int(os.getenv('POS_SESSION_TTL_SECONDS', '300'))
+except ValueError:
+    SESSION_TTL_SECONDS = 300
+SESSION_TTL_SECONDS = max(SESSION_TTL_SECONDS, SESSION_PING_INTERVAL * 2, 120)
+
+# Track active till sessions to gate background maintenance
+_ACTIVE_CASHIER_SESSIONS: Dict[str, Dict[str, Any]] = {}
+_SESSION_LOCK = threading.Lock()
+_IDLE_TASK_THREAD: Optional[threading.Thread] = None
+_IDLE_TASK_LOCK = threading.Lock()
+
 # Optional SQLite service helpers
 try:
     import pos_service as ps
@@ -125,6 +161,142 @@ except Exception:
 
 _BOOTSTRAP_LOCK = threading.Lock()
 _BOOTSTRAP_DONE = False
+_BACKGROUND_SERVICES_STARTED = False
+
+def _purge_expired_sessions_locked(now_ts: Optional[float] = None) -> None:
+    """Drop cashier sessions that have not pinged recently."""
+    cutoff = now_ts or time.time()
+    expired: List[str] = []
+    for sess_id, meta in list(_ACTIVE_CASHIER_SESSIONS.items()):
+        last_seen = float(meta.get('last_seen') or 0)
+        if cutoff - last_seen > SESSION_TTL_SECONDS:
+            expired.append(sess_id)
+    for sess_id in expired:
+        _ACTIVE_CASHIER_SESSIONS.pop(sess_id, None)
+        app.logger.info("Cashier session %s expired after inactivity (active=%d)", sess_id, len(_ACTIVE_CASHIER_SESSIONS))
+
+
+def _remove_sessions_for_code_locked(code: Optional[str], skip_session: Optional[str] = None) -> None:
+    if not code:
+        return
+    targets = [sid for sid, meta in _ACTIVE_CASHIER_SESSIONS.items()
+               if meta.get('code') == code and sid != skip_session]
+    for sid in targets:
+        _ACTIVE_CASHIER_SESSIONS.pop(sid, None)
+        app.logger.info("Removed stale session %s for cashier %s (active=%d)", sid, code, len(_ACTIVE_CASHIER_SESSIONS))
+
+
+def _register_cashier_session(code: str) -> Optional[str]:
+    """Create a lightweight session token for presence tracking."""
+    session_id = uuid4().hex
+    now_ts = time.time()
+    with _SESSION_LOCK:
+        _purge_expired_sessions_locked(now_ts)
+        _remove_sessions_for_code_locked(code)
+        _ACTIVE_CASHIER_SESSIONS[session_id] = {'code': code, 'last_seen': now_ts}
+    return session_id
+
+
+def _touch_cashier_session(session_id: str) -> bool:
+    """Refresh presence timestamp; returns False if the session is unknown."""
+    if not session_id:
+        return False
+    with _SESSION_LOCK:
+        _purge_expired_sessions_locked()
+        if session_id not in _ACTIVE_CASHIER_SESSIONS:
+            return False
+        _ACTIVE_CASHIER_SESSIONS[session_id]['last_seen'] = time.time()
+        return True
+
+
+def _remove_cashier_session(session_id: str) -> bool:
+    """Clear the recorded session so idle tasks can resume."""
+    if not session_id:
+        return False
+    with _SESSION_LOCK:
+        removed = _ACTIVE_CASHIER_SESSIONS.pop(session_id, None)
+        return removed is not None
+
+
+def _active_session_count() -> int:
+    with _SESSION_LOCK:
+        _purge_expired_sessions_locked()
+        return len(_ACTIVE_CASHIER_SESSIONS)
+
+
+def _has_active_cashier_sessions() -> bool:
+    return _active_session_count() > 0
+
+
+def _ensure_idle_worker():
+    """Start the idle maintenance worker thread if enabled."""
+    global _IDLE_TASK_THREAD
+    if not IDLE_TASKS_ENABLED or not ps:
+        return
+    if _IDLE_TASK_THREAD and _IDLE_TASK_THREAD.is_alive():
+        return
+    _IDLE_TASK_THREAD = threading.Thread(target=_idle_maintenance_loop, name='idle-maintenance', daemon=True)
+    _IDLE_TASK_THREAD.start()
+    app.logger.info("Idle maintenance thread started (interval=%ss)", IDLE_TASK_INTERVAL)
+
+
+def _idle_maintenance_loop():
+    """Periodically run maintenance tasks whenever no cashier sessions are active."""
+    while True:
+        try:
+            time.sleep(IDLE_TASK_INTERVAL)
+        except Exception:
+            continue
+        if not IDLE_TASKS_ENABLED:
+            continue
+        if _has_active_cashier_sessions():
+            continue
+        try:
+            _run_idle_maintenance_tasks()
+        except Exception as exc:
+            app.logger.exception("Idle maintenance cycle failed: %s", exc)
+
+
+def _run_idle_maintenance_tasks():
+    """Perform background work (ERP sync, queue drain, invoice ingest) when tills are idle."""
+    if not ps:
+        return
+    acquired = _IDLE_TASK_LOCK.acquire(blocking=False)
+    if not acquired:
+        return
+    conn = None
+    try:
+        conn = _db_connect() or ps.connect(POS_DB_PATH)
+        if not conn:
+            return
+        summary: List[str] = []
+        try:
+            ingested = _ingest_new_local_invoices(conn)
+            if ingested:
+                summary.append(f"ingested {ingested} invoice(s)")
+        except Exception as exc:
+            app.logger.warning("Idle invoice ingest failed: %s", exc)
+        if not USE_MOCK and _has_erp_credentials():
+            try:
+                ps.sync_cycle(conn, warehouse=POS_WAREHOUSE, price_list=POS_PRICE_LIST, loops=1)
+                summary.append("synced ERP catalog")
+            except Exception as exc:
+                app.logger.warning("Idle ERP sync failed: %s", exc)
+        if not POS_QUEUE_ONLY and not USE_MOCK and _has_erp_credentials():
+            try:
+                ps.push_outbox(conn)
+                summary.append("pushed outbox")
+            except Exception as exc:
+                app.logger.warning("Idle outbox push failed: %s", exc)
+        if summary:
+            app.logger.info("Idle maintenance completed (%s)", ", ".join(summary))
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _IDLE_TASK_LOCK.release()
 
 class CashierQueryFieldError(Exception):
     """Raised when ERPNext rejects list queries due to field permissions."""
@@ -777,7 +949,43 @@ def api_cashier_login():
             app.logger.info("Ingested %s local invoice(s) into SQLite during cashier login", ingested)
     except Exception:
         pass
-    return jsonify({'status': 'success', 'cashier': {'code': row['code'], 'name': row['name']}})
+    session_id = _register_cashier_session(row['code'])
+    if session_id:
+        app.logger.info("Cashier %s session started (active=%d)", row['code'], _active_session_count())
+    payload = {
+        'status': 'success',
+        'cashier': {'code': row['code'], 'name': row['name']},
+        'session': session_id,
+        'session_ping_interval': SESSION_PING_INTERVAL,
+        'session_ttl': SESSION_TTL_SECONDS
+    }
+    _ensure_idle_worker()
+    return jsonify(payload)
+
+
+@app.route('/api/cashier/ping', methods=['POST'])
+def api_cashier_ping():
+    """Heartbeat endpoint so the server knows a cashier is still logged in."""
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get('session') or '').strip()
+    if not session_id:
+        return jsonify({'status': 'error', 'message': 'Missing session'}), 400
+    if not _touch_cashier_session(session_id):
+        return jsonify({'status': 'error', 'message': 'Session not found'}), 404
+    return jsonify({'status': 'success'})
+
+
+@app.route('/api/cashier/logout', methods=['POST'])
+def api_cashier_logout():
+    """Mark a cashier session as logged out so idle maintenance can resume quickly."""
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get('session') or '').strip()
+    if not session_id:
+        return jsonify({'status': 'error', 'message': 'Missing session'}), 400
+    removed = _remove_cashier_session(session_id)
+    if removed:
+        app.logger.info("Cashier session closed (active=%d)", _active_session_count())
+    return jsonify({'status': 'success', 'active_sessions': _active_session_count()})
 
 
 def _format_till_segment(till_value: Optional[str]) -> str:
@@ -1951,18 +2159,26 @@ def api_update_currency_rates():
 
 _CURRENCY_BOOTSTRAP_DONE = False
 
+def start_background_services():
+    """Start background helper threads once per process."""
+    global _BACKGROUND_SERVICES_STARTED
+    if _BACKGROUND_SERVICES_STARTED:
+        return
+    _ensure_currency_updater()
+    _ensure_idle_worker()
+    _BACKGROUND_SERVICES_STARTED = True
+
+
 @app.before_request
 def _bootstrap_background_services():
-    """Start background helpers (currency updater) on first inbound request."""
+    """Start background helpers (currency updater + idle worker) on first inbound request."""
+    start_background_services()
     global _CURRENCY_BOOTSTRAP_DONE
-    if not _CURRENCY_BOOTSTRAP_DONE:
-        _ensure_currency_updater()
-        _CURRENCY_BOOTSTRAP_DONE = True
+    _CURRENCY_BOOTSTRAP_DONE = True
 
 
 if __name__ == '__main__':
-    # Ensure currency updater is running
-    _ensure_currency_updater()
+    start_background_services()
     
     debug = os.getenv('FLASK_DEBUG', '0') == '1'
     port = int(os.getenv('PORT', '5000'))

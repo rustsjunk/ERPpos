@@ -1,7 +1,7 @@
 import os
 import subprocess
 import sys
-from pos_server import app
+from pos_server import app, start_background_services
 
 def start_receipt_agent():
     if os.getenv('RECEIPT_AGENT_AUTO_START', '0') != '1':
@@ -21,6 +21,7 @@ if __name__ == '__main__':
     debug = os.getenv('FLASK_DEBUG', '0') == '1'
     port = int(os.getenv('PORT', '5000'))
     host = os.getenv('HOST', '0.0.0.0')
+    start_background_services()
     agent_proc = start_receipt_agent()
     try:
         app.run(host=host, port=port, debug=debug)

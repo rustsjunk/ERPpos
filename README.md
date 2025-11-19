@@ -81,6 +81,7 @@ With `USE_MOCK=0`, ERPpos now auto-initializes `POS_DB_PATH` using `schema.sql` 
 - Logs and errors appear on the Flask console. Persist logs externally when running in production.
 - To refresh catalog stock and price-list rates from ERPNext, run `python pos_service.py --sync --warehouse Shop --price-list Retail` (or substitute `Shop`/`Retail` with `POS_WAREHOUSE`/`POS_PRICE_LIST`). That sync writes the selected warehouse Bin levels into `stock` and applies the price list to `items.price`.
 - The app is intentionally simple to be run behind a process manager (systemd, NSSM on Windows) or inside a container.
+- When no cashier is signed in the server now automatically runs idle maintenance (ingest invoice JSON files, sync ERP items/Bin levels, and push the outbox). Presence is tracked through lightweight cashier sessions in the UI. Configure this via `POS_IDLE_TASKS_ENABLED`, `POS_IDLE_TASK_INTERVAL`, `POS_SESSION_PING_INTERVAL`, and `POS_SESSION_TTL_SECONDS`.
 
 ## Local receipt printing helper
 
