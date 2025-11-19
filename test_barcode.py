@@ -155,41 +155,14 @@ def main() -> None:
         },
 
         {
-            "name": "Code128 raw ESC/POS",
+            "name": "Code39 raw ESC/POS (Function A)",
             "payload": {
-                "text": "Test 2 - Code128 (GS k 0x49)\n",
-                "hex": _build_barcode_sequence(m=0x49, value="CODE128-TEST01"),
-                "line_feeds": 3,
+                "text": "Test 2 - Code39 (GS k m=4 Function A)\n",
+                "hex": _build_barcode_sequence_code39("LOCAL-20251119-D896993B"),
+                "line_feeds": 4,
             },
         },
-        {
-            "name": "QR code",
-            "payload": {
-                "text": "Test 3 - QR code\n",
-                "hex": _build_qr_payload("https://erpnext.com/demo-barcode"),
-                "line_feeds": 3,
-            },
-        },
-        {
-            "name": "Bitmap barcode image",
-            "payload": {
-                "text": "Test 4 - Bitmap barcode (raster)\n",
-                "hex": [bitmap_hex],
-                "line_feeds": 3,
-                "cut": False,
-            },
-        },
-        {
-            "name": "ASCII fallback",
-            "payload": {
-                "text": (
-                    "Test 5 - ASCII fallback\n"
-                    "|| ||| | |||||| ||| |||||\n"
-                    "|| ||| | |||||| ||| |||||\n"
-                ),
-                "line_feeds": 5,
-            },
-        },
+
     ]
 
     results = []
