@@ -887,11 +887,16 @@ const receiptBuilder = (() => {
       footerLines.forEach(line=> write(centerText(line)));
     }
     const sanitizedBarcodeValue = invoiceBarcodeValue(info);
-
-    if (sanitizedBarcodeValue) {
+    const barcodeHex = barcodeHexFrom(info);
+    if(barcodeHex.length){
+      buffer += '\n';
+      if(sanitizedBarcodeValue){
+        write(`Invoice: ${sanitizedBarcodeValue}`);
+      }
+    } else if(sanitizedBarcodeValue){
       buffer += '\n';
       const barcodeChunk = buildBarcode(sanitizedBarcodeValue);
-      if (barcodeChunk) {
+      if(barcodeChunk){
         buffer += barcodeChunk;
       } else {
         write(`Invoice: ${sanitizedBarcodeValue}`);
@@ -3149,6 +3154,7 @@ function renderReturnResult(sale){
     const qty = Number(ln.qty||0);
     const rate = Number(ln.rate||0);
     const total = qty*rate;
+    const vatRate = ln.vat_rate != null ? ln.vat_rate : '';
     const row = make('label','list-group-item d-flex justify-content-between align-items-center');
     row.innerHTML = `<div class=\"form-check\">\n        <input class=\"form-check-input\" type=\"checkbox\" id=\"${id}\" data-code=\"${ln.item_code}\" data-name=\"${ln.item_name}\" data-qty=\"${qty}\" data-rate=\"${rate}\" data-vat=\"${vatRate ?? ''}\" checked>\n        <span class=\"ms-2\">${ln.item_name}</span>\n      </div>\n      <div class=\"text-end small text-muted\">\n        <div>${qty} × ${money(rate)}</div>\n        <div class=\"fw-semibold\">${money(total)}</div>\n      </div>`;
     list.appendChild(row);
