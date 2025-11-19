@@ -718,44 +718,48 @@ const receiptBuilder = (() => {
     return Array.from(str).map(ch=> ch.charCodeAt(0).toString(16).padStart(2,'0')).join(' ');
   }
 
+
   function buildBarcode(value) {
     if (!value) return '';
 
-    const normalized = String(value || '')
-      .toUpperCase()
-      .replace(/\s+/g, ' ')
-      .trim();
+    // Code 39 allowed chars – same as Python
+    const allowed = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./";
 
-    const safe = normalized.replace(CODE39_SANITIZER, '');
-    if (!safe) return '';
-
-    const truncated = safe.slice(0, 42);
-    const len = truncated.length;
-    if (!len) return '';
+    let normalized = String(value || '').toUpperCase();
+    let safe = '';
+    for (const c of normalized) {
+      if (allowed.includes(c)) safe += c;
+    }
+    if (!safe) safe = 'INV0001';
 
     let out = '';
 
-    // Hard reset + ensure we’re at the start of a fresh line
-    out += '\x1b@';        // ESC @
+    // ESC @ (init)
+    out += ESC + '@';
+
+    // Barcode parameters (match test 1)
+    out += GS + 'h' + '\x50';  // height 80
+    out += GS + 'w' + '\x02';  // width 2
+    out += GS + 'H' + '\x02';  // HRI below
+
+    // GS k 4 d1..dk 00  (Code39 Function A)
+    out += GS + 'k' + '\x04';  // m = 4
+    out += safe;               // data bytes
+    out += '\x00';             // NUL terminator
+
+    // Newline + human-readable text
     out += '\n';
+    out += `Invoice: ${safe}\n`;
 
-    // Barcode parameters
-    out += GS + 'h' + '\x50';            // height
-    out += GS + 'w' + '\x02';            // width
-    out += GS + 'H' + '\x02';            // HRI below
-
-    // GS k 69 n data  (Code 39, Function B)
-    out += GS + 'k' + 'E';               // 69 decimal == 'E'
-    out += String.fromCharCode(len);     // n = number of bytes
-    out += truncated;                    // data
-
-    // Line break + text fallback
-    out += '\n';
-    out += `Invoice: ${truncated}\n`;
-    log('buildBarcode', { invoice: value, sanitized: truncated, length: len, hex: bytesToHex(out) });
+    log('buildBarcode', {
+      invoice: value,
+      encoded: safe,
+      hex: bytesToHex(out),
+    });
 
     return out;
   }
+
 
   function invoiceBarcodeValue(info){
     const raw = info?.barcode_value || info?.invoice || '';
@@ -883,21 +887,17 @@ const receiptBuilder = (() => {
       footerLines.forEach(line=> write(centerText(line)));
     }
     const sanitizedBarcodeValue = invoiceBarcodeValue(info);
-    const barcodeHex = barcodeHexFrom(info);
-    if(barcodeHex.length){
-      buffer += '\n';
-      if(sanitizedBarcodeValue){
-        write(`Invoice: ${sanitizedBarcodeValue}`);
-      }
-    } else if(sanitizedBarcodeValue){
+
+    if (sanitizedBarcodeValue) {
       buffer += '\n';
       const barcodeChunk = buildBarcode(sanitizedBarcodeValue);
-      if(barcodeChunk){
+      if (barcodeChunk) {
         buffer += barcodeChunk;
       } else {
         write(`Invoice: ${sanitizedBarcodeValue}`);
       }
     }
+
     return buffer;
   }
 
