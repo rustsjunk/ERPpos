@@ -718,25 +718,6 @@ const receiptBuilder = (() => {
     return Array.from(str).map(ch=> ch.charCodeAt(0).toString(16).padStart(2,'0')).join(' ');
   }
 
-  function hexChunksToString(chunks){
-    if(!Array.isArray(chunks) || !chunks.length) return '';
-    const bytes = [];
-    for(const chunk of chunks){
-      const cleaned = (chunk || '').toString().trim();
-      if(!cleaned) continue;
-      for(const part of cleaned.split(/\s+/)){
-        if(!part) continue;
-        const value = Number.parseInt(part, 16);
-        if(Number.isNaN(value) || value < 0 || value > 0xFF){
-          warn('Invalid barcode hex byte', part);
-          continue;
-        }
-        bytes.push(value);
-      }
-    }
-    return bytes.map(byte => String.fromCharCode(byte)).join('');
-  }
-
   function buildBarcode(value) {
     if (!value) return '';
 
@@ -903,10 +884,8 @@ const receiptBuilder = (() => {
     }
     const sanitizedBarcodeValue = invoiceBarcodeValue(info);
     const barcodeHex = barcodeHexFrom(info);
-    const embeddedBarcode = hexChunksToString(barcodeHex);
-    if(embeddedBarcode){
+    if(barcodeHex.length){
       buffer += '\n';
-      buffer += embeddedBarcode;
       if(sanitizedBarcodeValue){
         write(`Invoice: ${sanitizedBarcodeValue}`);
       }
@@ -974,6 +953,10 @@ const receiptAgentClient = (() => {
         text: receiptBuilder.buildReceiptPayload(info, opts),
         line_feeds: opts.line_feeds ?? 6
       };
+      const extraHex = receiptBuilder.barcodeHexFrom(info);
+      if(extraHex.length){
+        payload.hex = extraHex;
+      }
       if(Object.prototype.hasOwnProperty.call(opts, 'cut')){
         payload.cut = opts.cut;
       }
