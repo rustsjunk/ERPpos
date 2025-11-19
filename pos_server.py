@@ -759,9 +759,23 @@ def api_cashier_login():
     return jsonify({'status': 'success', 'cashier': {'code': row['code'], 'name': row['name']}})
 
 
-def _generate_invoice_name(prefix: str) -> str:
+def _format_till_segment(till_value: Optional[str]) -> str:
+    if till_value is None:
+        return '000'
+    cleaned = ''.join(ch for ch in str(till_value) if ch.isdigit())
+    if not cleaned:
+        return '000'
+    if len(cleaned) >= 3:
+        return cleaned[-3:]
+    return cleaned.zfill(3)
+
+
+def _generate_invoice_name(till_number: Optional[str] = None) -> str:
     """Stable invoice names for offline receipts."""
-    return f"{prefix}-{datetime.now().strftime('%Y%m%d')}-{uuid4().hex[:8].upper()}"
+    date_segment = datetime.now().strftime('%Y%m%d')
+    till_segment = _format_till_segment(till_number)
+    unique_segment = uuid4().hex[:7].upper()
+    return f"{date_segment}{till_segment}{unique_segment}"
 
 
 def _extract_till_number(data: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -958,8 +972,9 @@ def _record_local_sale(invoice_name: str, data: dict) -> None:
         pass
 
 
-def _persist_local_sale(data: dict, prefix: str, mode_label: str) -> str:
-    invoice_name = _generate_invoice_name(prefix)
+def _persist_local_sale(data: dict, mode_label: str) -> str:
+    till_number = _extract_till_number(data)
+    invoice_name = _generate_invoice_name(till_number)
     _save_invoice_file(invoice_name, data, mode_label)
     _record_local_sale(invoice_name, data)
     return invoice_name
@@ -1021,14 +1036,12 @@ def create_sale():
     payments = data.get('payments') or []
 
     if POS_QUEUE_ONLY:
-        prefix = 'LOCAL'
         mode_label = 'local'
-        invoice_name = _persist_local_sale(data, prefix, mode_label)
+        invoice_name = _persist_local_sale(data, mode_label)
         return jsonify(_receipt_success_payload(invoice_name, 'Sale recorded (queued locally for sync)'))
     if USE_MOCK:
-        prefix = 'MOCK'
         mode_label = 'mock'
-        invoice_name = _persist_local_sale(data, prefix, mode_label)
+        invoice_name = _persist_local_sale(data, mode_label)
         return jsonify(_receipt_success_payload(invoice_name, 'Sale recorded (mock)'))
 
     try:
