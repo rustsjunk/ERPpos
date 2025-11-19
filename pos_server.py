@@ -774,7 +774,7 @@ def _generate_invoice_name(till_number: Optional[str] = None) -> str:
     """Stable invoice names for offline receipts."""
     date_segment = datetime.now().strftime('%Y%m%d')
     till_segment = _format_till_segment(till_number)
-    unique_segment = uuid4().hex[:7].upper()
+    unique_segment = uuid4().hex[:4].upper()
     return f"{date_segment}{till_segment}{unique_segment}"
 
 

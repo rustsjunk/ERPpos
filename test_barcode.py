@@ -90,10 +90,10 @@ def _build_barcode_sequence_code39(value: str) -> list[str]:
     return [
         "1b 40",        # ESC @ (init)
         "1d 68 50",     # GS h 80 (height)
-        "1d 77 01",     # GS w 1 (narrower modules)
-        "1d 48 02",     # GS H 2 (HRI below)
-        f"1d 6b 04 {value_hex} 00",
-        "0a",
+        "1d 77 02",     # GS w 2 (module width)
+        "1d 48 02",     # GS H 2 (HRI text below)
+        f"1d 6b 04 {value_hex} 00",  # GS k 4 d1..dk NUL
+        "0a",           # LF
     ]
 
 
