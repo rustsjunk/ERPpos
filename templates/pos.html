@@ -44,8 +44,33 @@
                         <input type="text" id="itemSearch" aria-label="Search items" class="form-control" placeholder="Search items...">
                     </div>
                 </div>
-                <div id="itemsGrid" class="row row-cols-1 row-cols-md-3 g-4">
-                    <!-- Items will be dynamically added here -->
+                <div class="product-panel row g-3">
+                    <div class="col-12 col-lg-4">
+                        <div class="card recent-items-card h-100">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center justify-content-between mb-2">
+                                    <h5 class="m-0">Recent sales</h5>
+                                    <small class="text-muted">Last 3</small>
+                                </div>
+                                <div id="recentSalesList" class="recent-sales-list">
+                                    <div class="text-muted">No recent sales yet.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-12 col-lg-8">
+                        <div class="card featured-items-card h-100">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center justify-content-between mb-3">
+                                    <h5 class="m-0">Browse products</h5>
+                                    <button id="shuffleFeaturedBtn" type="button" class="btn btn-sm btn-outline-secondary">Shuffle</button>
+                                </div>
+                                <div id="itemsGrid" class="row row-cols-1 row-cols-sm-2 row-cols-md-3 g-3" data-featured-codes="">
+                                    <!-- Items will be dynamically added here -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
             

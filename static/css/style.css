@@ -1,9 +1,106 @@
 ﻿.item-card {
     cursor: pointer;
-    transition: transform 0.2s;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 1px solid #dee2e6;
+    background: #fff;
 }
 .item-card:hover {
-    transform: scale(1.02);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+}
+.item-card-media {
+    position: relative;
+    padding-top: 65%;
+    background: #f8f9fa;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.item-card-media img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transition: transform 0.3s ease;
+}
+.item-card-media img:not([src]) {
+    opacity: 0;
+}
+.item-card-body {
+    padding: 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    flex: 1;
+}
+.item-card-title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0;
+}
+.item-card-price {
+    font-weight: 600;
+    color: #212529;
+}
+.item-card-stock {
+    font-size: 0.85rem;
+    color: #6c757d;
+}
+.product-panel {
+    margin-top: 0.5rem;
+}
+.recent-items-card .card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    min-height: 260px;
+}
+.recent-sales-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    flex: 1;
+    min-height: 160px;
+}
+.recent-sale {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+.recent-sale-thumb {
+    width: 48px;
+    height: 48px;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #f1f3f5;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.recent-sale-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.recent-sale-info {
+    flex: 1;
+}
+.recent-sale-name {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+.recent-sale-price {
+    font-size: 0.82rem;
+    color: #6c757d;
 }
 /* Cart card sizing to keep actions visible */
 #cartCard { position: sticky; top: 20px; max-height: calc(100vh - 40px); display: flex; flex-direction: column; }

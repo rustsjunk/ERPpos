@@ -19,19 +19,29 @@ except ImportError:
 # Load environment variables
 load_dotenv()
 
+def _env_string(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Return trimmed string-valued env vars, normalizing empty strings to None."""
+    raw = os.getenv(name, default)
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        clean = raw.strip()
+        return clean if clean else default
+    return raw
+
 app = Flask(__name__)
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # disable static caching during development
 
 # Behavior flags
-USE_MOCK = os.getenv('USE_MOCK', '1') == '1'  # default to mock POS with no ERP dependency
-POS_DB_PATH = os.getenv('POS_DB_PATH', 'pos.db')
-SCHEMA_PATH = os.getenv('POS_SCHEMA_PATH', 'schema.sql')
-PAUSED_DIR = os.getenv('POS_PAUSED_DIR', 'paused')
+USE_MOCK = (_env_string('USE_MOCK', '1') == '1')  # default to mock POS with no ERP dependency
+POS_DB_PATH = _env_string('POS_DB_PATH', 'pos.db')
+SCHEMA_PATH = _env_string('POS_SCHEMA_PATH', 'schema.sql')
+PAUSED_DIR = _env_string('POS_PAUSED_DIR', 'paused')
 
 # ERPNext API configuration (used only if USE_MOCK is False)
-ERPNEXT_URL = os.getenv('ERPNEXT_URL')
-API_KEY = os.getenv('ERPNEXT_API_KEY')
-API_SECRET = os.getenv('ERPNEXT_API_SECRET')
+ERPNEXT_URL = _env_string('ERPNEXT_URL')
+API_KEY = _env_string('ERPNEXT_API_KEY')
+API_SECRET = _env_string('ERPNEXT_API_SECRET')
 
 # Keep pos_service ERP env vars aligned with Flask env names
 if ERPNEXT_URL and not os.getenv('ERP_BASE'):
@@ -272,6 +282,9 @@ def _ensure_schema(conn: sqlite3.Connection):
     if not row:
         ps.init_db(conn, SCHEMA_PATH)
 
+def _has_erp_credentials() -> bool:
+    return bool(ERPNEXT_URL and API_KEY and API_SECRET)
+
 def _ensure_db_bootstrap():
     """Create schema + seed catalog/cashiers from ERPNext on first real deployment run."""
     global _BOOTSTRAP_DONE
@@ -288,10 +301,18 @@ def _ensure_db_bootstrap():
             need_items = not _db_has_items(conn)
             need_cashiers = not _db_has_cashiers(conn)
             if need_items or need_cashiers:
-                _bootstrap_sync_from_erp(conn, need_items=need_items, need_cashiers=need_cashiers)
+                if _has_erp_credentials():
+                    _bootstrap_sync_from_erp(conn, need_items=need_items, need_cashiers=need_cashiers)
+                else:
+                    app.logger.warning(
+                        "Skipping ERP bootstrap: ERPNEXT_URL/API credentials not configured (ERPNEXT_URL=%s, key=%s).",
+                        ERPNEXT_URL, bool(API_KEY and API_SECRET)
+                    )
             completed = True
         except Exception as exc:
-            app.logger.warning("Initial ERP bootstrap failed: %s", exc)
+            app.logger.warning(
+                "Initial ERP bootstrap failed: %s (verify ERPNEXT_URL + API key/secret)", exc
+            )
         finally:
             if conn:
                 conn.close()

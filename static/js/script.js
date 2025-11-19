@@ -46,6 +46,9 @@ let items = [];
 let cart = [];
 let customers = [];
 let currentCashier = null;
+const FEATURED_ITEM_LIMIT = 12;
+const RECENT_SALES_LIMIT = 3;
+let recentSalesHistory = [];
 
 // Checkout state
 let currentTender = '';
@@ -1341,15 +1344,9 @@ async function loadItems(){
 async function loadCustomers(){ try{ const r=await fetch('/api/customers'); const d=await r.json(); if(d.status==='success'){ customers=d.customers; const b=document.getElementById('customerSelect'); const t=document.getElementById('topCustomerSelect'); customers.forEach(c=>{ if(b){const o=document.createElement('option'); o.value=c.name;o.textContent=c.customer_name;b.appendChild(o);} if(t){const o2=document.createElement('option'); o2.value=c.name;o2.textContent=c.customer_name;t.appendChild(o2);} }); setDefaultCustomer(); } }catch(e){ console.error(e);} }
 
 function renderItems(list){
-  const grid=document.getElementById('itemsGrid'); if(!grid) return; grid.innerHTML='';
-  list.forEach(it=>{
-    const d=document.createElement('div'); d.className='col';
-    const priceHtml = formatItemPrice(it);
-    const stockNote = (it.variant_stock != null) ? `<p class="card-text"><small>Stock: ${it.variant_stock}</small></p>` : `<p class="card-text"><small>${it.stock_uom}</small></p>`;
-    d.innerHTML = `<div class="card item-card h-100"><div class="card-body"><h5 class="card-title">${it.item_name}</h5><p class="card-text">${priceHtml}</p>${stockNote}</div></div>`;
-    d.onclick=()=>openProduct(it);
-    grid.appendChild(d);
-  });
+  items = list || [];
+  renderFeaturedPanel(false);
+  renderRecentItems();
 }
 
 function formatItemPrice(it){
@@ -1371,6 +1368,180 @@ function formatItemPrice(it){
     return money(it.standard_rate);
   }
   return '-';
+}
+
+function renderFeaturedPanel(shuffle = false){
+  const grid=document.getElementById('itemsGrid');
+  if(!grid){
+    return;
+  }
+  if(!items.length){
+    grid.innerHTML='';
+    return;
+  }
+  const selection=selectFeaturedItems(shuffle);
+  grid.innerHTML='';
+  selection.forEach(it=>{
+    const wrapper=document.createElement('div');
+    wrapper.className='col';
+    const card=document.createElement('div');
+    card.className='card item-card h-100';
+    const media=document.createElement('div');
+    media.className='item-card-media';
+    const imageUrl=findItemImageUrl(it);
+    if(imageUrl){
+      const img=document.createElement('img');
+      img.src=imageUrl;
+      img.alt=it.item_name || it.name || it.item_code || 'Product image';
+      img.loading='lazy';
+      media.appendChild(img);
+    } else {
+      const placeholder=document.createElement('span');
+      placeholder.className='text-muted small';
+      placeholder.textContent='No image';
+      media.appendChild(placeholder);
+    }
+    card.appendChild(media);
+    const body=document.createElement('div');
+    body.className='card-body item-card-body';
+    const title=document.createElement('p');
+    title.className='item-card-title';
+    title.textContent=it.item_name || it.name || it.item_code || '';
+    const priceEl=document.createElement('div');
+    priceEl.className='item-card-price';
+    priceEl.textContent=formatItemPrice(it);
+    body.appendChild(title);
+    body.appendChild(priceEl);
+    const stockLabel=(it.variant_stock != null) ? `Stock: ${it.variant_stock}` : (it.stock_uom || '');
+    if(stockLabel){
+      const stockEl=document.createElement('p');
+      stockEl.className='card-text item-card-stock small mb-0';
+      stockEl.textContent=stockLabel;
+      body.appendChild(stockEl);
+    }
+    card.appendChild(body);
+    wrapper.appendChild(card);
+    wrapper.addEventListener('click', ()=>openProduct(it));
+    grid.appendChild(wrapper);
+  });
+}
+
+function selectFeaturedItems(shuffle){
+  const grid=document.getElementById('itemsGrid');
+  const explicit=(grid&&grid.dataset?grid.dataset.featuredCodes:'')||'';
+  const codes=explicit.split(',').map(value=>value.trim()).filter(Boolean);
+  const selection=[];
+  const used=new Set();
+  codes.forEach(code=>{
+    const match=findItemByCode(code);
+    if(match && !used.has(match.item_code)){
+      selection.push(match);
+      used.add(match.item_code);
+    }
+  });
+  const pool=items.filter(it=>!used.has(it.item_code));
+  const ordered=shuffle?shuffleArray(pool):pool;
+  for(const candidate of ordered){
+    if(selection.length>=FEATURED_ITEM_LIMIT){
+      break;
+    }
+    if(!used.has(candidate.item_code)){
+      selection.push(candidate);
+      used.add(candidate.item_code);
+    }
+  }
+  return selection.slice(0, FEATURED_ITEM_LIMIT);
+}
+
+function shuffleArray(arr){
+  const copy=[]; copy.push(...(arr||[]));
+  for(let i=copy.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [copy[i],copy[j]]=[copy[j],copy[i]];
+  }
+  return copy;
+}
+
+function renderRecentItems(){
+  const container=document.getElementById('recentSalesList');
+  if(!container){
+    return;
+  }
+  container.innerHTML='';
+  if(!recentSalesHistory.length){
+    const placeholder=document.createElement('div');
+    placeholder.className='text-muted';
+    placeholder.textContent='No recent sales yet.';
+    container.appendChild(placeholder);
+    return;
+  }
+  recentSalesHistory.forEach(entry=>{
+    const row=document.createElement('div');
+    row.className='recent-sale';
+    const thumb=document.createElement('div');
+    thumb.className='recent-sale-thumb';
+    if(entry.image){
+      const img=document.createElement('img');
+      img.src=entry.image;
+      img.alt=entry.name || entry.item_code || 'Recent item';
+      img.loading='lazy';
+      thumb.appendChild(img);
+    } else {
+      thumb.textContent=(entry.name||entry.item_code||'')[0] || '';
+    }
+    const info=document.createElement('div');
+    info.className='recent-sale-info';
+    const nameEl=document.createElement('p');
+    nameEl.className='recent-sale-name';
+    nameEl.textContent=entry.name || entry.item_code || 'Unknown item';
+    const priceEl=document.createElement('div');
+    priceEl.className='recent-sale-price';
+    priceEl.textContent=money(Number(entry.rate||0));
+    info.appendChild(nameEl);
+    info.appendChild(priceEl);
+    row.appendChild(thumb);
+    row.appendChild(info);
+    container.appendChild(row);
+  });
+}
+
+function trackRecentItems(receiptItems){
+  if(!Array.isArray(receiptItems) || !receiptItems.length){
+    return;
+  }
+  receiptItems.forEach(line=>{
+    const code=line.code || line.item_code || line.item_id;
+    if(!code){
+      return;
+    }
+    const idx=recentSalesHistory.findIndex(entry=>entry.item_code===code);
+    if(idx!==-1){
+      recentSalesHistory.splice(idx,1);
+    }
+    const image=findItemImageUrl(code);
+    recentSalesHistory.unshift({
+      item_code: code,
+      name: line.name || line.item_name || code,
+      rate: Number(line.rate||0),
+      image
+    });
+  });
+  if(recentSalesHistory.length>RECENT_SALES_LIMIT){
+    recentSalesHistory.length=RECENT_SALES_LIMIT;
+  }
+  renderRecentItems();
+}
+
+function findItemImageUrl(itemOrCode){
+  const code=typeof itemOrCode==='string' ? itemOrCode : (itemOrCode && (itemOrCode.item_code || itemOrCode.code || itemOrCode.name || ''));
+  if(!code){
+    return '';
+  }
+  const match=findItemByCode(code);
+  if(match){
+    return match.image || match.image_url || '';
+  }
+  return '';
 }
 
 function addToCart(item) {
@@ -1597,6 +1768,8 @@ function bindEvents(){
   if(returnFindBtn){ returnFindBtn.addEventListener('click', ()=>findReturnSale()); }
   if(returnScanInput){ returnScanInput.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); findReturnSale(); } }); }
   if(returnLoadBtn){ returnLoadBtn.addEventListener('click', ()=>loadReturnAsRefund()); }
+  const shuffleFeaturedBtn=document.getElementById('shuffleFeaturedBtn');
+  if(shuffleFeaturedBtn){ shuffleFeaturedBtn.addEventListener('click', ()=>renderFeaturedPanel(true)); }
   if(settingsBtn&&menuOverlay){ settingsBtn.addEventListener('click',()=>{ showMenu(); }); }
   if(menuClose&&menuOverlay){ menuClose.addEventListener('click',()=>{ menuOverlay.style.display='none'; }); }
   if(openSettingsBtn){ openSettingsBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView){ settingsView.style.display='block'; populateSettingsForm(); } }); }
@@ -2667,6 +2840,7 @@ async function completeSaleFromOverlay() {
     hideCheckoutOverlay();
     updateCashSection();
     lastReceiptInfo = info;
+    trackRecentItems(receiptItems);
     showReceiptOverlay(info);
     clearSaleFxState();
       if (settings.auto_print) {
