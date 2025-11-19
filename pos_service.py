@@ -649,6 +649,23 @@ def _erp_get(url_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
+
+def _describe_http_error(exc: urllib.error.HTTPError) -> str:
+    """Return a short description/body snippet for logging HTTP errors."""
+    detail = ""
+    try:
+        body = exc.read()
+        if body:
+            detail = body.decode("utf-8", errors="ignore")
+    except Exception:
+        detail = ""
+    if not detail:
+        detail = str(getattr(exc, "reason", "")) or ""
+    detail = detail.strip()
+    if detail and len(detail) > 400:
+        detail = detail[:400] + "…"
+    return detail
+
 def _erp_get_doc(doctype: str, name: str) -> Dict[str, Any]:
     """Fetch a single document (e.g., Item/SKU)"""
     if not ERP_BASE:
@@ -751,7 +768,11 @@ def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tup
             data = _erp_get("/api/resource/Item Variant Attribute", params).get("data", [])
             return data
         except urllib.error.HTTPError as exc:
-            print(f"Failed to fetch variant attribute child rows for {item_id}: {exc}", file=sys.stderr)
+            detail = _describe_http_error(exc)
+            msg = f"Failed to fetch variant attribute child rows for {item_id}: {exc}"
+            if detail:
+                msg += f" | body: {detail}"
+            print(msg, file=sys.stderr)
         except Exception as exc:
             print(f"Failed to fetch variant attribute child rows for {item_id}: {exc}", file=sys.stderr)
         return None
@@ -766,6 +787,12 @@ def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tup
             doc = _erp_get_doc("Item", item_id)
             attr_rows = doc.get("attributes") or doc.get("variant_attributes") or doc.get("attributes_json") or []
         except Exception as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                detail = _describe_http_error(exc)
+                msg = f"Failed to fetch Item doc for {item_id}: {exc}"
+                if detail:
+                    msg += f" | body: {detail}"
+                print(msg, file=sys.stderr)
             attr_rows = _fallback_variant_attr_rows(item_id)
             if attr_rows is None:
                 # As a last resort, try to infer from the variant name
