@@ -934,6 +934,8 @@ function decorateWithReceiptLayout(body, info = {}) {
   return assembleLineSections(body, header, footer);
 }
 
+const DRAWER_PULSE_HEX = '1B 70 00 19 FA';
+
 const receiptAgentClient = (() => {
   const rawUrl = (typeof window !== 'undefined' ? window.POS_PRINT_AGENT_URL : '') || '';
   const endpoint = rawUrl.trim();
@@ -964,9 +966,15 @@ const receiptAgentClient = (() => {
         text: receiptBuilder.buildReceiptPayload(info, opts),
         line_feeds: opts.line_feeds ?? 6
       };
-      const extraHex = receiptBuilder.barcodeHexFrom(info);
-      if(extraHex.length){
-        payload.hex = extraHex;
+      const hexChunks = receiptBuilder.barcodeHexFrom(info);
+      if(hexChunks.length){
+        payload.hex = hexChunks.slice();
+      }
+      if(Array.isArray(opts.hex) && opts.hex.length){
+        payload.hex = (payload.hex || []).concat(opts.hex);
+      }
+      if(opts.openDrawer){
+        payload.hex = (payload.hex || []).concat(DRAWER_PULSE_HEX);
       }
       if(Object.prototype.hasOwnProperty.call(opts, 'cut')){
         payload.cut = opts.cut;
@@ -988,6 +996,9 @@ const receiptAgentClient = (() => {
     },
     async cut() {
       return await send({ text: '', line_feeds: 0, cut: true });
+    },
+    async kickDrawer() {
+      return await send({ text: '', hex: [DRAWER_PULSE_HEX], line_feeds: 0, cut: false });
     }
   };
 })();
@@ -1006,6 +1017,18 @@ async function cutReceiptIfReady() {
     await receiptAgentClient.cut();
   } catch(err) {
     warn('Receipt agent cut failed', err);
+  }
+}
+
+async function pulseCashDrawer(){
+  if(!receiptAgentClient || typeof receiptAgentClient.kickDrawer !== 'function' || !receiptAgentClient.isReady()){
+    return false;
+  }
+  try{
+    return await receiptAgentClient.kickDrawer();
+  }catch(err){
+    warn('Drawer pulse failed', err);
+    return false;
   }
 }
 
@@ -1055,7 +1078,7 @@ async function ensureReceiptPrinted(info, opts = {}){
 function scheduleAutoReceiptPrint(info){
   if(!info) return;
   setTimeout(async ()=>{
-    const ok = await ensureReceiptPrinted(info, { gift:false, openDrawer: wantsDrawerPulseFor(info) });
+    const ok = await ensureReceiptPrinted(info, { gift:false });
     if(!ok){
       alert('Unable to print receipt. Please ensure the local receipt agent is running and try again.');
     }
@@ -1069,13 +1092,13 @@ function handleReceiptPrintRequest(info, wantsGift){
   }
   (async ()=>{
     if(wantsGift){
-      const giftOk = await ensureReceiptPrinted(target, { gift:true, openDrawer:false });
-      const standardOk = await ensureReceiptPrinted(target, { gift:false, openDrawer: wantsDrawerPulseFor(target) });
+      const giftOk = await ensureReceiptPrinted(target, { gift:true });
+      const standardOk = await ensureReceiptPrinted(target, { gift:false });
       if(!giftOk || !standardOk){
         alert('Gift or standard receipt failed to print. Please retry with the local receipt agent.');
       }
     }else{
-      const ok = await ensureReceiptPrinted(target, { gift:false, openDrawer: wantsDrawerPulseFor(target) });
+      const ok = await ensureReceiptPrinted(target, { gift:false });
       if(!ok){
         alert('Receipt failed to print. Please retry with the local receipt agent.');
       }
@@ -1602,7 +1625,7 @@ function trackRecentItems(receiptItems){
     if(idx!==-1){
       recentSalesHistory.splice(idx,1);
     }
-    const image=findItemImageUrl(code);
+    const image=line.image || findItemImageUrl(code);
     recentSalesHistory.unshift({
       item_code: code,
       name: line.name || line.item_name || code,
@@ -2303,13 +2326,13 @@ function normalizeMultilineInput(value){
   if(typeof value !== 'string') return '';
   return value.replace(/\r\n/g, '\n');
 }
-function shouldOpenDrawerAfterPrint(){
-  return !!settings.open_drawer_after_print;
+function shouldOpenDrawerAfterSale(){
+  return settings.open_drawer_after_print !== false;
 }
 function wantsDrawerPulseFor(info){
   if(!info) return false;
   if(info.isRefund) return false;
-  return shouldOpenDrawerAfterPrint();
+  return shouldOpenDrawerAfterSale();
 }
 let snowLayerEl = null;
 let snowInterval = null;
@@ -2878,7 +2901,8 @@ async function completeSaleFromOverlay() {
       rate: Number(item.rate||0),
       refund: !!item.refund,
       amount: Number(item.qty||0) * Number(item.rate||0) * (item.refund ? -1 : 1),
-      vat_rate: effectiveVatRate(item.vat_rate)
+      vat_rate: effectiveVatRate(item.vat_rate),
+      image: item.image || findItemImageUrl(item.item_code)
     }));
     const receiptPayments = payments.map(p=>({
       mode: p.mode_of_payment,
@@ -2927,6 +2951,9 @@ async function completeSaleFromOverlay() {
     trackRecentItems(receiptItems);
     showReceiptOverlay(info);
     clearSaleFxState();
+    if(wantsDrawerPulseFor(info)){
+      pulseCashDrawer().catch(err=> warn('Drawer pulse failed', err));
+    }
       if (settings.auto_print) {
         scheduleAutoReceiptPrint(info);
       }
