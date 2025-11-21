@@ -823,6 +823,10 @@ const receiptBuilder = (() => {
       const nameLines = wrapText(item.name || item.item_name || item.code || 'Item');
       if(!nameLines.length) nameLines.push('Item');
       nameLines.forEach((line, idx)=> write(idx ? `  ${line}` : line));
+      const styleLabel = (item.style_code || item.style || item.StyleCode || '').trim();
+      if(styleLabel){
+        write(`Style: ${styleLabel}`);
+      }
       const qty = Number(item.qty||0);
       const rate = Number(item.rate||0);
       const lineTotal = Number(item.amount!=null ? item.amount : qty * rate * (item.refund ? -1 : 1));
@@ -1477,6 +1481,33 @@ function formatItemPrice(it){
   return '-';
 }
 
+function formatVariantPriceRange(min, max, fallback){
+  if(min != null && max != null){
+    if(Number(min) === Number(max)){
+      return money(min);
+    }
+    return `${money(min)} - ${money(max)}`;
+  }
+  if(min != null){
+    return money(min);
+  }
+  if(max != null){
+    return money(max);
+  }
+  return fallback || '-';
+}
+
+function clearVariantMatrix(){
+  const h=document.getElementById('matrixHead');
+  const b=document.getElementById('matrixBody');
+  if(h){
+    h.innerHTML='';
+  }
+  if(b){
+    b.innerHTML='<tr><td colspan="99" class="text-muted text-center small" style="padding:12px;">Loading variant data…</td></tr>';
+  }
+}
+
 function renderFeaturedPanel(shuffle = false){
   const grid=document.getElementById('itemsGrid');
   if(!grid){
@@ -1809,25 +1840,26 @@ async function tryAddVariantByBarcode(code){
   const v = d.variant;
   const existing = cart.find(ci => ci.item_code === v.item_id && !ci.refund);
   const rate = Number(v.rate||0);
-  if (existing){
-    existing.qty += 1;
-    existing.amount = existing.qty * existing.rate;
-  } else {
-    cart.push({
-      item_code: v.item_id,
-      item_name: displayNameFrom(v.name, v.attributes||{}),
-      qty: 1,
-      rate: rate,
-      original_rate: rate,
-      amount: rate,
-      image: null,
-      variant: v.attributes || {},
-      brand: null,
-      item_group: v.item_group || null,
-      vat_rate: effectiveVatRate(v.vat_rate),
-      refund: false
-    });
-  }
+    if (existing){
+      existing.qty += 1;
+      existing.amount = existing.qty * existing.rate;
+    } else {
+      cart.push({
+        item_code: v.item_id,
+        item_name: displayNameFrom(v.name, v.attributes||{}),
+        qty: 1,
+        rate: rate,
+        original_rate: rate,
+        amount: rate,
+        image: null,
+        variant: v.attributes || {},
+        brand: null,
+        item_group: v.item_group || null,
+        vat_rate: effectiveVatRate(v.vat_rate),
+        style_code: v.style_code || v.custom_style_code || '',
+        refund: false
+      });
+    }
     updateCartDisplay();
     const feedbackName = displayNameFrom(v.name || code, v.attributes||{});
     showBarcodeFeedback(`Added ${feedbackName}`, false);
@@ -2488,19 +2520,21 @@ function selectProduct(name){ const it=items.find(x=>x.name===name); if(it) open
 // Product detail overlay
 let currentProduct=null;
 async function openProduct(item){ currentProduct=item; const o=document.getElementById('productOverlay'), t=document.getElementById('productTitle'), im=document.getElementById('productImage'), br=document.getElementById('productBrand'), pr=document.getElementById('productPrice'); if(!o){ err('loginOverlay element missing'); return; }
-  neutralizeForeignOverlays(); t.textContent=item.item_name; br.textContent=item.brand||''; pr.textContent=money(item.standard_rate); im.style.backgroundImage=item.image?`url('${item.image}')`:''; o.style.display='flex';
+  neutralizeForeignOverlays(); t.textContent=item.item_name; br.textContent=item.brand||''; const fallbackPrice=formatItemPrice(item); if(pr) pr.textContent=fallbackPrice; im.style.backgroundImage=item.image?`url('${item.image}')`:''; o.style.display='flex';
   o.style.visibility='visible';
   o.style.opacity='1';
-  try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} try{ const r=await fetch(`/api/item_matrix?item=${encodeURIComponent(item.name)}`); const d=await r.json(); if(d.status==='success') renderVariantMatrix(item,d.data);}catch(e){ console.error(e);} }
+  try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} clearVariantMatrix(); try{ const r=await fetch(`/api/item_matrix?item=${encodeURIComponent(item.name)}`); const d=await r.json(); if(d.status==='success'){ renderVariantMatrix(item,d.data); if(pr){ pr.textContent=formatVariantPriceRange(d.data.price_min,d.data.price_max,fallbackPrice); } } }catch(e){ console.error(e);} }
 function hideProductOverlay(){ const o=document.getElementById('productOverlay'); if(o) o.style.display='none'; }
 function renderVariantMatrix(item,m){ 
   const h=document.getElementById('matrixHead'), b=document.getElementById('matrixBody'); 
   if(!h||!b) return; 
   h.innerHTML=''; 
+  const headerLabels=['Colour','Style','Width',...(m.sizes||[])];
   const tr=document.createElement('tr'); 
-  ['Colour','Width',...(m.sizes||[])].forEach(x=>{ const th=document.createElement('th'); th.textContent=x; tr.appendChild(th);}); 
+  headerLabels.forEach(x=>{ const th=document.createElement('th'); th.textContent=x; tr.appendChild(th);}); 
   h.appendChild(tr); 
   b.innerHTML=''; 
+  const styleCodes=(m.style_codes||{}); 
   (m.colors||[]).forEach(color=>{ 
     (m.widths||[]).forEach(width=>{ 
       const row=document.createElement('tr'); 
@@ -2519,6 +2553,11 @@ function renderVariantMatrix(item,m){
         }
       });
       row.appendChild(tc); 
+      const styleCell=document.createElement('td');
+      const styleText=styleCodes[color]||'';
+      styleCell.className='variant-style-cell';
+      styleCell.textContent=styleText;
+      row.appendChild(styleCell);
       const tw=document.createElement('th'); 
       tw.textContent=width; 
       row.appendChild(tw); 
@@ -2549,20 +2588,21 @@ function addVariantToCart(item, variant, cellEl, variantRec){
     existing.qty += 1;
     existing.amount = existing.qty * existing.rate;
   } else {
-    cart.push({
-      item_code: code,
-      item_name: name,
-      qty: 1,
-      rate,
-      original_rate: rate,
-      amount: rate,
-      image: variantImage,
-      brand: item.brand || null,
-      item_group: item.item_group || null,
-      variant,
-      vat_rate: effectiveVatRate((variantRec && variantRec.vat_rate) || item.vat_rate),
-      refund: false
-    });
+      cart.push({
+        item_code: code,
+        item_name: name,
+        qty: 1,
+        rate,
+        original_rate: rate,
+        amount: rate,
+        image: variantImage,
+        brand: item.brand || null,
+        item_group: item.item_group || null,
+        variant,
+        vat_rate: effectiveVatRate((variantRec && variantRec.vat_rate) || item.vat_rate),
+        style_code: (variantRec && variantRec.style_code) || item.custom_style_code || '',
+        refund: false
+      });
   }
   updateCartDisplay();
   try{ if(cellEl){ cellEl.classList.add('added'); setTimeout(()=>cellEl.classList.remove('added'), 700); } }catch(_){ }
@@ -2902,7 +2942,8 @@ async function completeSaleFromOverlay() {
       refund: !!item.refund,
       amount: Number(item.qty||0) * Number(item.rate||0) * (item.refund ? -1 : 1),
       vat_rate: effectiveVatRate(item.vat_rate),
-      image: item.image || findItemImageUrl(item.item_code)
+      image: item.image || findItemImageUrl(item.item_code),
+      style_code: item.style_code || ''
     }));
     const receiptPayments = payments.map(p=>({
       mode: p.mode_of_payment,
@@ -3474,6 +3515,7 @@ function loadReturnAsRefund(){
       variant: {},
       item_group: null,
       vat_rate: effectiveVatRate(vatAttr === null || vatAttr === '' ? null : Number(vatAttr)),
+      style_code: '',
       refund: true
     });
   });

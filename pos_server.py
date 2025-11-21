@@ -1322,7 +1322,7 @@ def get_customers():
         response = _erp_session_get(
             f"{ERPNEXT_URL}/api/resource/Customer",
             params={
-                'fields': '["name", "customer_name", "email_id", "phone", "disabled", "modified"]',
+                'fields': '["name", "customer_name"]',
                 'filters': '[["disabled","=",0]]'
             },
             timeout=15
@@ -1580,6 +1580,7 @@ def item_matrix():
              v.name,
              v.vat_rate,
              v.image_url,
+             v.custom_style_code,
              (SELECT price_effective FROM v_item_prices p WHERE p.item_id=v.item_id) AS rate,
              COALESCE((SELECT qty FROM stock s WHERE s.item_id=v.item_id AND s.warehouse='{POS_WAREHOUSE}'), 0) AS qty
       FROM items v
@@ -1587,6 +1588,9 @@ def item_matrix():
     """
     variants = {}
     colors=set(); widths=set(); sizes=set()
+    style_codes: Dict[str, str] = {}
+    price_min = None
+    price_max = None
     rows = conn.execute(qv, (template_id,)).fetchall()
     attr_map = {}
     if rows:
@@ -1606,6 +1610,9 @@ def item_matrix():
         key = f"{color}|{width}|{size}"
         # Get variant image (with absolute URL), fallback to parent image
         variant_image = _absolute_image_url(r['image_url']) if r['image_url'] else None
+        style_code = (r["custom_style_code"] or '').strip() if r["custom_style_code"] else ''
+        if style_code:
+            style_codes.setdefault(color, style_code)
         variants[key] = {
             'item_id': r['item_id'],
             'item_name': r['name'],
@@ -1614,6 +1621,14 @@ def item_matrix():
             'vat_rate': float(r['vat_rate']) if r['vat_rate'] is not None else None,
             'image': variant_image
         }
+        if style_code:
+            variants[key]['style_code'] = style_code
+        rate_value = variants[key]['rate']
+        if rate_value is not None:
+            if price_min is None or rate_value < price_min:
+                price_min = rate_value
+            if price_max is None or rate_value > price_max:
+                price_max = rate_value
     data = {
         'item': template_id,
         'sizes': sorted(sizes, key=lambda x: (len(x), x)),
@@ -1623,6 +1638,9 @@ def item_matrix():
         'variants': variants,
         'price': None,
         'image': None,
+        'price_min': price_min,
+        'price_max': price_max,
+        'style_codes': style_codes,
     }
     return jsonify({'status': 'success', 'data': data})
 
@@ -1645,6 +1663,7 @@ def api_lookup_barcode():
                i.name,
                i.item_group,
                i.vat_rate,
+               i.custom_style_code,
                (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
                COALESCE((SELECT qty FROM stock s WHERE s.item_id=i.item_id AND s.warehouse='Shop'), 0) AS qty
         FROM barcodes b
@@ -1662,6 +1681,7 @@ def api_lookup_barcode():
                        i.name,
                        i.item_group,
                        i.vat_rate,
+                       i.custom_style_code,
                        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
                        COALESCE((SELECT qty FROM stock s WHERE s.item_id=i.item_id AND s.warehouse='Shop'), 0) AS qty
                 FROM items i
@@ -1674,14 +1694,16 @@ def api_lookup_barcode():
     if not row:
         return jsonify({'status': 'error', 'message': 'Not found'}), 404
     attrs = _variant_attrs_dict(conn, row['item_id'])
+    style_code = (row['custom_style_code'] or '').strip() if row['custom_style_code'] else ''
     out = {
-        'item_id': row['item_id'],
-        'name': row['name'],
-        'rate': float(row['rate']) if row['rate'] is not None else 0.0,
-        'vat_rate': float(row['vat_rate']) if row['vat_rate'] is not None else None,
-        'qty': float(row['qty']) if row['qty'] is not None else 0.0,
-        'item_group': row['item_group'],
-        'attributes': attrs,
+      'item_id': row['item_id'],
+      'name': row['name'],
+      'rate': float(row['rate']) if row['rate'] is not None else 0.0,
+      'vat_rate': float(row['vat_rate']) if row['vat_rate'] is not None else None,
+      'qty': float(row['qty']) if row['qty'] is not None else 0.0,
+      'item_group': row['item_group'],
+      'attributes': attrs,
+      'style_code': style_code
     }
     return jsonify({'status': 'success', 'variant': out})
 
