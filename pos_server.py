@@ -377,6 +377,23 @@ def _db_items_payload(conn: sqlite3.Connection):
         if row["custom_simple_colour"]:
             entry["custom_simple_colour"].add(str(row["custom_simple_colour"]))
 
+    barcode_map: Dict[str, Set[str]] = {}
+    q_barcodes = """
+      SELECT v.parent_id AS template_id, b.barcode
+      FROM barcodes b
+      JOIN items v ON v.item_id = b.item_id
+      WHERE v.parent_id IS NOT NULL
+        AND b.barcode IS NOT NULL
+    """
+    for row in conn.execute(q_barcodes):
+        tpl = row["template_id"]
+        if not tpl:
+            continue
+        bc = (row["barcode"] or '').strip()
+        if not bc:
+            continue
+        barcode_map.setdefault(tpl, set()).add(bc)
+
     out = []
     for r in conn.execute(q_tpl):
         attrs = {}
@@ -393,6 +410,7 @@ def _db_items_payload(conn: sqlite3.Connection):
         display_rate = template_rate if template_rate is not None else (min_var if min_var is not None else None)
 
         custom_entry = custom_agg.get(r["name"])
+        barcodes = sorted(barcode_map.get(r["name"] , set()))
         payload = {
             "name": r["name"],
             "item_code": r["item_code"],
@@ -407,11 +425,12 @@ def _db_items_payload(conn: sqlite3.Connection):
                 custom_entry["custom_simple_colour"] if custom_entry else None
             ),
             "vat_rate": float(r["vat_rate"]) if r["vat_rate"] is not None else None,
-            "barcode": None,
+            "barcode": barcodes[0] if barcodes else None,
             "standard_rate": float(display_rate) if display_rate is not None else None,
             "stock_uom": r["stock_uom"],
             "image": _absolute_image_url(r["image"]),
             "attributes": attrs,
+            "barcodes": barcodes,
             # expose variant price bounds and aggregated stock for UI use
             "price_min": float(min_var) if min_var is not None else None,
             "price_max": float(max_var) if max_var is not None else None,
