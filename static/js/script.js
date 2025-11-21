@@ -4149,10 +4149,55 @@ function renderInvoiceDetail(inv){
 // them to the appropriate input/handler (works even if no field is focused).
 let __scanBuffer = "";
 let __scanLastTs = 0;
+let __scanFlushTimer = null;
+let __scanStartTs = 0;
+const SCAN_COMPLETE_DELAY_MS = 80;
+const SCAN_MIN_LENGTH = 3;
+const SCAN_MAX_DURATION_MS = 500;
+const SCAN_RESET_GAP_MS = 400;
 
 function __isOverlayVisible(id){
   const el = document.getElementById(id);
   return !!(el && el.style && el.style.display !== 'none');
+}
+
+function __resetScanState(){
+  if(__scanFlushTimer){
+    clearTimeout(__scanFlushTimer);
+    __scanFlushTimer = null;
+  }
+  __scanBuffer = "";
+  __scanStartTs = 0;
+}
+
+function __flushScanBuffer(triggeredByEnter = false){
+  if(__scanFlushTimer){
+    clearTimeout(__scanFlushTimer);
+    __scanFlushTimer = null;
+  }
+  const buffer = __scanBuffer;
+  const duration = __scanStartTs ? (Date.now() - __scanStartTs) : 0;
+  __scanBuffer = "";
+  __scanStartTs = 0;
+  if(!buffer){
+    return false;
+  }
+  const withinDuration = duration <= SCAN_MAX_DURATION_MS;
+  const shouldHandle = buffer.length >= SCAN_MIN_LENGTH && (triggeredByEnter || withinDuration);
+  if(!shouldHandle){
+    return false;
+  }
+  handleGlobalScan(buffer);
+  return true;
+}
+
+function __scheduleScanFlush(){
+  if(__scanFlushTimer){
+    clearTimeout(__scanFlushTimer);
+  }
+  __scanFlushTimer = setTimeout(()=>{
+    __flushScanBuffer(false);
+  }, SCAN_COMPLETE_DELAY_MS);
 }
 
 function handleGlobalScan(code){
@@ -4212,16 +4257,17 @@ document.addEventListener('keydown', (e)=>{
     const inEditableNonScan = isInput && (!active || !allowedWhenFocused.has(active.id));
 
     const now = Date.now();
-    if(now - __scanLastTs > 100) __scanBuffer = ""; // gap too large => new scan
+    if(now - __scanLastTs > SCAN_RESET_GAP_MS){
+      __resetScanState();
+    }
     __scanLastTs = now;
 
     if(e.key === 'Enter'){
-      if(__scanBuffer.length >= 5 && !inEditableNonScan){
-        handleGlobalScan(__scanBuffer);
-        __scanBuffer = "";
-        if(!isInput) e.preventDefault();
+      if(!inEditableNonScan){
+        const handled = __flushScanBuffer(true);
+        if(handled && !isInput) e.preventDefault();
       } else {
-        __scanBuffer = "";
+        __resetScanState();
       }
       return;
     }
@@ -4229,7 +4275,11 @@ document.addEventListener('keydown', (e)=>{
     // Only collect printable characters when not typing in regular inputs
     if(inEditableNonScan) return;
     if(e.key && e.key.length === 1){
+      if(!__scanBuffer){
+        __scanStartTs = now;
+      }
       __scanBuffer += e.key;
+      __scheduleScanFlush();
     }
   }catch(_){ /* ignore */ }
 });

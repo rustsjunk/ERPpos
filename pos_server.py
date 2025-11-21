@@ -904,7 +904,7 @@ def get_items():
                 f"{ERPNEXT_URL}/api/resource/Item",
                 headers=_erp_headers(),
                 params={
-                    'fields': '["name", "item_code", "item_name", "brand", "custom_style_code", "custom_simple_colour", "item_group", "image", "standard_rate", "stock_uom", "barcode"]',
+                    'fields': '["name", "item_code", "item_name", "brand", "custom_style_code", "custom_simple_colour", "item_group", "image", "standard_rate", "stock_uom", "barcode", "barcodes"]',
                     'filters': '[["is_sales_item","=",1],["disabled","=",0]]'
                 },
                 timeout=15
@@ -1680,7 +1680,7 @@ def api_lookup_barcode():
         """
         SELECT i.item_id,
                i.name,
-               i.item_group,
+               i.brand,
                i.vat_rate,
                i.custom_style_code,
                (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
@@ -1698,7 +1698,7 @@ def api_lookup_barcode():
                 """
                 SELECT i.item_id,
                        i.name,
-                       i.item_group,
+                       i.brand,
                        i.vat_rate,
                        i.custom_style_code,
                        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
@@ -1714,13 +1714,15 @@ def api_lookup_barcode():
         return jsonify({'status': 'error', 'message': 'Not found'}), 404
     attrs = _variant_attrs_dict(conn, row['item_id'])
     style_code = (row['custom_style_code'] or '').strip() if row['custom_style_code'] else ''
+    brand = row['brand'] if row['brand'] else None
     out = {
       'item_id': row['item_id'],
       'name': row['name'],
       'rate': float(row['rate']) if row['rate'] is not None else 0.0,
       'vat_rate': float(row['vat_rate']) if row['vat_rate'] is not None else None,
       'qty': float(row['qty']) if row['qty'] is not None else 0.0,
-      'item_group': row['item_group'],
+      'brand': brand,
+      'item_group': brand,
       'attributes': attrs,
       'style_code': style_code
     }

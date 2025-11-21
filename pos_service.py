@@ -188,6 +188,27 @@ def upsert_barcode(conn: sqlite3.Connection, barcode: str, item_id: str):
     """
     conn.execute(sql, (barcode, item_id))
 
+def _ingest_child_barcodes(conn: sqlite3.Connection, child_rows: Any, item_id: str):
+    if not conn or not item_id or not child_rows:
+        return
+    rows = child_rows if isinstance(child_rows, list) else [child_rows]
+    for entry in rows:
+        if not entry:
+            continue
+        if isinstance(entry, dict):
+            bc = entry.get("barcode")
+        else:
+            bc = entry
+        if not bc:
+            continue
+        try:
+            bc_txt = str(bc).strip()
+        except Exception:
+            bc_txt = None
+        if not bc_txt:
+            continue
+        upsert_barcode(conn, bc_txt, item_id)
+
 def ensure_barcode_placeholder(conn: sqlite3.Connection, barcode: Optional[str], item_id: str):
     """Insert a fallback barcode (item_code) if none exists, without overwriting real barcodes."""
     if not barcode or not item_id:
@@ -693,7 +714,7 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
         filters = [["modified",">=",last_mod]]
     fields = [
         "name","item_code","item_name","brand","custom_style_code","custom_simple_colour",
-        "has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified"
+        "has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified","barcodes"
     ]
     params = {"fields": json.dumps(fields), "filters": json.dumps(filters), "limit_page_length": limit, "order_by": "modified asc, name asc"}
     data = _erp_get("/api/resource/Item", params).get("data", [])
@@ -728,6 +749,7 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
         ensure_barcode_placeholder(conn, d.get("item_code") or d.get("name"), d["name"])
         if parent:
             variants_to_hydrate.append((d["name"], parent))
+        _ingest_child_barcodes(conn, d.get("barcodes"), d["name"])
     if variants_to_hydrate:
         _hydrate_variant_attributes(conn, variants_to_hydrate)
     if item_rows:
