@@ -19,6 +19,10 @@ ERP_API_SECRET = os.environ.get("ERP_API_SECRET")
 # Fully-qualified method path for ingest (your_app.pos_sync.pos_ingest)
 ERP_INGEST_METHOD = os.environ.get("ERP_INGEST_METHOD", "your_app.pos_sync.pos_ingest")
 
+# Track docs we repeatedly fail to fetch so we can fall back without noisy retries
+UNFETCHABLE_ITEM_DOCS: Set[str] = set()
+UNFETCHABLE_ATTRIBUTE_DOCS: Set[str] = set()
+
 def iso_now() -> str:
     return dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
@@ -248,8 +252,19 @@ def _hydrate_attribute_options(conn: sqlite3.Connection, docnames: List[str]):
         if not name or name in seen:
             continue
         seen.add(name)
+        if name in UNFETCHABLE_ATTRIBUTE_DOCS:
+            ensure_attribute_definition(conn, name, name)
+            continue
         try:
             doc = _erp_get_doc("Item Attribute", name)
+        except urllib.error.HTTPError as exc:
+            status = getattr(exc, "code", None)
+            if status in (403, 404):
+                UNFETCHABLE_ATTRIBUTE_DOCS.add(name)
+                ensure_attribute_definition(conn, name, name)
+                continue
+            print(f"Failed to fetch attribute {name}: {exc}", file=sys.stderr)
+            continue
         except Exception as exc:
             print(f"Failed to fetch attribute {name}: {exc}", file=sys.stderr)
             continue
@@ -693,7 +708,7 @@ def _erp_get_doc(doctype: str, name: str) -> Dict[str, Any]:
         return {}
     import urllib.parse, urllib.request, json
     base = ERP_BASE.rstrip("/")
-    path = "/api/resource/{}/{}/".format(
+    path = "/api/resource/{}/{}".format(
         urllib.parse.quote(doctype, safe=""),
         urllib.parse.quote(name, safe="")
     )
@@ -765,9 +780,21 @@ def _infer_variant_attributes_from_name(item_id: str) -> Optional[List[Dict[str,
     parts = [p.strip() for p in item_id.split("-") if p and p.strip()]
     if len(parts) < 2:
         return None
-    size = parts[-1]
-    color = parts[-2] if len(parts) >= 2 else None
+
+    def _numeric_token(token: str) -> bool:
+        text = token.strip()
+        return text.isdigit()
+
+    parts_work: List[str] = parts[:]
     rows: List[Dict[str, Any]] = []
+    size = None
+    if parts_work:
+        size_chunks = [parts_work.pop()]
+        # Join trailing numeric segments so "36-40" stays intact instead of splitting color/size.
+        while parts_work and _numeric_token(size_chunks[-1]) and _numeric_token(parts_work[-1]):
+            size_chunks.append(parts_work.pop())
+        size = "-".join(reversed(size_chunks)).strip()
+    color = parts_work.pop() if parts_work else None
     if color:
         rows.append({"attribute": "Colour", "attribute_value": color})
         rows.append({"attribute": "Color", "attribute_value": color})
@@ -805,25 +832,43 @@ def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tup
             continue
         seen.add(item_id)
         attr_rows: Optional[List[Dict[str, Any]]] = None
-        try:
-            doc = _erp_get_doc("Item", item_id)
-            attr_rows = doc.get("attributes") or doc.get("variant_attributes") or doc.get("attributes_json") or []
-        except Exception as exc:
-            if isinstance(exc, urllib.error.HTTPError):
-                detail = _describe_http_error(exc)
-                msg = f"Failed to fetch Item doc for {item_id}: {exc}"
-                if detail:
-                    msg += f" | body: {detail}"
-                print(msg, file=sys.stderr)
-            attr_rows = _fallback_variant_attr_rows(item_id)
-            if attr_rows is None:
-                # As a last resort, try to infer from the variant name
-                inferred = _infer_variant_attributes_from_name(item_id)
-                if inferred:
-                    attr_rows = inferred
-                else:
-                    print(f"Failed to fetch attributes for {item_id}: {exc}", file=sys.stderr)
-                    continue
+        if item_id in UNFETCHABLE_ITEM_DOCS:
+            attr_rows = _infer_variant_attributes_from_name(item_id)
+        else:
+            try:
+                doc = _erp_get_doc("Item", item_id)
+                # Persist any barcode field present on the Item doc (single field or child table).
+                if doc:
+                    if doc.get("barcode"):
+                        try:
+                            primary = str(doc.get("barcode")).strip()
+                        except Exception:
+                            primary = None
+                        if primary:
+                            upsert_barcode(conn, primary, item_id)
+                    _ingest_child_barcodes(conn, doc.get("barcodes"), item_id)
+                attr_rows = doc.get("attributes") or doc.get("variant_attributes") or doc.get("attributes_json") or []
+            except Exception as exc:
+                http_status = getattr(exc, "code", None) if isinstance(exc, urllib.error.HTTPError) else None
+                if isinstance(exc, urllib.error.HTTPError):
+                    detail = _describe_http_error(exc)
+                    msg = f"Failed to fetch Item doc for {item_id}: {exc}"
+                    if detail:
+                        msg += f" | body: {detail}"
+                    print(msg, file=sys.stderr)
+                    if http_status in (403, 404):
+                        UNFETCHABLE_ITEM_DOCS.add(item_id)
+                attr_rows = None
+                if http_status not in (403, 404):
+                    attr_rows = _fallback_variant_attr_rows(item_id)
+                if attr_rows is None:
+                    inferred = _infer_variant_attributes_from_name(item_id)
+                    if inferred:
+                        attr_rows = inferred
+                    else:
+                        if not isinstance(exc, urllib.error.HTTPError) or http_status not in (403, 404):
+                            print(f"Failed to fetch attributes for {item_id}: {exc}", file=sys.stderr)
+                        continue
         if attr_rows is None:
             attr_rows = []
         conn.execute("DELETE FROM variant_attributes WHERE item_id=?", (item_id,))
@@ -907,12 +952,22 @@ def _hydrate_item_tax_rates(conn: sqlite3.Connection, item_rows: List[Dict[str, 
         seen.add(item_id)
         parent_id = row.get("parent_id")
         vat_rate = None
-        try:
-            doc = _erp_get_doc("Item", item_id)
-            vat_rate = _extract_item_vat_rate(doc)
-        except Exception as exc:
-            print(f"Failed to fetch tax info for {item_id}: {exc}", file=sys.stderr)
+        if item_id in UNFETCHABLE_ITEM_DOCS:
             vat_rate = None
+        else:
+            try:
+                doc = _erp_get_doc("Item", item_id)
+                vat_rate = _extract_item_vat_rate(doc)
+            except urllib.error.HTTPError as exc:
+                status = getattr(exc, "code", None)
+                if status in (403, 404):
+                    UNFETCHABLE_ITEM_DOCS.add(item_id)
+                else:
+                    print(f"Failed to fetch tax info for {item_id}: {exc}", file=sys.stderr)
+                vat_rate = None
+            except Exception as exc:
+                print(f"Failed to fetch tax info for {item_id}: {exc}", file=sys.stderr)
+                vat_rate = None
         try:
             if vat_rate is not None:
                 conn.execute("UPDATE items SET vat_rate=? WHERE item_id=?", (vat_rate, item_id))
@@ -1072,11 +1127,60 @@ def _apply_price_list_rates(conn: sqlite3.Connection, price_list: str):
     )
     """, (price_list, price_list))
 
+def _pull_item_barcodes_via_item_docs(conn: sqlite3.Connection, limit: int = 200) -> int:
+    """Fallback barcode fetcher that rehydrates barcodes via Item list queries when child table access is blocked."""
+    cursor_key = "Item Barcode (Item Doc)"
+    last_mod, last_name = _cursor_get(conn, cursor_key)
+    filters = []
+    if last_mod:
+        filters.append(["modified", ">=", last_mod])
+    params = {
+        "fields": json.dumps(["name", "modified"]),
+        "filters": json.dumps(filters),
+        "limit_page_length": limit,
+        "order_by": "modified asc, name asc",
+    }
+    data = _erp_get("/api/resource/Item", params).get("data", [])
+    if not data:
+        return 0
+    for row in data:
+        item_id = row.get("name")
+        if not item_id:
+            continue
+        try:
+            doc = _erp_get_doc("Item", item_id)
+        except urllib.error.HTTPError as exc:
+            detail = _describe_http_error(exc)
+            msg = f"Failed to fetch Item doc for {item_id}: {exc}"
+            if detail:
+                msg += f" | body: {detail}"
+            print(msg, file=sys.stderr)
+            if exc.code in (403, 404):
+                UNFETCHABLE_ITEM_DOCS.add(item_id)
+            continue
+        except Exception as exc:
+            print(f"Failed to fetch Item doc for {item_id}: {exc}", file=sys.stderr)
+            continue
+        primary = doc.get("barcode")
+        if primary is not None:
+            try:
+                primary_txt = str(primary).strip()
+            except Exception:
+                primary_txt = None
+            if primary_txt:
+                upsert_barcode(conn, primary_txt, item_id)
+        _ingest_child_barcodes(conn, doc.get("barcodes"), item_id)
+    last = data[-1]
+    _cursor_set(conn, cursor_key, last.get("modified") or iso_now(), last.get("name") or "")
+    conn.commit()
+    return len(data)
+
+
 def pull_item_barcodes_incremental(conn: sqlite3.Connection, limit: int = 500):
-    """Fetch barcodes from Item Barcode child table (v15)."""
+    """Fetch barcodes from Item Barcode child table (v15). Falls back to Item docs if direct access is forbidden."""
     global _BARCODE_PULL_FORBIDDEN
     if _BARCODE_PULL_FORBIDDEN:
-        return 0
+        return _pull_item_barcodes_via_item_docs(conn, limit=limit)
     last_mod, last_name = _cursor_get(conn, "Item Barcode")
     filters = []
     if last_mod:
@@ -1090,11 +1194,12 @@ def pull_item_barcodes_incremental(conn: sqlite3.Connection, limit: int = 500):
     try:
         data = _erp_get("/api/resource/Item Barcode", params).get("data", [])
     except urllib.error.HTTPError as exc:
-        if exc.code == 403:
+        if exc.code in (403, 417):
             if not _BARCODE_PULL_FORBIDDEN:
-                print("Item Barcode pull forbidden (HTTP 403); skipping barcode sync", file=sys.stderr)
+                code = exc.code
+                print(f"Item Barcode pull forbidden (HTTP {code}); falling back to Item doc barcode sync", file=sys.stderr)
             _BARCODE_PULL_FORBIDDEN = True
-            return 0
+            return _pull_item_barcodes_via_item_docs(conn, limit=limit)
         raise
     if not data:
         return 0
