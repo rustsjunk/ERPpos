@@ -11,6 +11,7 @@ import threading
 import re
 import time
 import logging
+import hmac
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
@@ -114,6 +115,326 @@ if not RECEIPT_AGENT_URL and RECEIPT_AGENT_HOST and RECEIPT_AGENT_PORT:
 
 # Force POS to stay in local queue-only mode even when ERP creds exist.
 POS_QUEUE_ONLY = os.getenv('POS_QUEUE_ONLY', '0') == '1'
+
+# Till posting queue configuration
+POS_RECEIPT_KEY = _env_string('POS_RECEIPT_KEY', 'SUPERSECRET123')
+POS_QUEUE_DB_PATH = _env_string('POS_QUEUE_DB', 'pos_sales_queue.sqlite3')
+POS_QUEUE_DIR = Path(_env_string('POS_QUEUE_DIR', os.path.join('invoices', 'queue')))
+_POS_QUEUE_DIR_STATES = {
+    'pending': POS_QUEUE_DIR / 'pending',
+    'ready': POS_QUEUE_DIR / 'ready',
+    'failed': POS_QUEUE_DIR / 'failed',
+    'confirmed': POS_QUEUE_DIR / 'confirmed'
+}
+_QUEUE_STATUS_DIR = {
+    'received': 'pending',
+    'record_error': 'failed',
+    'queued': 'ready',
+    'erp_posting': 'ready',
+    'erp_failed': 'failed',
+    'confirmed': 'confirmed'
+}
+_QUEUE_DB_LOCK = threading.Lock()
+_QUEUE_DB_INITIALIZED = False
+POS_QUEUE_BATCH_LIMIT = 25
+
+
+def _utcnow_z() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+
+
+def _ensure_queue_dirs() -> None:
+    if not POS_QUEUE_DIR:
+        return
+    try:
+        POS_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+        for path in _POS_QUEUE_DIR_STATES.values():
+            path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        app.logger.exception('Failed to prepare POS queue directories')
+
+
+def _queue_db_connect() -> Optional[sqlite3.Connection]:
+    if not POS_QUEUE_DB_PATH:
+        return None
+    conn = sqlite3.connect(POS_QUEUE_DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    with _QUEUE_DB_LOCK:
+        global _QUEUE_DB_INITIALIZED
+        if not _QUEUE_DB_INITIALIZED:
+            _init_queue_db(conn)
+            _QUEUE_DB_INITIALIZED = True
+    return conn
+
+
+def _init_queue_db(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pos_sales_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_name TEXT NOT NULL UNIQUE,
+            sale_id TEXT,
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error TEXT,
+            erp_docname TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_utc TEXT NOT NULL,
+            updated_utc TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pos_sales_queue_status ON pos_sales_queue(status)")
+    conn.commit()
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except Exception:
+        app.logger.debug('Failed to remove %s', path)
+
+
+def _queue_state_dir(status: str) -> Optional[Path]:
+    if not status:
+        return None
+    dir_key = _QUEUE_STATUS_DIR.get(status, 'pending')
+    return _POS_QUEUE_DIR_STATES.get(dir_key)
+
+
+def _write_queue_file(invoice_name: str, payload: Any, status: str) -> None:
+    if not invoice_name or not POS_QUEUE_DIR:
+        return
+    try:
+        data = payload if isinstance(payload, dict) else _json.loads(payload)
+    except Exception:
+        data = {}
+    try:
+        _ensure_queue_dirs()
+        target_dir = _queue_state_dir(status) or _POS_QUEUE_DIR_STATES['pending']
+        for name, directory in _POS_QUEUE_DIR_STATES.items():
+            if directory == target_dir:
+                continue
+            _safe_unlink(directory / f"{invoice_name}.json")
+        target_path = target_dir / f"{invoice_name}.json"
+        with open(target_path, 'w', encoding='utf-8') as f:
+            _json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        app.logger.warning('Failed to maintain queue file for %s', invoice_name)
+
+
+def _valid_pos_shared_key(provided: Optional[str]) -> bool:
+    expected = (POS_RECEIPT_KEY or '').strip()
+    if not expected:
+        return True
+    if provided is None:
+        return False
+    try:
+        return hmac.compare_digest(expected, provided.strip())
+    except Exception:
+        return False
+
+
+def _normalize_receipt_id(payload: Dict[str, Any]) -> Optional[str]:
+    for key in ('invoice_name', 'sale_id', 'receipt_id'):
+        value = payload.get(key)
+        if value in (None, ''):
+            continue
+        try:
+            cleaned = str(value).strip()
+        except Exception:
+            continue
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _validate_pos_sale_payload(payload: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return 'Invalid JSON payload'
+    receipt_id = _normalize_receipt_id(payload)
+    if not receipt_id:
+        return 'Missing invoice_name or sale_id'
+    items = payload.get('items')
+    if not isinstance(items, list) or not items:
+        return 'Items array is required'
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            return f'Item #{idx} is invalid'
+        item_code = item.get('item_code') or item.get('item_id') or item.get('code') or item.get('name')
+        if not item_code:
+            return f'Item #{idx} missing item_code'
+        try:
+            qty = float(item.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            return f'Item #{idx} must have positive qty'
+        try:
+            rate = float(item.get('rate') or 0)
+        except (TypeError, ValueError):
+            rate = -1
+        if rate < 0:
+            return f'Item #{idx} must have non-negative rate'
+    return None
+
+
+def _enqueue_pos_sale(payload: Dict[str, Any]) -> int:
+    conn = _queue_db_connect()
+    if not conn:
+        raise RuntimeError('POS queue storage unavailable')
+    receipt_id = _normalize_receipt_id(payload)
+    if not receipt_id:
+        raise ValueError('Missing receipt id')
+    payload = dict(payload)
+    payload['invoice_name'] = receipt_id
+    payload.setdefault('sale_id', receipt_id)
+    payload_json = _json.dumps(payload, ensure_ascii=False)
+    now = _utcnow_z()
+    try:
+        with conn:
+            conn.execute("""
+            INSERT INTO pos_sales_queue (invoice_name, sale_id, payload_json, status, error, erp_docname, attempts, created_utc, updated_utc)
+            VALUES (?,?,?,?,NULL,NULL,0,?,?)
+            ON CONFLICT(invoice_name) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                sale_id=COALESCE(NULLIF(excluded.sale_id,''), pos_sales_queue.sale_id),
+                status='received',
+                updated_utc=excluded.updated_utc,
+                error=NULL,
+                attempts=0
+            """, (receipt_id, payload.get('sale_id') or receipt_id, payload_json, 'received', now, now))
+            row = conn.execute("SELECT id FROM pos_sales_queue WHERE invoice_name=?", (receipt_id,)).fetchone()
+            queue_id = int(row['id']) if row else 0
+    finally:
+        conn.close()
+    _write_queue_file(receipt_id, payload_json, 'received')
+    return queue_id
+
+
+def _record_queue_entry(queue_conn: sqlite3.Connection, main_conn: Optional[sqlite3.Connection], row: sqlite3.Row) -> bool:
+    if not ps or not main_conn:
+        return False
+    payload = _json.loads(row['payload_json'])
+    sale_id = payload.get('sale_id') or payload.get('invoice_name') or row['invoice_name']
+    sale_id = str(sale_id or row['invoice_name'])
+    payload['sale_id'] = sale_id
+    payload['invoice_name'] = sale_id
+    try:
+        exists = main_conn.execute('SELECT queue_status FROM sales WHERE sale_id=?', (sale_id,)).fetchone()
+    except Exception:
+        exists = None
+    if exists:
+        queue_conn.execute(
+            "UPDATE pos_sales_queue SET sale_id=?, status='queued', updated_utc=?, error=NULL WHERE id=?",
+            (sale_id, _utcnow_z(), row['id'])
+        )
+        _write_queue_file(sale_id, payload, 'queued')
+        return True
+    try:
+        sale_payload = _build_sale_payload(payload, sale_id)
+        fx_metadata = payload.get('fx_metadata')
+        if fx_metadata:
+            ps.record_sale_with_fx(main_conn, sale_payload, fx_metadata)
+        else:
+            ps.record_sale(main_conn, sale_payload)
+        queue_conn.execute(
+            "UPDATE pos_sales_queue SET sale_id=?, status='queued', updated_utc=?, error=NULL WHERE id=?",
+            (sale_id, _utcnow_z(), row['id'])
+        )
+        _write_queue_file(sale_id, payload, 'queued')
+        return True
+    except Exception as exc:
+        queue_conn.execute(
+            "UPDATE pos_sales_queue SET status='record_error', error=?, attempts=attempts+1, updated_utc=? WHERE id=?",
+            (str(exc), _utcnow_z(), row['id'])
+        )
+        _write_queue_file(sale_id, payload, 'record_error')
+        app.logger.warning('Failed to record queued sale %s: %s', sale_id, exc)
+        return False
+
+
+def _sync_queue_status(queue_conn: sqlite3.Connection, main_conn: Optional[sqlite3.Connection]) -> int:
+    if not ps or not main_conn:
+        return 0
+    rows = queue_conn.execute("""
+        SELECT id, sale_id, invoice_name, status, payload_json FROM pos_sales_queue
+        WHERE sale_id IS NOT NULL AND status IN ('queued','erp_posting','erp_failed')
+    """).fetchall()
+    updated = 0
+    for row in rows:
+        sale_id = row['sale_id']
+        if not sale_id:
+            continue
+        try:
+            sale_row = main_conn.execute("SELECT queue_status, erp_docname FROM sales WHERE sale_id=?", (sale_id,)).fetchone()
+        except Exception:
+            sale_row = None
+        if not sale_row:
+            continue
+        queue_status = sale_row['queue_status'] or 'queued'
+        new_status = None
+        error_msg = None
+        if queue_status == 'posted' and row['status'] != 'confirmed':
+            new_status = 'confirmed'
+        elif queue_status == 'failed' and row['status'] != 'erp_failed':
+            new_status = 'erp_failed'
+            error_msg = _lookup_outbox_error(main_conn, sale_id)
+        elif queue_status == 'posting' and row['status'] != 'erp_posting':
+            new_status = 'erp_posting'
+        elif queue_status == 'queued' and row['status'] != 'queued':
+            new_status = 'queued'
+        if not new_status:
+            continue
+        erp_docname = sale_row['erp_docname'] if 'erp_docname' in sale_row.keys() else None
+        queue_conn.execute(
+            "UPDATE pos_sales_queue SET status=?, updated_utc=?, error=?, erp_docname=? WHERE id=?",
+            (new_status, _utcnow_z(), error_msg, erp_docname, row['id'])
+        )
+        _write_queue_file(row['invoice_name'], row['payload_json'], new_status)
+        updated += 1
+    if updated:
+        queue_conn.commit()
+    return updated
+
+
+def _lookup_outbox_error(main_conn: sqlite3.Connection, sale_id: str) -> Optional[str]:
+    try:
+        row = main_conn.execute("SELECT last_error FROM outbox WHERE ref_id=? ORDER BY id DESC LIMIT 1", (sale_id,)).fetchone()
+        if row and row['last_error']:
+            return row['last_error']
+    except Exception:
+        return None
+    return None
+
+
+def _process_pos_sales_queue(main_conn: Optional[sqlite3.Connection]) -> Optional[str]:
+    if not POS_QUEUE_DB_PATH:
+        return None
+    queue_conn = _queue_db_connect()
+    if not queue_conn:
+        return None
+    processed = 0
+    try:
+        rows = queue_conn.execute("""
+            SELECT id, invoice_name, payload_json, status FROM pos_sales_queue
+            WHERE status IN ('received','record_error')
+            ORDER BY id ASC LIMIT ?
+        """, (POS_QUEUE_BATCH_LIMIT,)).fetchall()
+        dirty = False
+        for row in rows:
+            dirty = True
+            if _record_queue_entry(queue_conn, main_conn, row):
+                processed += 1
+        if dirty:
+            queue_conn.commit()
+        synced = _sync_queue_status(queue_conn, main_conn)
+        if processed or synced:
+            return f"pos queue recorded={processed} synced={synced}"
+        return None
+    finally:
+        queue_conn.close()
+
 
 # Default customers for offline/mock usage.
 _DEFAULT_CUSTOMERS = [
@@ -290,6 +611,12 @@ def _run_idle_maintenance_tasks():
                 app.logger.warning("Idle outbox push failed: %s", exc)
         if summary:
             app.logger.info("Idle maintenance completed (%s)", ", ".join(summary))
+        try:
+            queue_note = _process_pos_sales_queue(conn)
+            if queue_note:
+                app.logger.info("Idle %s", queue_note)
+        except Exception as exc:
+            app.logger.warning("Idle POS queue processing failed: %s", exc)
     finally:
         if conn:
             try:
@@ -1331,6 +1658,27 @@ def create_sale():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/api/pos/sales', methods=['POST'])
+def api_pos_sales_ingest():
+    """Receive till receipts via shared secret and queue them for ERP posting."""
+    if not _valid_pos_shared_key(request.headers.get('X-POS-KEY')):
+        return jsonify({'status': 'error', 'message': 'Invalid POS key'}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({'status': 'error', 'message': 'Invalid JSON payload'}), 400
+    validation_error = _validate_pos_sale_payload(payload)
+    if validation_error:
+        return jsonify({'status': 'error', 'message': validation_error}), 400
+    try:
+        queue_id = _enqueue_pos_sale(payload)
+        return jsonify({'status': 'received', 'queue_id': queue_id})
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('Failed to enqueue POS sale')
+        return jsonify({'status': 'error', 'message': 'Unable to queue sale'}), 502
+
+
 @app.route('/api/customers')
 def get_customers():
     """Get all customers"""
@@ -2207,6 +2555,13 @@ def start_background_services():
     global _BACKGROUND_SERVICES_STARTED
     if _BACKGROUND_SERVICES_STARTED:
         return
+    try:
+        _ensure_queue_dirs()
+        conn = _queue_db_connect()
+        if conn:
+            conn.close()
+    except Exception:
+        app.logger.warning('POS queue storage initialization failed', exc_info=True)
     _ensure_currency_updater()
     _ensure_idle_worker()
     _BACKGROUND_SERVICES_STARTED = True
