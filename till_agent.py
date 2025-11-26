@@ -51,6 +51,12 @@ def iter_invoice_files() -> Iterable[Tuple[Path, str]]:
 
 def move_file(path: Path, target_dir: Path) -> None:
     target_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.parent.resolve() == target_dir.resolve():
+            return
+    except FileNotFoundError:
+        # Parent might have vanished between checks; fall through so replace() raises with context.
+        pass
     dest = target_dir / path.name
     if dest.exists():
         dest = target_dir / f"{path.stem}_{int(time.time())}.json"
