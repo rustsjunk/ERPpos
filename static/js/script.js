@@ -62,6 +62,7 @@ let appliedPayments = [];
 let cashEntryDirty = false;
 let otherEntryDirty = false;
 let barcodeFeedbackTimer = null;
+let barcodeScanInProgress = false;
 
 // Currency conversion state
 let eurConversionData = null;  // { eur_exact, eur_round_up, eur_round_down, store_rate, gbp_total }
@@ -1790,6 +1791,22 @@ function showBarcodeFeedback(message, isError = false) {
   }
 }
 
+function setBarcodeProcessingState(isProcessing) {
+  barcodeScanInProgress = isProcessing;
+  const input = document.getElementById('barcodeInput');
+  if (input) {
+    input.disabled = isProcessing;
+    input.classList.toggle('barcode-loading', isProcessing);
+    if (!isProcessing) {
+      input.classList.remove('is-invalid');
+    }
+  }
+  const button = document.getElementById('barcodeAddBtn');
+  if (button) {
+    button.disabled = isProcessing;
+  }
+}
+
 function focusBarcodeInput() {
   const input = document.getElementById('barcodeInput');
   if (!input) return;
@@ -1802,33 +1819,40 @@ function focusBarcodeInput() {
 }
 
 async function processBarcodeScan(rawValue) {
+  if (barcodeScanInProgress) return;
   const input = document.getElementById('barcodeInput');
   const value = String(rawValue || (input && input.value) || '').trim();
   if (!value) {
     if (input) input.value = '';
     showBarcodeFeedback('', false);
+    focusBarcodeInput();
     return;
   }
-  // Try server-side barcode lookup for variants first
-  const addedByBarcode = await tryAddVariantByBarcode(value);
-  if (!addedByBarcode){
-    const match = findItemByCode(value);
-    if (match) {
-      addToCart(match);
-      showBarcodeFeedback(`Added ${match.item_name || match.name || value}`, false);
-      if (input) {
-        input.value = '';
-        input.classList.remove('is-invalid');
-      }
-    } else {
-      showBarcodeFeedback(`No product found for "${value}"`, true);
-      if (input) {
-        input.classList.add('is-invalid');
-        input.select();
+  setBarcodeProcessingState(true);
+  try {
+    // Try server-side barcode lookup for variants first
+    const addedByBarcode = await tryAddVariantByBarcode(value);
+    if (!addedByBarcode){
+      const match = findItemByCode(value);
+      if (match) {
+        addToCart(match);
+        showBarcodeFeedback(`Added ${match.item_name || match.name || value}`, false);
+        if (input) {
+          input.value = '';
+          input.classList.remove('is-invalid');
+        }
+      } else {
+        showBarcodeFeedback(`No product found for "${value}"`, true);
+        if (input) {
+          input.classList.add('is-invalid');
+          input.select();
+        }
       }
     }
+  } finally {
+    setBarcodeProcessingState(false);
+    focusBarcodeInput();
   }
-  focusBarcodeInput();
 }
 
 async function tryAddVariantByBarcode(code){
@@ -4229,6 +4253,7 @@ function handleGlobalScan(code){
     // 3) Default: route to the barcode input for adding items
     const scanInput = document.getElementById('barcodeInput');
     if(scanInput){
+      if (barcodeScanInProgress) return;
       scanInput.value = value;
       try{ processBarcodeScan(value); }catch(_){ /* ignore */ }
       return;
