@@ -55,6 +55,7 @@ PAUSED_DIR = _env_string('POS_PAUSED_DIR', 'paused')
 ERPNEXT_URL = _env_string('ERPNEXT_URL')
 API_KEY = _env_string('ERPNEXT_API_KEY')
 API_SECRET = _env_string('ERPNEXT_API_SECRET')
+ERP_RECEIPT_FIELD = _env_string('POS_ERP_RECEIPT_FIELD', 'pos_receipt_id')
 
 # Keep pos_service ERP env vars aligned with Flask env names
 if ERPNEXT_URL and not os.getenv('ERP_BASE'):
@@ -137,6 +138,15 @@ _QUEUE_STATUS_DIR = {
 _QUEUE_DB_LOCK = threading.Lock()
 _QUEUE_DB_INITIALIZED = False
 POS_QUEUE_BATCH_LIMIT = 25
+
+# Idle ERP sales reconciliation
+ERP_PULL_SALES_ENABLED = os.getenv('POS_PULL_ERP_SALES', '1') == '1'
+try:
+    ERP_PULL_SALES_LIMIT = int(os.getenv('POS_PULL_ERP_SALES_LIMIT', '25'))
+except ValueError:
+    ERP_PULL_SALES_LIMIT = 25
+ERP_PULL_SALES_LIMIT = max(5, ERP_PULL_SALES_LIMIT)
+ERP_SALES_CURSOR_KEY = _env_string('POS_PULL_ERP_SALES_CURSOR', 'SalesInvoiceERP')
 
 
 def _utcnow_z() -> str:
@@ -609,6 +619,13 @@ def _run_idle_maintenance_tasks():
                 summary.append("pushed outbox")
             except Exception as exc:
                 app.logger.warning("Idle outbox push failed: %s", exc)
+        if not USE_MOCK and ERP_PULL_SALES_ENABLED and _has_erp_credentials():
+            try:
+                pulled, matched, inserted = _reconcile_erp_sales_invoices(conn)
+                if pulled or matched or inserted:
+                    summary.append(f"erp sales pulled={pulled} matched={matched} new={inserted}")
+            except Exception as exc:
+                app.logger.warning("Idle ERP sales reconciliation failed: %s", exc)
         if summary:
             app.logger.info("Idle maintenance completed (%s)", ", ".join(summary))
         try:
@@ -1107,6 +1124,335 @@ def _erp_session_get(url: str, params: Optional[Dict[str, Any]] = None, timeout:
         return session.send(prepped, timeout=timeout)
     finally:
         session.close()
+
+
+def _sync_cursor_get(conn: Optional[sqlite3.Connection], key: str) -> Tuple[Optional[str], Optional[str]]:
+    if not conn or not key:
+        return (None, None)
+    try:
+        row = conn.execute("SELECT last_modified, last_name FROM sync_cursors WHERE doctype=?", (key,)).fetchone()
+        if row:
+            return row['last_modified'], row['last_name']
+    except Exception:
+        app.logger.debug('Failed to read sync cursor %s', key, exc_info=True)
+    return (None, None)
+
+
+def _sync_cursor_set(conn: Optional[sqlite3.Connection], key: str, last_modified: Optional[str], last_name: Optional[str]) -> None:
+    if not conn or not key or not last_modified or not last_name:
+        return
+    try:
+        conn.execute("""
+            INSERT INTO sync_cursors (doctype, last_modified, last_name) VALUES (?,?,?)
+            ON CONFLICT(doctype) DO UPDATE SET last_modified=excluded.last_modified, last_name=excluded.last_name
+        """, (key, last_modified, last_name))
+    except Exception:
+        app.logger.debug('Failed to persist sync cursor %s', key, exc_info=True)
+
+
+def _cursor_tuple_is_newer(candidate_mod: Optional[str], candidate_name: Optional[str],
+                           cursor: Tuple[Optional[str], Optional[str]]) -> bool:
+    cur_mod, cur_name = cursor
+    cand_mod = (candidate_mod or '').strip()
+    cand_name = (candidate_name or '').strip()
+    if not cand_mod:
+        return False
+    if not cur_mod:
+        return True
+    if cand_mod > cur_mod:
+        return True
+    if cand_mod == cur_mod:
+        if not cur_name:
+            return bool(cand_name)
+        return cand_name > cur_name
+    return False
+
+
+def _float_or_zero(value: Any, default: float = 0.0) -> float:
+    if value in (None, '', False):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clean_text(value: Any) -> str:
+    if value in (None, ''):
+        return ''
+    try:
+        return str(value).strip()
+    except Exception:
+        return ''
+
+
+def _erp_invoice_created_ts(record: Dict[str, Any]) -> Optional[str]:
+    posting_date = _clean_text(record.get('posting_date'))
+    posting_time = _clean_text(record.get('posting_time'))
+    if posting_date:
+        time_part = posting_time.split('.')[0] if posting_time else '00:00:00'
+        return f"{posting_date}T{time_part or '00:00:00'}Z"
+    for key in ('creation', 'modified'):
+        stamp = _clean_text(record.get(key))
+        if stamp:
+            base = stamp.split('.')[0]
+            return base.replace(' ', 'T') + 'Z'
+    return None
+
+
+def _erp_receipt_id(record: Dict[str, Any]) -> Optional[str]:
+    field_order = [ERP_RECEIPT_FIELD, 'pos_receipt_id', 'sale_id', 'invoice_name']
+    for key in field_order:
+        if not key:
+            continue
+        if key in record:
+            cleaned = _clean_text(record.get(key))
+            if cleaned:
+                return cleaned
+    return None
+
+
+def _fetch_sales_invoice_batch(cursor_modified: Optional[str], limit: int) -> List[Dict[str, Any]]:
+    if not ERPNEXT_URL:
+        return []
+    limit = max(1, min(limit, 200))
+    fields = ["name", "modified", "posting_date", "posting_time", "customer", "grand_total",
+              ERP_RECEIPT_FIELD or 'pos_receipt_id', "outstanding_amount", "currency"]
+    filters: List[List[Any]] = [['docstatus', '=', 1]]
+    if ERP_RECEIPT_FIELD:
+        filters.append([ERP_RECEIPT_FIELD, '!=', ''])
+    if cursor_modified:
+        filters.append(['modified', '>=', cursor_modified])
+    params = {
+        'fields': _json.dumps(fields),
+        'filters': _json.dumps(filters),
+        'order_by': 'modified asc, name asc',
+        'limit_start': 0,
+        'limit_page_length': limit
+    }
+    resp = _erp_session_get(f"{ERPNEXT_URL}/api/resource/Sales Invoice", params=params, timeout=20)
+    resp.raise_for_status()
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise RuntimeError('ERP sales list response was not valid JSON') from exc
+    return body.get('data') or body.get('message') or []
+
+
+def _fetch_sales_invoice_doc(docname: str) -> Optional[Dict[str, Any]]:
+    if not docname or not ERPNEXT_URL:
+        return None
+    resp = _erp_session_get(f"{ERPNEXT_URL}/api/resource/Sales Invoice/{docname}", timeout=20)
+    resp.raise_for_status()
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise RuntimeError(f'ERP invoice {docname} response was not JSON') from exc
+    return body.get('data') or body.get('message') or {}
+
+
+def _insert_remote_sale_from_doc(conn: sqlite3.Connection, doc: Dict[str, Any], preferred_sale_id: Optional[str]) -> bool:
+    docname = _clean_text(doc.get('name'))
+    sale_id = _erp_receipt_id(doc) or preferred_sale_id or docname
+    sale_id = _clean_text(sale_id)
+    if not sale_id:
+        sale_id = f"ERP-{uuid4().hex[:10]}"
+    try:
+        existing = conn.execute("SELECT 1 FROM sales WHERE sale_id=?", (sale_id,)).fetchone()
+        if existing:
+            return False
+    except Exception:
+        return False
+    created_utc = _erp_invoice_created_ts(doc) or _utcnow_z()
+    subtotal = _float_or_zero(doc.get('net_total') or doc.get('total') or doc.get('base_net_total'))
+    discount = _float_or_zero(doc.get('discount_amount') or doc.get('base_discount_amount'))
+    tax = _float_or_zero(doc.get('total_taxes_and_charges'))
+    total = _float_or_zero(doc.get('grand_total')) or (subtotal - discount + tax)
+    outstanding = _float_or_zero(doc.get('outstanding_amount'))
+    currency = (_clean_text(doc.get('currency')) or 'GBP').upper()
+    pay_status = 'paid'
+    try:
+        if abs(outstanding) > 0.005:
+            pay_status = 'partially_paid' if outstanding < total else 'unpaid'
+    except Exception:
+        pay_status = 'paid'
+    lines_payload: List[Dict[str, Any]] = []
+    for item in doc.get('items') or []:
+        item_code = _clean_text(item.get('item_code') or item.get('item_name'))
+        if not item_code:
+            continue
+        qty = _float_or_zero(item.get('qty'))
+        rate = _float_or_zero(item.get('rate'))
+        line_total = qty * rate
+        lines_payload.append({
+            'item_id': item_code,
+            'item_name': item.get('item_name') or item_code,
+            'brand': item.get('brand'),
+            'attributes': item.get('attributes') if isinstance(item.get('attributes'), dict) else {},
+            'qty': qty,
+            'rate': rate,
+            'line_total': line_total
+        })
+    payments_payload: List[Dict[str, Any]] = []
+    for pay in doc.get('payments') or []:
+        amount = _float_or_zero(pay.get('amount'))
+        if not amount:
+            continue
+        method = _clean_text(pay.get('mode_of_payment') or pay.get('mode_of_payments')) or 'Payment'
+        payments_payload.append({
+            'method': method,
+            'amount': amount,
+            'currency': currency,
+            'ref': _clean_text(pay.get('reference_no') or pay.get('name')) or None
+        })
+    payload = {
+        'sale_id': sale_id,
+        'created_utc': created_utc,
+        'cashier': _clean_text(doc.get('cashier') or doc.get('sales_person') or doc.get('owner')) or None,
+        'customer_id': _clean_text(doc.get('customer')) or None,
+        'warehouse': _clean_text(doc.get('set_warehouse') or doc.get('warehouse')) or POS_WAREHOUSE,
+        'lines': [{
+            'item_id': ln['item_id'],
+            'item_name': ln['item_name'],
+            'brand': ln.get('brand'),
+            'attributes': ln.get('attributes') or {},
+            'qty': ln['qty'],
+            'rate': ln['rate']
+        } for ln in lines_payload],
+        'payments': [{
+            'method': pay['method'],
+            'amount': pay['amount'],
+            'currency': pay['currency'],
+            'ref': pay.get('ref')
+        } for pay in payments_payload],
+        'discount': discount,
+        'tax': tax,
+        'totals': {'subtotal': subtotal, 'total': total},
+        'voucher_redeem': [],
+        'tender': None,
+        'cash_given': None,
+        'change': None,
+        'till': _clean_text(doc.get('pos_profile')) or None,
+        'till_number': _clean_text(doc.get('pos_profile')) or None,
+    }
+    payload_json = _json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+    conn.execute("""
+        INSERT INTO sales (sale_id, created_utc, cashier, customer_id, subtotal, tax, discount, total,
+                           currency_used, rate_used, pay_status, queue_status, erp_docname, payload_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        sale_id,
+        created_utc,
+        payload['cashier'],
+        payload['customer_id'],
+        subtotal,
+        tax,
+        discount,
+        total,
+        currency,
+        1,
+        pay_status,
+        'posted',
+        docname or sale_id,
+        payload_json
+    ))
+    for idx, ln in enumerate(lines_payload, start=1):
+        conn.execute("""
+            INSERT INTO sale_lines (sale_id, line_no, item_id, item_name, brand, attributes, qty, rate, line_total, barcode_used)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            sale_id,
+            idx,
+            ln['item_id'],
+            ln['item_name'],
+            ln.get('brand'),
+            _json.dumps(ln.get('attributes') or {}, ensure_ascii=False, separators=(',', ':')),
+            ln['qty'],
+            ln['rate'],
+            ln['line_total'],
+            None
+        ))
+    for idx, pay in enumerate(payments_payload, start=1):
+        conn.execute("""
+            INSERT INTO payments (sale_id, seq, method, currency, amount_gbp, amount_eur, eur_rate, ref, meta_json)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        """, (
+            sale_id,
+            idx,
+            pay['method'],
+            pay['currency'],
+            pay['amount'],
+            None,
+            None,
+            pay.get('ref'),
+            None
+        ))
+    return True
+
+
+def _reconcile_erp_sales_invoices(conn: Optional[sqlite3.Connection]) -> Tuple[int, int, int]:
+    if not conn or USE_MOCK or not ERP_PULL_SALES_ENABLED or not _has_erp_credentials():
+        return (0, 0, 0)
+    cursor_mod, cursor_name = _sync_cursor_get(conn, ERP_SALES_CURSOR_KEY)
+    try:
+        rows = _fetch_sales_invoice_batch(cursor_mod, ERP_PULL_SALES_LIMIT)
+    except Exception as exc:
+        raise RuntimeError(f"ERP sales invoice fetch failed: {exc}") from exc
+    if not rows:
+        return (0, 0, 0)
+    matched = 0
+    inserted = 0
+    latest_mod = None
+    latest_name = None
+    current_cursor = (cursor_mod, cursor_name)
+    for rec in rows:
+        mod = _clean_text(rec.get('modified'))
+        name = _clean_text(rec.get('name'))
+        if not name or not mod:
+            continue
+        if not _cursor_tuple_is_newer(mod, name, current_cursor):
+            continue
+        sale_id = _erp_receipt_id(rec) or name
+        sale_row = None
+        if sale_id:
+            sale_row = conn.execute("SELECT sale_id, queue_status, erp_docname FROM sales WHERE sale_id=?", (sale_id,)).fetchone()
+        if not sale_row and name:
+            sale_row = conn.execute("SELECT sale_id, queue_status, erp_docname FROM sales WHERE erp_docname=?", (name,)).fetchone()
+        if sale_row:
+            updates: Dict[str, Any] = {}
+            if sale_row['queue_status'] != 'posted':
+                updates['queue_status'] = 'posted'
+            if name and (sale_row['erp_docname'] or '') != name:
+                updates['erp_docname'] = name
+            if updates:
+                assignments = ", ".join(f"{col}=?" for col in updates.keys())
+                params = list(updates.values())
+                params.append(sale_row['sale_id'])
+                conn.execute(f"UPDATE sales SET {assignments} WHERE sale_id=?", params)
+                matched += 1
+        else:
+            try:
+                doc = _fetch_sales_invoice_doc(name)
+            except Exception as exc:
+                app.logger.warning('Failed to fetch ERP invoice %s: %s', name, exc)
+                doc = None
+            if doc:
+                try:
+                    if _insert_remote_sale_from_doc(conn, doc, sale_id):
+                        inserted += 1
+                except Exception as exc:
+                    app.logger.warning('Failed to record ERP invoice %s locally: %s', name, exc)
+        latest_mod = mod
+        latest_name = name
+        current_cursor = (mod, name)
+    if latest_mod:
+        _sync_cursor_set(conn, ERP_SALES_CURSOR_KEY, latest_mod, latest_name or latest_mod)
+    if matched or inserted or latest_mod:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    return (len(rows), matched, inserted)
 
 def _absolute_image_url(path: Optional[str]) -> Optional[str]:
     if not path:
