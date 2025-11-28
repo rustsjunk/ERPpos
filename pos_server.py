@@ -1485,7 +1485,12 @@ def _canonical_attr_name(name: Optional[str]) -> Optional[str]:
     if not text:
         return None
     key = text.lower()
-    return ATTRIBUTE_SYNONYMS.get(key) or text
+    mapped = ATTRIBUTE_SYNONYMS.get(key)
+    if mapped:
+        return mapped
+    if 'size' in key:
+        return 'Size'
+    return text
 
 def _attribute_payload_keys(name: Optional[str]) -> Tuple[str, ...]:
     canon = _canonical_attr_name(name)
@@ -2319,7 +2324,13 @@ def item_matrix():
         attrs = attr_map.get(r["item_id"], {})
         color = attrs.get('Color') or attrs.get('Colour') or attrs.get('color') or '-'
         width = attrs.get('Width') or attrs.get('width') or attrs.get('Fit') or 'Standard'
-        size = (attrs.get('Size') or attrs.get('EU half Sizes') or attrs.get('UK half Sizes') or '-')
+        size = (attrs.get('Size') or attrs.get('EU half Sizes') or attrs.get('UK half Sizes'))
+        if not size:
+            for attr_name, attr_value in attrs.items():
+                if isinstance(attr_name, str) and 'size' in attr_name.lower():
+                    size = attr_value
+                    break
+        size = size or '-'
         colors.add(color); widths.add(width); sizes.add(size)
         key = f"{color}|{width}|{size}"
         # Get variant image (with absolute URL), fallback to parent image

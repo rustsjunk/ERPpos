@@ -840,20 +840,20 @@ const receiptBuilder = (() => {
       }
     });
     separator();
-    const gross = Number(info.total||0);
-    let net = gross;
-    const vatAmount = vatTotal;
-    if(vatInclusive){
-      net = gross - vatAmount;
-    }
-    if(!gift){
+    if(gift){
+      write(centerText('Totals hidden for gift receipt'));
+    }else{
+      const gross = Number(info.total||0);
+      let net = gross;
+      const vatAmount = vatTotal;
+      if(vatInclusive){
+        net = gross - vatAmount;
+      }
       write(padLine('Net', moneyFmt(net)));
       if(vatAmount){
         write(padLine('VAT', moneyFmt(vatAmount)));
       }
-    }
-    write(padLine(info.isRefund ? 'Refund Total' : 'Total', moneyFmt(gross)));
-    if(!gift){
+      write(padLine(info.isRefund ? 'Refund Total' : 'Total', moneyFmt(gross)));
       const paymentList = Array.isArray(info.payments)?info.payments:[];
       paymentList.forEach(p=>{
         if(!p) return;
@@ -1011,6 +1011,7 @@ const receiptAgentClient = (() => {
 const FX_SLIP_WAIT_AFTER_RECEIPT_MS = 150;
 const FX_SLIP_WAIT_AFTER_FIRST_CUT_MS = 80;
 const FX_SLIP_WAIT_AFTER_SLIP_MS = 140;
+const GIFT_RECEIPT_EXTRA_CUT_DELAY_MS = 130;
 
 function waitFor(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1096,8 +1097,19 @@ function handleReceiptPrintRequest(info, wantsGift){
     return;
   }
   (async ()=>{
+    const resetGiftCheckbox = ()=>{
+      const giftToggle = document.getElementById('giftReceiptCheckbox');
+      if(giftToggle){
+        giftToggle.checked = false;
+      }
+    };
     if(wantsGift){
-      const giftOk = await ensureReceiptPrinted(target, { gift:true });
+      const giftOk = await ensureReceiptPrinted(target, { gift:true, cut:false });
+      if(giftOk){
+        await waitFor(GIFT_RECEIPT_EXTRA_CUT_DELAY_MS);
+        await cutReceiptIfReady();
+        await waitFor(GIFT_RECEIPT_EXTRA_CUT_DELAY_MS);
+      }
       const standardOk = await ensureReceiptPrinted(target, { gift:false });
       if(!giftOk || !standardOk){
         alert('Gift or standard receipt failed to print. Please retry with the local receipt agent.');
@@ -1108,6 +1120,7 @@ function handleReceiptPrintRequest(info, wantsGift){
         alert('Receipt failed to print. Please retry with the local receipt agent.');
       }
     }
+    resetGiftCheckbox();
   })().catch(e=> err('receipt print handler failed', e));
 }
 
@@ -1301,7 +1314,6 @@ function resetIdleTimer(){
   if(idleTimer) clearTimeout(idleTimer);
   if(currentCashier){
     idleTimer=setTimeout(()=>logoutToLogin('Session timed out due to inactivity'),IDLE_TIMEOUT_MS);
-    if(currentCashierSession) pingCashierSession().catch(()=>{});
   }
 }
 
@@ -3647,6 +3659,9 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   const printBtn=document.getElementById('printReceiptBtn'); const doneBtn=document.getElementById('receiptDoneBtn'); const closeBtn=document.getElementById('receiptCloseBtn'); const reprintBtn=document.getElementById('receiptReprintBtn');
   const returnBtn=document.getElementById('receiptReturnBtn');
   const giftEl = document.getElementById('giftReceiptCheckbox');
+  if(giftEl){
+    giftEl.checked = false;
+  }
   const fxWrap = document.getElementById('receiptFxSummary');
   if (fxWrap) {
     const summary = info && info.fx_summary;
@@ -3695,7 +3710,7 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
       if(invEl && scan){ scan.value = invEl.textContent || ''; findReturnSale(); }
     }catch(_){ openReturnOverlay(); }
   };
-  const finish = ()=>{ o.style.display='none'; hideCheckoutOverlay(); cart=[]; updateCartDisplay(); logoutToLogin(); };
+  const finish = ()=>{ if(giftEl){ giftEl.checked=false; } o.style.display='none'; hideCheckoutOverlay(); cart=[]; updateCartDisplay(); logoutToLogin(); };
   if(doneBtn) doneBtn.onclick = finish; if(closeBtn) closeBtn.onclick = finish;
 }
 function layoutCashPanel(){
