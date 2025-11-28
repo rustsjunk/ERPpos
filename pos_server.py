@@ -1972,7 +1972,8 @@ def create_sale():
             'posting_date': datetime.now().strftime('%Y-%m-%d'),
             'items': items,
             'is_pos': 1,
-            'payments': payments
+            'payments': payments,
+            'disable_rounded_total': 1
         }
         response = requests.post(
             f"{ERPNEXT_URL}/api/resource/Sales Invoice",

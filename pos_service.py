@@ -363,6 +363,7 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
         "discount": discount,
         "tax": tax,
         "totals": {"subtotal": subtotal, "total": total},
+        "disable_rounded_total": 1,
         "voucher_redeem": sale.get("voucher_redeem", []),
         "tender": sale.get("tender"),
         "cash_given": sale.get("cash_given"),
