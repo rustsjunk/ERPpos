@@ -36,65 +36,158 @@
         </div>
     </div>
     <div class="container-fluid">
-        <div class="row pos-layout">
-            <!-- Left side - Items list -->
-            <div class="col-md-8">
-                <div class="row mb-3">
-                    <div class="col">
-                        <input type="text" id="itemSearch" aria-label="Search items" class="form-control" placeholder="Search items...">
+        <div class="row pos-layout g-3 align-items-start">
+            <!-- Basket / Search -->
+            <div class="col-12 col-lg-5 col-xl-5 order-1 order-lg-2">
+                <div class="card search-callout mb-3">
+                    <div class="card-body">
+                        <label for="itemSearch" class="form-label text-uppercase small text-muted mb-1">Add products to basket</label>
+                        <input type="text" id="itemSearch" aria-label="Search items" class="form-control" placeholder="Search to open the catalogue...">
+                        <div class="form-text">Searching launches the product view so you can choose variants.</div>
                     </div>
                 </div>
-                <div class="product-panel row g-3">
-                    <div class="col-12 col-lg-4">
-                        <div class="card recent-items-card h-100">
-                            <div class="card-body">
-                                <div class="d-flex align-items-center justify-content-between mb-2">
-                                    <h5 class="m-0">Recent sales</h5>
-                                    <small class="text-muted">Last 3</small>
-                                </div>
-                                <div id="recentSalesList" class="recent-sales-list">
-                                    <div class="text-muted">No recent sales yet.</div>
-                                </div>
-                            </div>
+                <div class="cart-column">
+                    <div id="cartCard" class="card">
+                        <div class="card-header">
+                            <h3 class="m-0">Current Basket</h3>
                         </div>
-                    </div>
-                    <div class="col-12 col-lg-8">
-                        <div class="card featured-items-card h-100">
-                            <div class="card-body">
-                                <div class="d-flex align-items-center justify-content-between mb-3">
-                                    <h5 class="m-0">Browse products</h5>
-                                    <button id="shuffleFeaturedBtn" type="button" class="btn btn-sm btn-outline-secondary">Shuffle</button>
-                                </div>
-                                <div id="itemsGrid" class="row row-cols-1 row-cols-sm-2 row-cols-md-3 g-3" data-featured-codes="">
-                                    <!-- Items will be dynamically added here -->
-                                </div>
+                        <div class="card-body">
+                            <div id="cartItems">
+                                <!-- Cart items will be dynamically added here -->
+                            </div>
+                            <hr>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h5>Total:</h5>
+                                <h5 id="cartTotal">0.00</h5>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
-            
-            <!-- Right side - Cart -->
-            <div class="col-md-4 cart-column">
-                <div id="cartCard" class="card">
-                    <div class="card-header">
-                        <h3>Current Cart</h3>
-                    </div>
+
+            <!-- Recent sales rail -->
+            <div class="col-12 col-lg-3 col-xl-3 order-2 order-lg-1">
+                <div class="card recent-items-card recent-panel h-100">
                     <div class="card-body">
-                        <div id="cartItems">
-                            <!-- Cart items will be dynamically added here -->
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h5 class="m-0">Recent sales</h5>
+                            <small class="text-muted">Last 3</small>
                         </div>
-                        <hr>
-                        <div class="d-flex justify-content-between align-items-center">
-                            <h5>Total:</h5>
-                            <h5 id="cartTotal">0.00</h5>
+                        <div id="recentSalesList" class="recent-sales-list">
+                            <div class="text-muted">No recent sales yet.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Checkout rail -->
+            <div class="col-12 col-lg-4 col-xl-4 order-3 order-lg-3 checkout-column">
+                <div id="checkoutPanel" class="card checkout-panel">
+                    <div class="card-header">
+                        <h3 class="m-0">Checkout</h3>
+                    </div>
+                    <div class="card-body d-flex flex-column gap-3">
+                        <div class="d-flex justify-content-end">
+                            <button id="checkoutResetBtn" class="btn btn-sm btn-outline-secondary">Reset Checkout</button>
+                        </div>
+                        <div class="checkout-tender-stack">
+                            <div class="mb-2 fw-semibold">Tender Type</div>
+                            <div class="tender-grid mb-3">
+                                <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
+                                <button class="btn tender-btn" data-tender="card">Card</button>
+                                <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
+                                <button class="btn tender-btn" data-tender="other">Other</button>
+                            </div>
+                            <div class="mb-3">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div class="fw-semibold">Applied Payments</div>
+                                    <div id="paymentsTotal" class="fw-semibold text-end"></div>
+                                </div>
+                                <div id="appliedPaymentsList" class="applied-payments-list"></div>
+                            </div>
+                        </div>
+                        <div class="tender-panel">
+                            <div id="cashSection" class="mb-3" style="display:none;">
+                                <div id="cashKeypad" class="keypad-grid compact mt-2" style="display:block;">
+                                    <button class="key-btn" data-k="7">7</button>
+                                    <button class="key-btn" data-k="8">8</button>
+                                    <button class="key-btn" data-k="9">9</button>
+                                    <button class="key-btn" data-k="4">4</button>
+                                    <button class="key-btn" data-k="5">5</button>
+                                    <button class="key-btn" data-k="6">6</button>
+                                    <button class="key-btn" data-k="1">1</button>
+                                    <button class="key-btn" data-k="2">2</button>
+                                    <button class="key-btn" data-k="3">3</button>
+                                    <button class="key-btn key-action" data-k="C">C</button>
+                                    <button class="key-btn" data-k="0">0</button>
+                                    <button class="key-btn key-action" data-k="B">&#x232B;</button>
+                                </div>
+                                <div id="cashSummaryData" class="d-none" aria-hidden="true">
+                                    <div id="amountDue"></div>
+                                    <div id="amountCash"></div>
+                                    <div id="amountCashEntered"></div>
+                                    <div id="amountChange"></div>
+                                </div>
+                                <div class="cash-controls mt-2 d-flex flex-wrap gap-2 align-items-center justify-content-end">
+                                    <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
+                                    <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm" placeholder="Enter cash amount" style="max-width: 160px;" />
+                                    <button id="toggleKeypadBtn" class="btn btn-outline-secondary btn-sm">Show Keypad</button>
+                                    <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
+                                    <button id="addPlasticBagBtn" class="btn btn-outline-primary btn-sm" type="button" title="Add a plastic bag to this sale">+ Plastic Bag</button>
+                                    <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
+                                    <button id="applyCashBtn" class="btn btn-primary btn-sm">Apply Cash</button>
+                                </div>
+
+                            </div>
+                            <div id="otherSection" class="mb-3" style="display:none;">
+                                <div id="otherKeypad" class="keypad-grid compact mt-2" style="display:block;">
+                                    <button class="key-btn" data-k="7">7</button>
+                                    <button class="key-btn" data-k="8">8</button>
+                                    <button class="key-btn" data-k="9">9</button>
+                                    <button class="key-btn" data-k="4">4</button>
+                                    <button class="key-btn" data-k="5">5</button>
+                                    <button class="key-btn" data-k="6">6</button>
+                                    <button class="key-btn" data-k="1">1</button>
+                                    <button class="key-btn" data-k="2">2</button>
+                                    <button class="key-btn" data-k="3">3</button>
+                                    <button class="key-btn key-action" data-k="C">C</button>
+                                    <button class="key-btn" data-k="0">0</button>
+                                    <button class="key-btn key-action" data-k="B">&#x232B;</button>
+                                </div>
+                                <div class="cash-summary mt-2">
+                                    <div class="d-flex justify-content-between">
+                                        <div>Due</div>
+                                        <div id="amountDueOther" class="fw-semibold"></div>
+                                    </div>
+                                </div>
+                                <div class="input-group mt-2" style="max-width: 420px; margin-left:auto;">
+                                    <span id="otherLabel" class="input-group-text">Amount</span>
+                                    <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
+                                    <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining Amount</button>
+                                    <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
+                                </div>
+                            </div>
+                            <div class="d-grid gap-2 tender-actions">
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <div class="fw-semibold text-muted">Remaining Due</div>
+                                    <div id="tenderDue" class="fw-bold"></div>
+                                </div>
+                                <button id="openDiscountBtn" class="btn btn-outline-secondary">Discount</button>
+                                <button id="completeSaleBtn" class="btn btn-success btn-lg">Complete Sale</button>
+                            </div>
+                        </div>
+                        <div class="checkout-basket mt-2 pt-3 border-top">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h6 class="m-0 text-uppercase text-muted small">Basket overview</h6>
+                                <small class="text-muted">Updates live</small>
+                            </div>
+                            <div id="checkoutCart" class="checkout-cart limited"></div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
-
     <!-- Removed fixed barcode bar; compact entry lives under cart actions -->
 
     <!-- Product Search Overlay -->
@@ -132,109 +225,6 @@
                         </table>
                     </div>
                     <div class="text-muted small">Click a size cell to add 1 to cart.</div></div></div></div>
-    </div>
-
-    <!-- Checkout Overlay -->
-    <div id="checkoutOverlay" class="search-overlay">
-        <div class="search-modal checkout-modal">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <div class="h5 m-0">Checkout</div>
-                <button id="checkoutCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
-            </div>
-            <div class="row g-3">
-                <div class="col-12 col-lg-7">
-                    <div id="checkoutCart" class="checkout-cart"></div>
-                    <div class="mt-3">
-                        <div class="mb-2 fw-semibold">Tender Type</div>
-                        <div class="tender-grid mb-3">
-                            <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
-                            <button class="btn tender-btn" data-tender="card">Card</button>
-                            <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
-                            <button class="btn tender-btn" data-tender="other">Other</button>
-                        </div>
-                        <div class="mb-3">
-                            <div class="d-flex justify-content-between align-items-center">
-                                <div class="fw-semibold">Applied Payments</div>
-                                <div id="paymentsTotal" class="fw-semibold text-end"></div>
-                            </div>
-                            <div id="appliedPaymentsList" class="applied-payments-list"></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-12 col-lg-5">
-                    <div class="tender-panel">
-                        <div id="cashSection" class="mb-3" style="display:none;">
-                            <div id="cashKeypad" class="keypad-grid compact mt-2" style="display:block;">
-                                <button class="key-btn" data-k="7">7</button>
-                                <button class="key-btn" data-k="8">8</button>
-                                <button class="key-btn" data-k="9">9</button>
-                                <button class="key-btn" data-k="4">4</button>
-                                <button class="key-btn" data-k="5">5</button>
-                                <button class="key-btn" data-k="6">6</button>
-                                <button class="key-btn" data-k="1">1</button>
-                                <button class="key-btn" data-k="2">2</button>
-                                <button class="key-btn" data-k="3">3</button>
-                                <button class="key-btn key-action" data-k="C">C</button>
-                                <button class="key-btn" data-k="0">0</button>
-                                <button class="key-btn key-action" data-k="B">&#x232B;</button>
-                            </div>
-                            <div id="cashSummaryData" class="d-none" aria-hidden="true">
-                                <div id="amountDue"></div>
-                                <div id="amountCash"></div>
-                                <div id="amountCashEntered"></div>
-                                <div id="amountChange"></div>
-                            </div>
-                            <div class="cash-controls mt-2 d-flex flex-wrap gap-2 align-items-center justify-content-end">
-                                <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
-                                <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm" placeholder="Enter cash amount" style="max-width: 160px;" />
-                                <button id="toggleKeypadBtn" class="btn btn-outline-secondary btn-sm">Show Keypad</button>
-                                <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
-                                <button id="addPlasticBagBtn" class="btn btn-outline-primary btn-sm" type="button" title="Add a plastic bag to this sale">+ Plastic Bag</button>
-                                <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
-                                <button id="applyCashBtn" class="btn btn-primary btn-sm">Apply Cash</button>
-                            </div>
-
-                        </div>
-                        <div id="otherSection" class="mb-3" style="display:none;">
-                            <div id="otherKeypad" class="keypad-grid compact mt-2" style="display:block;">
-                                <button class="key-btn" data-k="7">7</button>
-                                <button class="key-btn" data-k="8">8</button>
-                                <button class="key-btn" data-k="9">9</button>
-                                <button class="key-btn" data-k="4">4</button>
-                                <button class="key-btn" data-k="5">5</button>
-                                <button class="key-btn" data-k="6">6</button>
-                                <button class="key-btn" data-k="1">1</button>
-                                <button class="key-btn" data-k="2">2</button>
-                                <button class="key-btn" data-k="3">3</button>
-                                <button class="key-btn key-action" data-k="C">C</button>
-                                <button class="key-btn" data-k="0">0</button>
-                                <button class="key-btn key-action" data-k="B">&#x232B;</button>
-                            </div>
-                            <div class="cash-summary mt-2">
-                                <div class="d-flex justify-content-between">
-                                    <div>Due</div>
-                                    <div id="amountDueOther" class="fw-semibold"></div>
-                                </div>
-                            </div>
-                            <div class="input-group mt-2" style="max-width: 420px; margin-left:auto;">
-                                <span id="otherLabel" class="input-group-text">Amount</span>
-                                <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
-                                <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining Amount</button>
-                                <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
-                            </div>
-                        </div>
-                        <div class="d-grid gap-2 tender-actions">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <div class="fw-semibold text-muted">Remaining Due</div>
-                                <div id="tenderDue" class="fw-bold"></div>
-                            </div>
-                            <button id="openDiscountBtn" class="btn btn-outline-secondary">Discount</button>
-                            <button id="completeSaleBtn" class="btn btn-success btn-lg">Complete Sale</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
     </div>
 
     <!-- EUR Converter Overlay -->

@@ -1748,7 +1748,14 @@ function updateCartDisplay() {
     element.className = 'cart-item' + (isRefund ? ' refund' : '');
     const refundTag = isRefund ? '<span class="cart-refund-tag">Refund</span>' : '';
     const refundBtnLabel = isRefund ? 'Refunding' : 'Refund';
+    const safeImage = (item.image || '').replace(/"/g, '&quot;');
+    const nameForInitial = String(item.item_name || item.item_code || '?').trim();
+    const thumbInitial = nameForInitial ? nameForInitial.charAt(0).toUpperCase() : '?';
+    const thumbHtml = item.image
+      ? `<img src="${safeImage}" alt="Item image for ${item.item_name || item.item_code || 'product'}">`
+      : `<span class="thumb-initial">${thumbInitial}</span>`;
     element.innerHTML = `
+      <div class="cart-item-thumb">${thumbHtml}</div>
       <div class="cart-item-main">
         <div class="cart-item-name">${item.item_name}${refundTag}</div>
         <div class="cart-item-meta text-muted">${money(item.rate)} each</div>
@@ -1768,6 +1775,8 @@ function updateCartDisplay() {
   });
   tot.textContent = money(sum);
   updateCheckoutButtonState(sum);
+  renderCheckoutCart();
+  updateCashSection();
 }
 
 function findItemByCode(value) {
@@ -2115,11 +2124,13 @@ function bindEvents(){
   }
   // product overlay
   const po=document.getElementById('productOverlay'), pc=document.getElementById('productCloseBtn'); if(po){ if(pc) pc.addEventListener('click',hideProductOverlay); po.addEventListener('click',e=>{ if(e.target===po) hideProductOverlay(); }); document.addEventListener('keydown',e=>{ if(e.key==='Escape') hideProductOverlay(); }); }
-  // checkout overlay
-  const co=document.getElementById('checkoutOverlay'), cc=document.getElementById('checkoutCloseBtn'), cs=document.getElementById('completeSaleBtn');
+  // checkout panel
+  const co=document.getElementById('checkoutPanel');
   if(co){
-    if(cc) cc.addEventListener('click',hideCheckoutOverlay);
-    co.addEventListener('click',e=>{ if(e.target===co) hideCheckoutOverlay(); });
+    const resetBtn=document.getElementById('checkoutResetBtn');
+    if(resetBtn){
+      resetBtn.addEventListener('click', ()=>{ hideCheckoutOverlay(); openCheckoutOverlay(); });
+    }
     document.querySelectorAll('.tender-btn').forEach(b=>b.addEventListener('click',()=>selectTender(b.getAttribute('data-tender'))));
     co.querySelectorAll('.denom-btn').forEach(b=>b.addEventListener('click',()=>{ const a=Number(b.getAttribute('data-amount'))||0; addCashAmount(denomSubtract?-a:a); }));
     const sub=document.getElementById('toggleSubtractBtn');
@@ -2645,9 +2656,9 @@ function addVariantToCart(item, variant, cellEl, variantRec){
   try{ const cartCard=document.getElementById('cartCard'); if(cartCard){ cartCard.classList.add('cart-pulse'); setTimeout(()=>cartCard.classList.remove('cart-pulse'),700); } }catch(_){ }
 }
 
-// Checkout overlay
+// Checkout panel
 function openCheckoutOverlay(){
-  const o=document.getElementById('checkoutOverlay');
+  const o=document.getElementById('checkoutPanel');
   const c=document.getElementById('checkoutCart');
   if(!o||!c) return;
   // reset tender selection; user must choose
@@ -2663,15 +2674,15 @@ function openCheckoutOverlay(){
   const toggleKeypadBtn = document.getElementById('toggleKeypadBtn');
   if (toggleKeypadBtn) toggleKeypadBtn.textContent = 'Show Keypad';
   renderCheckoutCart();
-  o.style.display='flex';
-  o.style.visibility='visible';
-  o.style.opacity='1';
-  try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
+  updateCashSection();
+  o.classList.add('active');
+  try{ o.scrollIntoView({ behavior:'smooth', block:'start' }); }catch(_){}
 }
 function hideCheckoutOverlay(){
-  const o=document.getElementById('checkoutOverlay');
-  if(o) o.style.display='none';
+  const o=document.getElementById('checkoutPanel');
+  if(o) o.classList.remove('active');
   resetTenderInputs();
+  updateCashSection();
 }
 function renderCheckoutCart() {
   const el = document.getElementById('checkoutCart');
@@ -3615,7 +3626,7 @@ function showLogin(){
   if(!o){ err('loginOverlay element missing'); return; }
   neutralizeForeignOverlays();
   // Ensure other overlays are closed so login isn't obscured
-  const overlays=['searchOverlay','productOverlay','checkoutOverlay','voucherOverlay','menuOverlay','receiptOverlay'];
+  const overlays=['searchOverlay','productOverlay','voucherOverlay','menuOverlay','receiptOverlay'];
   overlays.forEach(id=>{ const el=document.getElementById(id); if(el) el.style.display='none'; });
   o.style.display='flex';
   o.style.visibility='visible';
@@ -3739,7 +3750,7 @@ try {
         login: document.getElementById('loginOverlay')?.style.display,
         search: document.getElementById('searchOverlay')?.style.display,
         product: document.getElementById('productOverlay')?.style.display,
-        checkout: document.getElementById('checkoutOverlay')?.style.display,
+        checkout: (()=>{ const panel=document.getElementById('checkoutPanel'); if(!panel) return 'missing'; return panel.classList.contains('active') ? 'active' : 'inline'; })(),
         voucher: document.getElementById('voucherOverlay')?.style.display,
         receipt: document.getElementById('receiptOverlay')?.style.display,
       }})
