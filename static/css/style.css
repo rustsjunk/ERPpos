@@ -106,9 +106,26 @@
     font-size: 0.85rem;
     color: #6c757d;
 }
+.pos-shell {
+    padding: 1.5rem 0;
+}
+@media (min-width: 1200px) {
+    .pos-shell {
+        min-height: calc(100vh - 120px);
+    }
+}
+.pos-grid > [class*="col-"] {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+.pos-column {
+    display: flex;
+    flex-direction: column;
+}
 .recent-panel {
     position: sticky;
-    top: 20px;
+    top: 24px;
 }
 .recent-panel .card-body {
     display: flex;
@@ -119,52 +136,126 @@
     flex: 1;
     overflow-y: auto;
 }
-.checkout-column {
-    display: flex;
-}
 .checkout-panel {
     position: sticky;
-    top: 20px;
+    top: 24px;
     display: flex;
     flex-direction: column;
-    max-height: calc(100vh - 40px);
-    width: 100%;
+    max-height: calc(100vh - 140px);
+    border-radius: 18px;
+    box-shadow: 0 10px 30px rgba(15,23,42,0.05);
+}
+.checkout-panel.active {
+    box-shadow: 0 0 0 3px rgba(13,110,253,0.15);
 }
 .checkout-panel .card-body {
     flex: 1;
     display: flex;
     flex-direction: column;
+    gap: 1.5rem;
     min-height: 0;
-    gap: 1rem;
 }
-.checkout-panel .checkout-cart {
-    max-height: clamp(200px, 40vh, 360px);
-    overflow-y: auto;
-}
-.checkout-panel .tender-panel {
+.checkout-body {
     flex: 1;
     display: flex;
     flex-direction: column;
-    overflow-x: hidden;
+    gap: 1.5rem;
+    min-height: 0;
 }
-.checkout-panel .tender-panel > *:not(.tender-actions) {
-    flex-shrink: 0;
+@media (min-width: 1200px) {
+    .checkout-body {
+        flex-direction: row;
+    }
+}
+.checkout-main,
+.checkout-side {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.checkout-main {
+    flex: 1;
+    gap: 1rem;
+}
+.checkout-side {
+    flex: 1;
+    min-width: 300px;
+    max-width: 380px;
+}
+.checkout-block {
+    border: 1px solid #e9ecef;
+    border-radius: 16px;
+    padding: 1rem 1.25rem;
+    background: #fff;
+}
+.checkout-block + .checkout-block {
+    margin-top: 1rem;
+}
+.checkout-panel .checkout-cart {
+    max-height: clamp(220px, 45vh, 420px);
+    overflow-y: auto;
+}
+.checkout-panel .tender-panel {
+    background: #f8f9fb;
+    border-radius: 18px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+}
+.tender-mode + .tender-mode {
+    border-top: 1px solid rgba(0,0,0,0.05);
+    padding-top: 1.5rem;
+}
+.tender-panel .section-heading small {
+    display: block;
+    color: #6c757d;
+}
+.cash-controls {
+    width: 100%;
+}
+.cash-controls .form-control {
+    min-width: 160px;
+}
+.cash-controls .btn {
+    white-space: nowrap;
+}
+.checkout-panel #cashSection,
+.checkout-panel #otherSection {
+    display: none;
+}
+.checkout-panel[data-tender="cash"] #cashSection,
+.checkout-panel[data-tender=""] #cashSection,
+.checkout-panel:not([data-tender]) #cashSection {
+    display: block;
+}
+.checkout-panel[data-tender="card"] #otherSection,
+.checkout-panel[data-tender="other"] #otherSection {
+    display: block;
+}
+.checkout-panel[data-tender="voucher"] #cashSection,
+.checkout-panel[data-tender="voucher"] #otherSection {
+    display: none;
+}
+.checkout-panel[data-tender="card"] #cashSection,
+.checkout-panel[data-tender="other"] #cashSection {
+    display: none;
 }
 .checkout-panel .tender-actions {
-    margin-top: auto;
+    margin-top: 2rem;
 }
 @media (max-width: 991px) {
-    .recent-panel,
+    .recent-panel {
+        position: static;
+    }
     .checkout-panel {
+        box-shadow: none;
         position: static;
         max-height: none;
     }
-    .checkout-column {
-        display: block;
-    }
 }
 /* Cart card sizing to keep actions visible */
-#cartCard { position: sticky; top: 20px; max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
+#cartCard { position: sticky; top: 24px; max-height: calc(100vh - 140px); display: flex; flex-direction: column; }
 #cartCard .card-body { display: flex; flex-direction: column; min-height: 0; }
 #cartItems { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 #cartActions.cart-actions { position: sticky; bottom: 0; background: #ffffff; padding-top: 8px; }
@@ -919,16 +1010,11 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 /* Compact keypad for cash input */
 .keypad-grid.compact { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .keypad-grid.compact .key-btn { padding: 10px 0; font-size: 1.1rem; }
-/* Keypad vs denominations visibility control */
-#cashSection.show-keypad .denom-row { display: none !important; }
-#cashSection.show-keypad #cashKeypad { display: grid !important; }
-/* Force keypad-only on checkout */
-.denom-row { display: none !important; }
-#toggleKeypadBtn, #cashInputField, #toggleSubtractBtn { display: none !important; }
-#cashKeypad { display: grid !important; }
-#otherKeypad { display: grid !important; }
-/* Reorder Card/Other keypad above input group */
-#otherSection { display: flex; flex-direction: column; }
+/* Always show keypad grids */
+#cashKeypad,
+#otherKeypad { display: grid; }
+/* Card/Other section layout */
+#otherSection { display: flex; flex-direction: column; gap: 0.75rem; }
 #otherKeypad { order: 2; }
 #otherSection .input-group { order: 3; }
 /* Keep tender actions visible and always accessible */

@@ -1774,6 +1774,8 @@ function updateCartDisplay() {
     wrap.appendChild(element);
   });
   tot.textContent = money(sum);
+  const checkoutMirror = document.getElementById('checkoutTotalMirror');
+  if (checkoutMirror) checkoutMirror.textContent = money(sum);
   updateCheckoutButtonState(sum);
   renderCheckoutCart();
   updateCashSection();
@@ -2305,17 +2307,8 @@ function bindEvents(){
       otherEntryDirty = true;
     });
   }
-  const toggleKeypadBtn = document.getElementById('toggleKeypadBtn');
   const cashKeypad = document.getElementById('cashKeypad');
-  const cashSection = document.getElementById('cashSection');
-  if (toggleKeypadBtn && cashKeypad && cashSection) {
-    toggleKeypadBtn.addEventListener('click', ()=>{
-      const willShow = !cashSection.classList.contains('show-keypad');
-      cashSection.classList.toggle('show-keypad', willShow);
-      toggleKeypadBtn.textContent = willShow ? 'Hide Keypad' : 'Show Keypad';
-      layoutCashPanel();
-    });
-    // Normalize backspace label
+  if (cashKeypad){
     try{ const bk = cashKeypad.querySelector('[data-k="B"]'); if(bk) bk.textContent = '⌫'; }catch(_){ }
     cashKeypad.querySelectorAll('.key-btn').forEach(btn => {
       btn.addEventListener('click', ()=>{
@@ -2669,11 +2662,8 @@ function openCheckoutOverlay(){
   resetTenderInputs();
   const vbtn = document.getElementById('tenderVoucherBtn'); if(vbtn) vbtn.textContent = 'Voucher';
   document.querySelectorAll('.tender-btn').forEach(b=>b.classList.remove('active'));
-  const cashSection = document.getElementById('cashSection');
-  if (cashSection) { cashSection.style.display = 'none'; cashSection.classList.remove('show-keypad'); }
-  const toggleKeypadBtn = document.getElementById('toggleKeypadBtn');
-  if (toggleKeypadBtn) toggleKeypadBtn.textContent = 'Show Keypad';
   renderCheckoutCart();
+  selectTender('cash');
   updateCashSection();
   o.classList.add('active');
   try{ o.scrollIntoView({ behavior:'smooth', block:'start' }); }catch(_){}
@@ -2831,29 +2821,22 @@ function selectTender(t){
       b.classList.toggle('active', tb === t);
     });
 
-    // Show/hide cash section
-    const cashSection = document.getElementById('cashSection');
-    if (cashSection) {
-      cashSection.style.display = (t === 'cash') ? 'block' : 'none';
-      if (t !== 'cash') {
-        cashSection.classList.remove('show-keypad');
+    const panel = document.getElementById('checkoutPanel');
+    if (panel){
+      panel.dataset.tender = t || '';
+      if (t !== 'cash'){
         hideEurOverlay();
       }
     }
 
-    // Show/hide other (Card/Other) section
-    const otherSection = document.getElementById('otherSection');
     const otherLabel = document.getElementById('otherLabel');
     const otherFullBtn = document.getElementById('otherFullAmountBtn');
-    if (otherSection){
-      const isOther = (t === 'card' || t === 'other');
-      otherSection.style.display = isOther ? 'block' : 'none';
-      if (otherLabel){
-        otherLabel.textContent = (t === 'card') ? 'Card Amount' : 'Amount';
-      }
-      if (otherFullBtn){
-        otherFullBtn.style.display = isOther ? 'inline-block' : 'none';
-      }
+    const isOther = (t === 'card' || t === 'other');
+    if (otherLabel){
+      otherLabel.textContent = (t === 'card') ? 'Card Amount' : 'Amount';
+    }
+    if (otherFullBtn){
+      otherFullBtn.style.display = isOther ? 'inline-block' : 'none';
     }
 
     if (t === 'cash' && !cashEntryDirty) {
@@ -3726,19 +3709,10 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
 }
 function layoutCashPanel(){
   const panel = document.querySelector('.tender-panel');
-  const actions = document.querySelector('.tender-actions');
-  const cashSection = document.getElementById('cashSection');
-  if (!panel || !cashSection || cashSection.style.display==='none') return;
   const keypad = document.getElementById('cashKeypad');
-  const denom = cashSection.querySelector('.denom-row');
-  const controls = document.querySelector('.cash-controls');
-  const totalsH = Array.from(cashSection.querySelectorAll('.d-flex.justify-content-between')).reduce((s,el)=>s+el.offsetHeight,0);
-  const ctrlH = controls ? controls.offsetHeight : 0;
-  const actH = actions ? actions.offsetHeight : 0;
-  const padding = 24;
-  const available = panel.clientHeight - (totalsH + ctrlH + actH + padding);
-  const target = (cashSection.classList.contains('show-keypad')) ? keypad : denom;
-  if (target && available > 0){ target.style.maxHeight = available + 'px'; target.style.overflowY = 'auto'; }
+  if (!panel || !keypad) return;
+  keypad.style.maxHeight = '';
+  keypad.style.overflowY = '';
 }
 
 // Debug wrappers and exports
@@ -4353,6 +4327,9 @@ function assembleLineSections(body, headerLines = [], footerLines = []) {
   }
   return segments.join('\n');
 }
+
+
+
 
 
 

@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en" data-print-agent-url="{{ receipt_agent_url or '' }}" data-receipt-default-port="{{ receipt_default_port or 'COM3' }}">
 <head>
     <meta charset="UTF-8">
@@ -35,18 +35,32 @@
             </div>
         </div>
     </div>
-    <div class="container-fluid">
-        <div class="row pos-layout g-3 align-items-start">
-            <!-- Basket / Search -->
-            <div class="col-12 col-lg-5 col-xl-5 order-1 order-lg-2">
-                <div class="card search-callout mb-3">
+    <div class="container-fluid pos-shell">
+        <div class="row pos-grid g-3 align-items-start">
+            <div class="col-12">
+                <div class="card search-callout mb-0">
                     <div class="card-body">
                         <label for="itemSearch" class="form-label text-uppercase small text-muted mb-1">Add products to basket</label>
                         <input type="text" id="itemSearch" aria-label="Search items" class="form-control" placeholder="Search to open the catalogue...">
                         <div class="form-text">Searching launches the product view so you can choose variants.</div>
                     </div>
                 </div>
-                <div class="cart-column">
+            </div>
+            <div class="col-12 col-xl-3 pos-column">
+                <div class="card recent-items-card recent-panel h-100">
+                    <div class="card-body">
+                        <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h5 class="m-0">Recent sales</h5>
+                            <small class="text-muted">Last 3</small>
+                        </div>
+                        <div id="recentSalesList" class="recent-sales-list">
+                            <div class="text-muted">No recent sales yet.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-12 col-xl-4 pos-column">
+                <div class="cart-column h-100">
                     <div id="cartCard" class="card">
                         <div class="card-header">
                             <h3 class="m-0">Current Basket</h3>
@@ -64,131 +78,143 @@
                     </div>
                 </div>
             </div>
-
-            <!-- Recent sales rail -->
-            <div class="col-12 col-lg-3 col-xl-3 order-2 order-lg-1">
-                <div class="card recent-items-card recent-panel h-100">
+            <div class="col-12 col-xl-5 pos-column">
+                <div id="checkoutPanel" class="card checkout-panel" data-tender="cash">
+                    <div class="card-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+                        <div>
+                            <h3 class="m-0">Checkout</h3>
+                            <small class="text-muted">Review the basket and collect payment</small>
+                        </div>
+                        <div class="text-end">
+                            <div class="text-uppercase text-muted small">Basket Total</div>
+                            <div class="h4 m-0" id="checkoutTotalMirror">0.00</div>
+                        </div>
+                    </div>
                     <div class="card-body">
-                        <div class="d-flex align-items-center justify-content-between mb-2">
-                            <h5 class="m-0">Recent sales</h5>
-                            <small class="text-muted">Last 3</small>
-                        </div>
-                        <div id="recentSalesList" class="recent-sales-list">
-                            <div class="text-muted">No recent sales yet.</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Checkout rail -->
-            <div class="col-12 col-lg-4 col-xl-4 order-3 order-lg-3 checkout-column">
-                <div id="checkoutPanel" class="card checkout-panel">
-                    <div class="card-header">
-                        <h3 class="m-0">Checkout</h3>
-                    </div>
-                    <div class="card-body d-flex flex-column gap-3">
-                        <div class="d-flex justify-content-end">
-                            <button id="checkoutResetBtn" class="btn btn-sm btn-outline-secondary">Reset Checkout</button>
-                        </div>
-                        <div class="checkout-tender-stack">
-                            <div class="mb-2 fw-semibold">Tender Type</div>
-                            <div class="tender-grid mb-3">
-                                <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
-                                <button class="btn tender-btn" data-tender="card">Card</button>
-                                <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
-                                <button class="btn tender-btn" data-tender="other">Other</button>
-                            </div>
-                            <div class="mb-3">
-                                <div class="d-flex justify-content-between align-items-center">
-                                    <div class="fw-semibold">Applied Payments</div>
-                                    <div id="paymentsTotal" class="fw-semibold text-end"></div>
+                        <div class="checkout-body">
+                            <div class="checkout-main">
+                                <div class="checkout-block">
+                                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                        <div>
+                                            <h5 class="m-0">Basket overview</h5>
+                                            <small class="text-muted">Live view of the sale</small>
+                                        </div>
+                                        <div class="d-flex gap-2 flex-wrap">
+                                            <button id="checkoutResetBtn" class="btn btn-outline-secondary btn-sm">Reset checkout</button>
+                                            <button type="button" class="btn btn-outline-primary btn-sm" onclick="var card=document.getElementById('cartCard'); if(card){ card.scrollIntoView({ behavior: 'smooth', block: 'start' }); }">Go to basket</button>
+                                        </div>
+                                    </div>
+                                    <div id="checkoutCart" class="checkout-cart limited mt-3"></div>
                                 </div>
-                                <div id="appliedPaymentsList" class="applied-payments-list"></div>
-                            </div>
-                        </div>
-                        <div class="tender-panel">
-                            <div id="cashSection" class="mb-3" style="display:none;">
-                                <div id="cashKeypad" class="keypad-grid compact mt-2" style="display:block;">
-                                    <button class="key-btn" data-k="7">7</button>
-                                    <button class="key-btn" data-k="8">8</button>
-                                    <button class="key-btn" data-k="9">9</button>
-                                    <button class="key-btn" data-k="4">4</button>
-                                    <button class="key-btn" data-k="5">5</button>
-                                    <button class="key-btn" data-k="6">6</button>
-                                    <button class="key-btn" data-k="1">1</button>
-                                    <button class="key-btn" data-k="2">2</button>
-                                    <button class="key-btn" data-k="3">3</button>
-                                    <button class="key-btn key-action" data-k="C">C</button>
-                                    <button class="key-btn" data-k="0">0</button>
-                                    <button class="key-btn key-action" data-k="B">&#x232B;</button>
-                                </div>
-                                <div id="cashSummaryData" class="d-none" aria-hidden="true">
-                                    <div id="amountDue"></div>
-                                    <div id="amountCash"></div>
-                                    <div id="amountCashEntered"></div>
-                                    <div id="amountChange"></div>
-                                </div>
-                                <div class="cash-controls mt-2 d-flex flex-wrap gap-2 align-items-center justify-content-end">
-                                    <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
-                                    <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm" placeholder="Enter cash amount" style="max-width: 160px;" />
-                                    <button id="toggleKeypadBtn" class="btn btn-outline-secondary btn-sm">Show Keypad</button>
-                                    <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
-                                    <button id="addPlasticBagBtn" class="btn btn-outline-primary btn-sm" type="button" title="Add a plastic bag to this sale">+ Plastic Bag</button>
-                                    <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
-                                    <button id="applyCashBtn" class="btn btn-primary btn-sm">Apply Cash</button>
-                                </div>
-
-                            </div>
-                            <div id="otherSection" class="mb-3" style="display:none;">
-                                <div id="otherKeypad" class="keypad-grid compact mt-2" style="display:block;">
-                                    <button class="key-btn" data-k="7">7</button>
-                                    <button class="key-btn" data-k="8">8</button>
-                                    <button class="key-btn" data-k="9">9</button>
-                                    <button class="key-btn" data-k="4">4</button>
-                                    <button class="key-btn" data-k="5">5</button>
-                                    <button class="key-btn" data-k="6">6</button>
-                                    <button class="key-btn" data-k="1">1</button>
-                                    <button class="key-btn" data-k="2">2</button>
-                                    <button class="key-btn" data-k="3">3</button>
-                                    <button class="key-btn key-action" data-k="C">C</button>
-                                    <button class="key-btn" data-k="0">0</button>
-                                    <button class="key-btn key-action" data-k="B">&#x232B;</button>
-                                </div>
-                                <div class="cash-summary mt-2">
-                                    <div class="d-flex justify-content-between">
-                                        <div>Due</div>
-                                        <div id="amountDueOther" class="fw-semibold"></div>
+                                <div class="checkout-block">
+                                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+                                        <div class="fw-semibold text-uppercase small text-muted">Tender type</div>
+                                        <small class="text-muted">Select how the customer is paying</small>
+                                    </div>
+                                    <div class="tender-grid mb-3">
+                                        <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
+                                        <button class="btn tender-btn" data-tender="card">Card</button>
+                                        <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
+                                        <button class="btn tender-btn" data-tender="other">Other</button>
+                                    </div>
+                                    <div>
+                                        <div class="d-flex justify-content-between align-items-center">
+                                            <div class="fw-semibold">Applied payments</div>
+                                            <div id="paymentsTotal" class="fw-semibold text-end"></div>
+                                        </div>
+                                        <div id="appliedPaymentsList" class="applied-payments-list"></div>
                                     </div>
                                 </div>
-                                <div class="input-group mt-2" style="max-width: 420px; margin-left:auto;">
-                                    <span id="otherLabel" class="input-group-text">Amount</span>
-                                    <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
-                                    <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining Amount</button>
-                                    <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
+                            </div>
+                            <div class="checkout-side">
+                                <div class="tender-panel p-3">
+                                    <div id="cashSection" class="tender-mode">
+                                        <div class="section-heading d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                            <div>
+                                                <div class="fw-semibold">Cash keypad</div>
+                                                <small class="text-muted">Tap amounts or enter manually</small>
+                                            </div>
+                                            <div class="d-flex gap-2 flex-wrap">
+                                                <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
+                                                <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
+                                            </div>
+                                        </div>
+                                        <div id="cashKeypad" class="keypad-grid compact mt-3">
+                                            <button class="key-btn" data-k="7">7</button>
+                                            <button class="key-btn" data-k="8">8</button>
+                                            <button class="key-btn" data-k="9">9</button>
+                                            <button class="key-btn" data-k="4">4</button>
+                                            <button class="key-btn" data-k="5">5</button>
+                                            <button class="key-btn" data-k="6">6</button>
+                                            <button class="key-btn" data-k="1">1</button>
+                                            <button class="key-btn" data-k="2">2</button>
+                                            <button class="key-btn" data-k="3">3</button>
+                                            <button class="key-btn key-action" data-k="C">C</button>
+                                            <button class="key-btn" data-k="0">0</button>
+                                            <button class="key-btn key-action" data-k="B">&#x232B;</button>
+                                        </div>
+                                        <div class="cash-controls mt-3 d-flex flex-wrap gap-2">
+                                            <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm flex-grow-1" placeholder="Enter cash amount" />
+                                            <button id="cashFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining</button>
+                                            <button id="addPlasticBagBtn" class="btn btn-outline-primary btn-sm" type="button" title="Add a plastic bag to this sale">+ Plastic Bag</button>
+                                            <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
+                                            <button id="applyCashBtn" class="btn btn-primary btn-sm flex-grow-1">Apply Cash</button>
+                                        </div>
+                                        <div id="cashSummaryData" class="visually-hidden" aria-hidden="true">
+                                            <div id="amountDue"></div>
+                                            <div id="amountCash"></div>
+                                            <div id="amountCashEntered"></div>
+                                            <div id="amountChange"></div>
+                                        </div>
+                                    </div>
+                                    <div id="otherSection" class="tender-mode mt-4">
+                                        <div class="section-heading mb-2">
+                                            <div class="fw-semibold">Card / Other entry</div>
+                                            <small class="text-muted">Use for card or non-cash tenders</small>
+                                        </div>
+                                        <div id="otherKeypad" class="keypad-grid compact mb-2">
+                                            <button class="key-btn" data-k="7">7</button>
+                                            <button class="key-btn" data-k="8">8</button>
+                                            <button class="key-btn" data-k="9">9</button>
+                                            <button class="key-btn" data-k="4">4</button>
+                                            <button class="key-btn" data-k="5">5</button>
+                                            <button class="key-btn" data-k="6">6</button>
+                                            <button class="key-btn" data-k="1">1</button>
+                                            <button class="key-btn" data-k="2">2</button>
+                                            <button class="key-btn" data-k="3">3</button>
+                                            <button class="key-btn key-action" data-k="C">C</button>
+                                            <button class="key-btn" data-k="0">0</button>
+                                            <button class="key-btn key-action" data-k="B">&#x232B;</button>
+                                        </div>
+                                        <div class="cash-summary mb-2">
+                                            <div class="d-flex justify-content-between">
+                                                <div>Due</div>
+                                                <div id="amountDueOther" class="fw-semibold"></div>
+                                            </div>
+                                        </div>
+                                        <div class="input-group">
+                                            <span id="otherLabel" class="input-group-text">Amount</span>
+                                            <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
+                                            <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining</button>
+                                            <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
+                                        </div>
+                                    </div>
+                                    <div class="tender-actions mt-4 pt-3 border-top">
+                                        <div class="d-flex justify-content-between align-items-center mb-2">
+                                            <div class="fw-semibold text-muted">Remaining Due</div>
+                                            <div id="tenderDue" class="fw-bold"></div>
+                                        </div>
+                                        <button id="openDiscountBtn" class="btn btn-outline-secondary w-100 mb-2">Discount</button>
+                                        <button id="completeSaleBtn" class="btn btn-success btn-lg w-100">Complete Sale</button>
+                                    </div>
                                 </div>
                             </div>
-                            <div class="d-grid gap-2 tender-actions">
-                                <div class="d-flex justify-content-between align-items-center mb-2">
-                                    <div class="fw-semibold text-muted">Remaining Due</div>
-                                    <div id="tenderDue" class="fw-bold"></div>
-                                </div>
-                                <button id="openDiscountBtn" class="btn btn-outline-secondary">Discount</button>
-                                <button id="completeSaleBtn" class="btn btn-success btn-lg">Complete Sale</button>
-                            </div>
-                        </div>
-                        <div class="checkout-basket mt-2 pt-3 border-top">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <h6 class="m-0 text-uppercase text-muted small">Basket overview</h6>
-                                <small class="text-muted">Updates live</small>
-                            </div>
-                            <div id="checkoutCart" class="checkout-cart limited"></div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
-    </div>
-    <!-- Removed fixed barcode bar; compact entry lives under cart actions -->
+    </div>    <!-- Removed fixed barcode bar; compact entry lives under cart actions -->
 
     <!-- Product Search Overlay -->
     <div id="searchOverlay" class="search-overlay">
@@ -516,12 +542,12 @@
                         <div class="fw-semibold mb-2">Denominations</div>
                         <div id="denomsGrid" class="row g-2">
                             <!-- Denomination controls: readonly qty with +1 / -1 buttons -->
-                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£50</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="50" type="button">-1</button><input data-denom="50" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="50" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£20</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="20" type="button">-1</button><input data-denom="20" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="20" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£10</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="10" type="button">-1</button><input data-denom="10" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="10" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£5</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="5" type="button">-1</button><input data-denom="5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="5" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£2</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="2" type="button">-1</button><input data-denom="2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="2" type="button">+1</button></div></div>
-                            <div class="col-6 col-md-4"><label class="form-label">Ã‚Â£1</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="1" type="button">-1</button><input data-denom="1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="1" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Â£50</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="50" type="button">-1</button><input data-denom="50" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="50" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Â£20</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="20" type="button">-1</button><input data-denom="20" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="20" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Â£10</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="10" type="button">-1</button><input data-denom="10" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="10" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Â£5</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="5" type="button">-1</button><input data-denom="5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="5" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Â£2</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="2" type="button">-1</button><input data-denom="2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="2" type="button">+1</button></div></div>
+                            <div class="col-6 col-md-4"><label class="form-label">Â£1</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="1" type="button">-1</button><input data-denom="1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="1" type="button">+1</button></div></div>
                             <div class="col-6 col-md-4"><label class="form-label">50p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.5" type="button">-1</button><input data-denom="0.5" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.5" type="button">+1</button></div></div>
                             <div class="col-6 col-md-4"><label class="form-label">20p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.2" type="button">-1</button><input data-denom="0.2" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.2" type="button">+1</button></div></div>
                             <div class="col-6 col-md-4"><label class="form-label">10p</label><div class="input-group input-group-sm"><button class="btn btn-outline-danger sub-denom" data-denom="0.1" type="button">-1</button><input data-denom="0.1" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="qty" readonly><button class="btn btn-outline-secondary add-denom" data-denom="0.1" type="button">+1</button></div></div>
@@ -536,16 +562,16 @@
                     <div class="card p-3">
                         <div class="fw-semibold mb-2">Summary</div>
                         <div id="reconSummary" style="display:none;">
-                            <div class="d-flex justify-content-between"><div>Opening Float</div><div id="sumOpening">Ã‚Â£0.00</div></div>
-                            <div class="d-flex justify-content-between"><div>Cash Sales (net)</div><div id="sumCashSales">Ã‚Â£0.00</div></div>
-                            <div class="d-flex justify-content-between"><div>Card Sales (net)</div><div id="sumCardSales">Ã‚Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Opening Float</div><div id="sumOpening">Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Cash Sales (net)</div><div id="sumCashSales">Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Card Sales (net)</div><div id="sumCardSales">Â£0.00</div></div>
                             <div class="d-flex justify-content-between"><div>Payouts</div><div>
                                 <input type="number" step="0.01" id="sumPayoutsInput" class="form-control form-control-sm" placeholder="0.00" style="max-width: 140px;">
                             </div></div>
                             <hr>
-                            <div class="d-flex justify-content-between"><div>Expected Till</div><div id="sumExpected">Ã‚Â£0.00</div></div>
-                            <div class="d-flex justify-content-between"><div>Counted (denoms)</div><div id="sumCounted">Ã‚Â£0.00</div></div>
-                            <div class="d-flex justify-content-between fw-semibold"><div>Variance</div><div id="sumVariance">Ã‚Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Expected Till</div><div id="sumExpected">Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Counted (denoms)</div><div id="sumCounted">Â£0.00</div></div>
+                            <div class="d-flex justify-content-between fw-semibold"><div>Variance</div><div id="sumVariance">Â£0.00</div></div>
                         </div>
                         <div id="reconResult" class="mt-2" style="display:none;"></div>
                         <div class="d-grid mt-3">
@@ -805,7 +831,7 @@
                     <div class="row mb-4">
                         <div class="col-md-6">
                             <h6 class="text-muted">GBP Total</h6>
-                            <h3 id="eurOverlayGbpTotal" class="text-dark">Ã‚Â£0.00</h3>
+                            <h3 id="eurOverlayGbpTotal" class="text-dark">Â£0.00</h3>
                         </div>
                         <div class="col-md-6">
                             <h6 class="text-muted">Store Rate (1 GBP)</h6>
@@ -816,15 +842,15 @@
                         <div class="row">
                             <div class="col-md-4">
                                 <small class="text-muted">Exact EUR</small>
-                                <div id="eurOverlayExact" class="h5 font-monospace">Ã¢â€šÂ¬0.00</div>
+                                <div id="eurOverlayExact" class="h5 font-monospace">â‚¬0.00</div>
                             </div>
                             <div class="col-md-4">
-                                <small class="text-muted">Round Up (Ã¢â€šÂ¬5)</small>
-                                <div id="eurOverlayRoundUp" class="h5 font-monospace">Ã¢â€šÂ¬0.00</div>
+                                <small class="text-muted">Round Up (â‚¬5)</small>
+                                <div id="eurOverlayRoundUp" class="h5 font-monospace">â‚¬0.00</div>
                             </div>
                             <div class="col-md-4">
-                                <small class="text-muted">Round Down (Ã¢â€šÂ¬5)</small>
-                                <div id="eurOverlayRoundDown" class="h5 font-monospace">Ã¢â€šÂ¬0.00</div>
+                                <small class="text-muted">Round Down (â‚¬5)</small>
+                                <div id="eurOverlayRoundDown" class="h5 font-monospace">â‚¬0.00</div>
                             </div>
                         </div>
                     </div>
@@ -832,20 +858,20 @@
                         <div class="col-md-6">
                             <button id="eurSelectRoundUp" class="btn btn-primary btn-lg w-100" onclick="eurApplyRounding('up')">
                                 <div>Use Rounded Up</div>
-                                <small id="eurSelectRoundUpLabel" class="d-block">Ã¢â€šÂ¬0.00</small>
+                                <small id="eurSelectRoundUpLabel" class="d-block">â‚¬0.00</small>
                             </button>
                         </div>
                         <div class="col-md-6">
                             <button id="eurSelectRoundDown" class="btn btn-success btn-lg w-100" onclick="eurApplyRounding('down')">
                                 <div>Use Rounded Down</div>
-                                <small id="eurSelectRoundDownLabel" class="d-block">Ã¢â€šÂ¬0.00</small>
+                                <small id="eurSelectRoundDownLabel" class="d-block">â‚¬0.00</small>
                             </button>
                         </div>
                     </div>
                     <div class="mb-3">
                         <label class="form-label">Or Enter Custom EUR Amount</label>
                         <div class="input-group">
-                            <span class="input-group-text">Ã¢â€šÂ¬</span>
+                            <span class="input-group-text">â‚¬</span>
                             <input type="number" id="eurCustomInput" class="form-control form-control-lg" placeholder="0.00" step="0.01" min="0">
                             <button class="btn btn-outline-secondary" onclick="eurApplyCustom()">Apply Custom</button>
                         </div>
@@ -874,6 +900,9 @@
     <script src="{{ url_for('static', filename='js/bootstrap_fix.js', v='1') }}"></script>
 </body>
 </html>
+
+
+
 
 
 
