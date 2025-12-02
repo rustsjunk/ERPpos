@@ -11,210 +11,220 @@
     
     <!-- Optional: ensure UTF-8 is respected -->
 </head>
-<body>
-    <div class="app-topbar">
-        <div class="container-fluid d-flex justify-content-between align-items-center">
-            <div class="d-flex align-items-center gap-2">
-                <div class="brand h5 m-0">POS</div>
+<body class="pos-modern">
+    <div class="pos-root">
+        <header class="pos-header-main">
+            <div class="pos-header-left">
+                <button type="button" class="posx-btn posx-btn-icon" aria-label="Toggle menu">☰</button>
+                <button id="settingsBtn" type="button" class="icon-btn posx-btn posx-btn-ghost">Settings</button>
+                <button id="returnFromReceiptBtn" type="button" class="return-cta posx-btn posx-btn-ghost">Return by Receipt</button>
+                <button type="button" class="posx-btn posx-btn-ghost">Z-Read</button>
             </div>
-            <div></div>
-            <div class="d-flex align-items-center gap-2">
-                <label for="topCustomerSelect" class="visually-hidden">Customer</label><select id="topCustomerSelect" aria-label="Customer" class="customer-select form-select form-select-sm">
-                </select>
+            <div class="pos-header-center">
                 <div class="cashier-wrap">
-                    <button id="cashierBadge" class="cashier-badge btn btn-light btn-sm">Not signed in</button>
+                    <span>Cashier:</span>
+                    <button id="cashierBadge" class="cashier-badge posx-btn posx-btn-ghost" type="button">Not signed in</button>
+                    <span class="till-label">· Till 01</span>
                     <div id="cashierMenu" class="cashier-menu">
                         <button id="holdBtn" class="btn btn-outline-secondary w-100 mb-2">Hold Transaction</button>
                         <button id="pausedBtn" class="btn btn-outline-primary w-100 mb-2">Paused Transactions</button>
                         <button id="logoutBtn" class="logout-btn">Log Out</button>
                     </div>
                 </div>
-                <button id="returnFromReceiptBtn" aria-label="Return from receipt" class="return-cta" title="Return from receipt">? Return by Receipt</button>
-                <button id="notifIcon" aria-label="Notifications" class="notif-icon" title="Notifications">&#128276;</button>
-                <button id="settingsBtn" aria-label="Settings" class="icon-btn" title="Settings">&#9881;</button>
             </div>
-        </div>
-    </div>
-    <div class="container-fluid pos-shell">
-        <div class="row pos-grid g-3 align-items-start">
-            <div class="col-12">
-                <div class="card search-callout mb-0">
-                    <div class="card-body">
-                        <label for="itemSearch" class="form-label text-uppercase small text-muted mb-1">Add products to basket</label>
-                        <input type="text" id="itemSearch" aria-label="Search items" class="form-control" placeholder="Search to open the catalogue...">
-                        <div class="form-text">Searching launches the product view so you can choose variants.</div>
+            <div class="pos-header-right">
+                <button id="notifIcon" aria-label="Notifications" class="notif-icon notifications posx-btn" type="button">
+                    ⚠ <span>2 alerts</span>
+                    <span class="badge">2</span>
+                </button>
+                <div class="customer-inline">
+                    <label for="topCustomerSelect" class="visually-hidden">Customer</label>
+                    <select id="topCustomerSelect" aria-label="Customer" class="customer-select form-select form-select-sm">
+                    </select>
+                </div>
+                <button type="button" class="posx-btn posx-btn-ghost">Change Cashier</button>
+            </div>
+        </header>
+        <section class="pos-header-search">
+            <div class="search-input-wrap">
+                <span aria-hidden="true">🔍</span>
+                <input type="text" id="itemSearch" aria-label="Search items" placeholder="Search by name, style code, or barcode…" />
+            </div>
+            <div class="search-shortcuts">
+                F2: Search · F4: Price Check · F8: Hold Sale
+            </div>
+        </section>
+        <main class="pos-main">
+            <section class="panel panel-recent">
+                <div class="panel-header">
+                    <span>Recently Sold</span>
+                    <small>Tap to re-add to cart</small>
+                </div>
+                <div class="panel-body">
+                    <div id="recentSalesList" class="recent-list">
+                        <div class="text-muted">No recent sales yet.</div>
                     </div>
                 </div>
-            </div>
-            <div class="col-12 col-xl-3 pos-column">
-                <div class="card recent-items-card recent-panel h-100">
-                    <div class="card-body">
-                        <div class="d-flex align-items-center justify-content-between mb-2">
-                            <h5 class="m-0">Recent sales</h5>
-                            <small class="text-muted">Last 3</small>
-                        </div>
-                        <div id="recentSalesList" class="recent-sales-list">
-                            <div class="text-muted">No recent sales yet.</div>
-                        </div>
-                    </div>
+            </section>
+            <section class="panel panel-cart">
+                <div class="panel-header">
+                    <span>Cart</span>
+                    <small>Items in current transaction</small>
                 </div>
-            </div>
-            <div class="col-12 col-xl-4 pos-column">
-                <div class="cart-column h-100">
-                    <div id="cartCard" class="card">
-                        <div class="card-header">
-                            <h3 class="m-0">Current Basket</h3>
-                        </div>
-                        <div class="card-body">
-                            <div id="cartItems">
-                                <!-- Cart items will be dynamically added here -->
+                <div class="panel-body">
+                    <div id="cartCard" class="cart-panel">
+                        <div id="cartItems" class="cart-items"></div>
+                        <div class="cart-summary">
+                            <div class="customer-block">
+                                <label for="customerSelect" class="visually-hidden">Customer</label>
+                                <select id="customerSelect" aria-label="Select customer" class="customer-select"></select>
                             </div>
-                            <hr>
+                            <div class="cart-total">
+                                Total: <span id="cartTotal">0.00</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            <div id="checkoutPanel" class="panel panel-checkout checkout-panel" data-tender="cash">
+                <section class="panel panel-keypad">
+                    <div class="panel-header">
+                        <span>Keypad</span>
+                        <small>Price / Qty / Code</small>
+                    </div>
+                    <div class="panel-body">
+                        <div class="keypad-display" id="checkoutTotalMirror">0.00</div>
+                        <div id="cashSection" class="tender-mode">
+                            <div class="section-heading d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                <div>
+                                    <div class="fw-semibold">Cash keypad</div>
+                                    <small class="text-muted">Tap amounts or enter manually</small>
+                                </div>
+                                <div class="d-flex gap-2 flex-wrap">
+                                    <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
+                                    <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
+                                </div>
+                            </div>
+                            <div id="cashKeypad" class="keypad-grid compact mt-3">
+                                <button class="key-btn" data-k="7">7</button>
+                                <button class="key-btn" data-k="8">8</button>
+                                <button class="key-btn" data-k="9">9</button>
+                                <button class="key-btn" data-k="4">4</button>
+                                <button class="key-btn" data-k="5">5</button>
+                                <button class="key-btn" data-k="6">6</button>
+                                <button class="key-btn" data-k="1">1</button>
+                                <button class="key-btn" data-k="2">2</button>
+                                <button class="key-btn" data-k="3">3</button>
+                                <button class="key-btn key-action" data-k="C">C</button>
+                                <button class="key-btn" data-k="0">0</button>
+                                <button class="key-btn key-action" data-k="B">&#x232B;</button>
+                            </div>
+                            <div class="cash-controls mt-3 d-flex flex-wrap gap-2">
+                                <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm flex-grow-1" placeholder="Enter cash amount" />
+                                <button id="cashFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining</button>
+                                <button id="addPlasticBagBtn" class="btn btn-outline-primary btn-sm" type="button" title="Add a plastic bag to this sale">+ Plastic Bag</button>
+                                <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
+                                <button id="applyCashBtn" class="btn btn-primary btn-sm flex-grow-1">Apply Cash</button>
+                            </div>
+                            <div id="cashSummaryData" class="visually-hidden" aria-hidden="true">
+                                <div id="amountDue"></div>
+                                <div id="amountCash"></div>
+                                <div id="amountCashEntered"></div>
+                                <div id="amountChange"></div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+                <section class="panel panel-tenders">
+                    <div class="panel-header">
+                        <span>Tender Types</span>
+                        <small>Select payment method</small>
+                    </div>
+                    <div class="panel-body">
+                        <div class="checkout-mini-head">
+                            <div class="d-flex gap-2 flex-wrap">
+                                <button id="checkoutResetBtn" class="btn btn-outline-secondary btn-sm">Reset checkout</button>
+                                <button type="button" class="btn btn-outline-primary btn-sm" onclick="var card=document.getElementById('cartCard'); if(card){ card.scrollIntoView({ behavior: 'smooth', block: 'start' }); }">Go to basket</button>
+                            </div>
+                        </div>
+                        <div id="checkoutCart" class="checkout-cart limited mt-3"></div>
+                        <div class="tender-grid mb-3">
+                            <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
+                            <button class="btn tender-btn" data-tender="card">Card</button>
+                            <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
+                            <button class="btn tender-btn" data-tender="other">Other</button>
+                        </div>
+                        <div class="applied-payments">
                             <div class="d-flex justify-content-between align-items-center">
-                                <h5>Total:</h5>
-                                <h5 id="cartTotal">0.00</h5>
+                                <div class="fw-semibold">Applied payments</div>
+                                <div id="paymentsTotal" class="fw-semibold text-end"></div>
+                            </div>
+                            <div id="appliedPaymentsList" class="applied-payments-list"></div>
+                        </div>
+                        <div id="otherSection" class="tender-mode mt-4">
+                            <div class="section-heading mb-2">
+                                <div class="fw-semibold">Card / Other entry</div>
+                                <small class="text-muted">Use for card or non-cash tenders</small>
+                            </div>
+                            <div id="otherKeypad" class="keypad-grid compact mb-2">
+                                <button class="key-btn" data-k="7">7</button>
+                                <button class="key-btn" data-k="8">8</button>
+                                <button class="key-btn" data-k="9">9</button>
+                                <button class="key-btn" data-k="4">4</button>
+                                <button class="key-btn" data-k="5">5</button>
+                                <button class="key-btn" data-k="6">6</button>
+                                <button class="key-btn" data-k="1">1</button>
+                                <button class="key-btn" data-k="2">2</button>
+                                <button class="key-btn" data-k="3">3</button>
+                                <button class="key-btn key-action" data-k="C">C</button>
+                                <button class="key-btn" data-k="0">0</button>
+                                <button class="key-btn key-action" data-k="B">&#x232B;</button>
+                            </div>
+                            <div class="cash-summary mb-2">
+                                <div class="d-flex justify-content-between">
+                                    <div>Due</div>
+                                    <div id="amountDueOther" class="fw-semibold"></div>
+                                </div>
+                            </div>
+                            <div class="input-group">
+                                <span id="otherLabel" class="input-group-text">Amount</span>
+                                <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
+                                <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining</button>
+                                <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
                             </div>
                         </div>
+                        <div class="tender-actions mt-4 pt-3 border-top">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div class="fw-semibold text-muted">Remaining Due</div>
+                                <div id="tenderDue" class="fw-bold"></div>
+                            </div>
+                            <button id="completeSaleBtn" class="btn btn-success btn-lg w-100">Complete Sale</button>
+                        </div>
                     </div>
+                </section>
+            </div>
+        </main>
+        <footer class="pos-footer">
+            <div class="footer-left">
+                <div class="barcode-input-wrap">
+                    <span aria-hidden="true">📷</span>
+                    <input type="text" id="barcodeInput" class="form-control" placeholder="Scan barcode or type code…" autocomplete="off" />
+                    <button id="barcodeAddBtn" class="posx-btn posx-btn-ghost" type="button">Add</button>
+                </div>
+                <div class="footer-badges">
+                    <span>Scanner: Online</span>
+                    <span>ERP: Synced</span>
+                    <div id="barcodeFeedback" class="barcode-feedback small"></div>
                 </div>
             </div>
-            <div class="col-12 col-xl-5 pos-column">
-                <div id="checkoutPanel" class="card checkout-panel" data-tender="cash">
-                    <div class="card-header d-flex justify-content-between align-items-start flex-wrap gap-2">
-                        <div>
-                            <h3 class="m-0">Checkout</h3>
-                            <small class="text-muted">Review the basket and collect payment</small>
-                        </div>
-                        <div class="text-end">
-                            <div class="text-uppercase text-muted small">Basket Total</div>
-                            <div class="h4 m-0" id="checkoutTotalMirror">0.00</div>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="checkout-body">
-                            <div class="checkout-main">
-                                <div class="checkout-block">
-                                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                                        <div>
-                                            <h5 class="m-0">Basket overview</h5>
-                                            <small class="text-muted">Live view of the sale</small>
-                                        </div>
-                                        <div class="d-flex gap-2 flex-wrap">
-                                            <button id="checkoutResetBtn" class="btn btn-outline-secondary btn-sm">Reset checkout</button>
-                                            <button type="button" class="btn btn-outline-primary btn-sm" onclick="var card=document.getElementById('cartCard'); if(card){ card.scrollIntoView({ behavior: 'smooth', block: 'start' }); }">Go to basket</button>
-                                        </div>
-                                    </div>
-                                    <div id="checkoutCart" class="checkout-cart limited mt-3"></div>
-                                </div>
-                                <div class="checkout-block">
-                                    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
-                                        <div class="fw-semibold text-uppercase small text-muted">Tender type</div>
-                                        <small class="text-muted">Select how the customer is paying</small>
-                                    </div>
-                                    <div class="tender-grid mb-3">
-                                        <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
-                                        <button class="btn tender-btn" data-tender="card">Card</button>
-                                        <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
-                                        <button class="btn tender-btn" data-tender="other">Other</button>
-                                    </div>
-                                    <div>
-                                        <div class="d-flex justify-content-between align-items-center">
-                                            <div class="fw-semibold">Applied payments</div>
-                                            <div id="paymentsTotal" class="fw-semibold text-end"></div>
-                                        </div>
-                                        <div id="appliedPaymentsList" class="applied-payments-list"></div>
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="checkout-side">
-                                <div class="tender-panel p-3">
-                                    <div id="cashSection" class="tender-mode">
-                                        <div class="section-heading d-flex justify-content-between align-items-center flex-wrap gap-2">
-                                            <div>
-                                                <div class="fw-semibold">Cash keypad</div>
-                                                <small class="text-muted">Tap amounts or enter manually</small>
-                                            </div>
-                                            <div class="d-flex gap-2 flex-wrap">
-                                                <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
-                                                <button id="convertToEuroBtn" class="btn btn-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
-                                            </div>
-                                        </div>
-                                        <div id="cashKeypad" class="keypad-grid compact mt-3">
-                                            <button class="key-btn" data-k="7">7</button>
-                                            <button class="key-btn" data-k="8">8</button>
-                                            <button class="key-btn" data-k="9">9</button>
-                                            <button class="key-btn" data-k="4">4</button>
-                                            <button class="key-btn" data-k="5">5</button>
-                                            <button class="key-btn" data-k="6">6</button>
-                                            <button class="key-btn" data-k="1">1</button>
-                                            <button class="key-btn" data-k="2">2</button>
-                                            <button class="key-btn" data-k="3">3</button>
-                                            <button class="key-btn key-action" data-k="C">C</button>
-                                            <button class="key-btn" data-k="0">0</button>
-                                            <button class="key-btn key-action" data-k="B">&#x232B;</button>
-                                        </div>
-                                        <div class="cash-controls mt-3 d-flex flex-wrap gap-2">
-                                            <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm flex-grow-1" placeholder="Enter cash amount" />
-                                            <button id="cashFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining</button>
-                                            <button id="addPlasticBagBtn" class="btn btn-outline-primary btn-sm" type="button" title="Add a plastic bag to this sale">+ Plastic Bag</button>
-                                            <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
-                                            <button id="applyCashBtn" class="btn btn-primary btn-sm flex-grow-1">Apply Cash</button>
-                                        </div>
-                                        <div id="cashSummaryData" class="visually-hidden" aria-hidden="true">
-                                            <div id="amountDue"></div>
-                                            <div id="amountCash"></div>
-                                            <div id="amountCashEntered"></div>
-                                            <div id="amountChange"></div>
-                                        </div>
-                                    </div>
-                                    <div id="otherSection" class="tender-mode mt-4">
-                                        <div class="section-heading mb-2">
-                                            <div class="fw-semibold">Card / Other entry</div>
-                                            <small class="text-muted">Use for card or non-cash tenders</small>
-                                        </div>
-                                        <div id="otherKeypad" class="keypad-grid compact mb-2">
-                                            <button class="key-btn" data-k="7">7</button>
-                                            <button class="key-btn" data-k="8">8</button>
-                                            <button class="key-btn" data-k="9">9</button>
-                                            <button class="key-btn" data-k="4">4</button>
-                                            <button class="key-btn" data-k="5">5</button>
-                                            <button class="key-btn" data-k="6">6</button>
-                                            <button class="key-btn" data-k="1">1</button>
-                                            <button class="key-btn" data-k="2">2</button>
-                                            <button class="key-btn" data-k="3">3</button>
-                                            <button class="key-btn key-action" data-k="C">C</button>
-                                            <button class="key-btn" data-k="0">0</button>
-                                            <button class="key-btn key-action" data-k="B">&#x232B;</button>
-                                        </div>
-                                        <div class="cash-summary mb-2">
-                                            <div class="d-flex justify-content-between">
-                                                <div>Due</div>
-                                                <div id="amountDueOther" class="fw-semibold"></div>
-                                            </div>
-                                        </div>
-                                        <div class="input-group">
-                                            <span id="otherLabel" class="input-group-text">Amount</span>
-                                            <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
-                                            <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining</button>
-                                            <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
-                                        </div>
-                                    </div>
-                                    <div class="tender-actions mt-4 pt-3 border-top">
-                                        <div class="d-flex justify-content-between align-items-center mb-2">
-                                            <div class="fw-semibold text-muted">Remaining Due</div>
-                                            <div id="tenderDue" class="fw-bold"></div>
-                                        </div>
-                                        <button id="openDiscountBtn" class="btn btn-outline-secondary w-100 mb-2">Discount</button>
-                                        <button id="completeSaleBtn" class="btn btn-success btn-lg w-100">Complete Sale</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+            <div class="footer-right">
+                <button id="openDiscountBtn" class="posx-btn posx-btn-ghost" type="button">Line Discount</button>
+                <button class="posx-btn posx-btn-ghost" type="button">Overall Discount</button>
+                <button id="clearCartBtn" class="posx-btn posx-btn-danger" type="button">Clear Cart</button>
+                <button id="checkoutBtn" class="posx-btn posx-btn-primary" type="button">Complete Sale</button>
             </div>
-        </div>
-    </div>    <!-- Removed fixed barcode bar; compact entry lives under cart actions -->
+        </footer>
+    </div>
 
     <!-- Product Search Overlay -->
     <div id="searchOverlay" class="search-overlay">
@@ -760,19 +770,6 @@
             <div class="d-flex justify-content-end mt-2">
                 <button id="returnLoadBtn" class="btn btn-danger" disabled>Load As Return</button>
             </div>
-        </div>
-    </div>
-
-    <!-- Global Action Footer -->
-    <div class="action-footer">
-        <div class="container-fluid d-flex align-items-center justify-content-end gap-2">
-            <div class="d-none d-sm-flex align-items-center gap-2 me-auto">
-                <input type="text" id="barcodeInput" class="form-control form-control-sm" placeholder="Scan or type barcode" autocomplete="off" style="max-width: 240px;">
-                <button id="barcodeAddBtn" class="btn btn-outline-primary btn-sm">Add</button>
-                <div id="barcodeFeedback" class="barcode-feedback small"></div>
-            </div>
-            <button id="clearCartBtn" class="btn btn-outline-secondary">Clear Cart</button>
-            <button id="checkoutBtn" class="btn btn-primary btn-lg">Checkout</button>
         </div>
     </div>
 
