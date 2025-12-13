@@ -1,5 +1,8 @@
 ﻿<!DOCTYPE html>
-<html lang="en" data-print-agent-url="{{ receipt_agent_url or '' }}" data-receipt-default-port="{{ receipt_default_port or 'COM3' }}">
+<html lang="en"
+      data-print-agent-url="{{ receipt_agent_url or '' }}"
+      data-receipt-default-port="{{ receipt_default_port or 'COM3' }}"
+      data-gift-voucher-item="{{ gift_voucher_item or '' }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -100,9 +103,18 @@
     <!-- Product Search Overlay -->
     <div id="searchOverlay" class="search-overlay">
         <div class="search-modal">
+            <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                <input type="text" id="searchInputBig" aria-label="Search products" class="form-control flex-grow-1" placeholder="Search products..." />
+                <label for="brandFilter" class="visually-hidden">Brand filter</label>
+                <select id="brandFilter" aria-label="Brand filter" class="form-select" style="max-width:220px"></select>
+            </div>
             <div class="d-flex justify-content-between align-items-center mb-3">
-                <input type="text" id="searchInputBig" aria-label="Search products" class="form-control me-2" placeholder="Search products..." />
-                <label for="brandFilter" class="visually-hidden">Brand filter</label><select id="brandFilter" aria-label="Brand filter" class="form-select" style="max-width:220px"></select>
+                <div class="form-check mb-0">
+                    <input class="form-check-input" type="checkbox" id="zeroStockToggle" />
+                    <label class="form-check-label small" for="zeroStockToggle">
+                        Show zero-stock lines
+                    </label>
+                </div>
             </div>
             <div id="searchGrid" class="row row-cols-2 row-cols-md-4 g-3"></div>
             <div class="d-flex justify-content-end mt-3">
@@ -344,6 +356,10 @@
             </div>
             <div class="mb-2">Receipt: <span id="receiptInvoice"></span></div>
             <div class="display-6 mb-3">Change: <span id="receiptChange">0.00</span></div>
+            <div id="receiptVoucherDetails" class="border rounded p-3 mb-3" style="display:none;">
+                <div class="text-uppercase text-muted small fw-semibold mb-2">Voucher Activity</div>
+                <ul id="receiptVoucherList" class="list-unstyled mb-0 small"></ul>
+            </div>
             <p class="text-muted">Would you like to print the receipt?</p>
             <div class="form-check mt-2">
                 <input class="form-check-input" type="checkbox" id="giftReceiptCheckbox">
@@ -756,6 +772,7 @@
                 <div id="barcodeFeedback" class="barcode-feedback small"></div>
             </div>
             <button id="clearCartBtn" class="btn btn-outline-secondary">Clear Cart</button>
+            <button id="voucherSaleBtn" class="btn btn-outline-primary">Gift Voucher</button>
             <button id="checkoutBtn" class="btn btn-primary btn-lg">Checkout</button>
         </div>
     </div>
@@ -764,10 +781,13 @@
     <div id="voucherOverlay" class="search-overlay">
         <div class="search-modal" style="max-width: 560px;">
             <div class="d-flex justify-content-between align-items-center mb-3">
-                <div class="h5 m-0">Scan Gift Voucher</div>
+                <div>
+                    <div class="h5 m-0" id="voucherOverlayTitle">Scan Gift Voucher</div>
+                    <p class="text-muted small mb-0" id="voucherOverlayHint">Focus the input and scan the voucher barcode, or type it in. Enter the voucher amount to apply.</p>
+                </div>
                 <button id="voucherCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
             </div>
-            <p class="text-muted">Focus the input and scan the voucher barcode, or type it in. Enter the voucher amount to apply.</p>
+            <div id="voucherOverlayStatus" class="alert alert-info py-2 px-3 small" style="display:none;"></div>
             <input type="text" id="voucherCodeInput" class="form-control mb-2" placeholder="Voucher barcode" />
             <div class="input-group">
                 <span class="input-group-text">Amount</span>
@@ -884,12 +904,6 @@
     <script src="{{ url_for('static', filename='js/bootstrap_fix.js', v='1') }}"></script>
 </body>
 </html>
-
-
-
-
-
-
 
 
 

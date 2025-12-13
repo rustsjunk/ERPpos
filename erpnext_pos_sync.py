@@ -50,6 +50,7 @@ def pos_ingest(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "is_pos": 1,
         "posting_date": nowdate(),
         "pos_receipt_id": receipt_id,  # Custom Data field (Unique)
+        "pos_voucher_code": payload.get("pos_voucher_code") or _voucher_code_concat(payload.get("voucher_redeem"))
     })
 
     for it in items:
@@ -151,3 +152,24 @@ def _normalize_payload(src: Dict[str, Any]) -> Dict[str, Any]:
         "payments": payments,
     }
 
+
+def _voucher_code_concat(rows: Optional[Any]) -> Optional[str]:
+    codes: List[str] = []
+    if isinstance(rows, dict):
+        rows_iter = [rows]
+    else:
+        rows_iter = rows or []
+    for entry in rows_iter:
+        if not isinstance(entry, dict):
+            continue
+        code = entry.get("code") or entry.get("voucher_code")
+        if not code:
+            continue
+        text = str(code).strip()
+        if not text:
+            continue
+        if text not in codes:
+            codes.append(text)
+    if not codes:
+        return None
+    return ", ".join(codes)

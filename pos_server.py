@@ -73,6 +73,7 @@ except ValueError:
     BOOTSTRAP_ITEM_BATCHES = 6
 SKIP_BARCODE_SYNC = os.getenv('POS_SKIP_BARCODE_SYNC', '0') == '1'
 POS_PRICE_LIST = os.getenv('POS_PRICE_LIST') or None
+POS_GIFT_VOUCHER_ITEM = os.getenv('POS_GIFT_VOUCHER_ITEM', 'GIFT-VOUCHER')
 CASHIER_DOCTYPE = os.getenv('POS_CASHIER_DOCTYPE', 'Cashier')
 CASHIER_CODE_FIELD = os.getenv('POS_CASHIER_CODE_FIELD', 'code')
 CASHIER_NAME_FIELD = os.getenv('POS_CASHIER_NAME_FIELD', 'cashier_name')
@@ -1542,7 +1543,8 @@ def index():
     return render_template(
         'pos.html',
         receipt_agent_url=RECEIPT_AGENT_URL or '',
-        receipt_default_port=RECEIPT_DEFAULT_PORT
+        receipt_default_port=RECEIPT_DEFAULT_PORT,
+        gift_voucher_item=POS_GIFT_VOUCHER_ITEM
     )
 
 
@@ -1704,6 +1706,12 @@ def _generate_invoice_name(till_number: Optional[str] = None) -> str:
     return f"{date_segment}{till_segment}{unique_segment}"
 
 
+def _generate_voucher_code(prefix: str = 'GV') -> str:
+    date_segment = datetime.now().strftime('%y%m%d')
+    unique_segment = uuid4().hex[:6].upper()
+    return f"{prefix}-{date_segment}-{unique_segment}"
+
+
 def _extract_till_number(data: Optional[Dict[str, Any]]) -> Optional[str]:
     if not isinstance(data, dict):
         return None
@@ -1807,6 +1815,7 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
     items = data.get('items') or []
     payments = data.get('payments') or []
     vouchers = data.get('vouchers') or []
+    voucher_issue = data.get('voucher_issue') or []
     tender = (data.get('tender') or '').strip() or None
 
     lines = []
@@ -1871,6 +1880,10 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
         'lines': lines,
         'payments': payments_payload,
         'voucher_redeem': voucher_payload,
+        'voucher_issue': [
+            {'code': v.get('code'), 'amount': float(v.get('amount') or 0)}
+            for v in voucher_issue if v.get('code')
+        ],
         'discount': float(data.get('discount') or 0),
         'tax': float(data.get('tax') or 0),
         'tender': tender,
@@ -2008,6 +2021,137 @@ def create_sale():
         return jsonify({'status': 'error', 'message': _error_message_from_response(e.response)}), e.response.status_code if e.response else 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/vouchers/check', methods=['POST'])
+def api_voucher_check():
+    if not ps:
+        return jsonify({'status': 'error', 'message': 'Voucher service unavailable'}), 500
+    payload = request.get_json(silent=True) or {}
+    code = str(payload.get('code') or payload.get('voucher_code') or '').strip()
+    if not code:
+        return jsonify({'status': 'error', 'message': 'Voucher code is required'}), 400
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    refresh = bool(payload.get('refresh')) or False
+    details = None
+    try:
+        details = ps.voucher_details(conn, code)
+    except Exception as exc:
+        app.logger.warning('Local voucher lookup failed for %s: %s', code, exc)
+    if (refresh or not details) and not USE_MOCK and _has_erp_credentials():
+        try:
+            synced = ps.sync_voucher_from_erp(conn, code)
+            if synced:
+                details = synced
+        except Exception as exc:
+            app.logger.warning('ERP voucher sync failed for %s: %s', code, exc)
+    if not details:
+        return jsonify({'status': 'error', 'message': 'Voucher not found'}), 404
+    meta = details.get('meta') or {}
+    balance = float(details.get('balance') or 0)
+    initial_value = float(details.get('initial_value') or 0)
+    expiry = meta.get('expiry_date')
+    status_meta = meta.get('status')
+    status_label = status_meta or ('Active' if int(details.get('active') or 0) else 'Inactive')
+    expired = False
+    if expiry:
+        expiry_text = str(expiry).strip()
+        try:
+            expiry_dt = datetime.fromisoformat(expiry_text)
+        except ValueError:
+            try:
+                expiry_dt = datetime.strptime(expiry_text, '%Y-%m-%d')
+            except ValueError:
+                expiry_dt = None
+        if expiry_dt:
+            expired = expiry_dt.date() < datetime.utcnow().date()
+            if expired:
+                status_label = 'Expired'
+    can_redeem = (balance > 0.004) and int(details.get('active') or 0) == 1 and not expired
+    requested_amount = payload.get('amount')
+    try:
+        requested_value = float(requested_amount) if requested_amount is not None else None
+    except (TypeError, ValueError):
+        requested_value = None
+    allowed_amount = balance if requested_value is None else min(balance, requested_value)
+    note = None
+    if not can_redeem:
+        note = 'Voucher is inactive or expired.'
+    elif requested_value is not None and requested_value > balance + 0.005:
+        note = f'Only {balance:.2f} available'
+    response = {
+        'status': 'success',
+        'voucher': {
+            'code': details.get('voucher_code'),
+            'balance': round(max(0.0, balance), 2),
+            'initial_value': round(initial_value, 2),
+            'status_label': status_label,
+            'customer': meta.get('customer'),
+            'expiry_date': expiry,
+            'erp_name': meta.get('erp_name'),
+            'can_redeem': bool(can_redeem and allowed_amount > 0),
+            'allowed_amount': round(max(0.0, allowed_amount), 2),
+            'requested_amount': requested_value,
+            'note': note
+        }
+    }
+    return jsonify(response)
+
+
+@app.route('/api/vouchers/issue', methods=['POST'])
+def api_voucher_issue():
+    if not ps:
+        return jsonify({'status': 'error', 'message': 'Voucher service unavailable'}), 500
+    payload = request.get_json(silent=True) or {}
+    code = str(payload.get('voucher_code') or payload.get('code') or '').strip()
+    auto_generated = False
+    if not code:
+        code = _generate_voucher_code()
+        auto_generated = True
+    try:
+        amount = float(payload.get('amount') or payload.get('value') or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    if amount <= 0:
+        return jsonify({'status': 'error', 'message': 'Voucher amount must be greater than zero'}), 400
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    issue_date = payload.get('issue_date') or datetime.utcnow().date().isoformat()
+    expiry_date = payload.get('expiry_date')
+    till_number = _extract_till_number(payload)
+    voucher_payload = {
+        'voucher_code': code,
+        'amount': amount,
+        'issue_date': issue_date,
+        'expiry_date': expiry_date,
+        'customer': payload.get('customer'),
+        'mode_of_payment': payload.get('mode_of_payment'),
+        'remarks': payload.get('remarks'),
+        'is_clearance': bool(payload.get('is_clearance')),
+        'till_number': till_number,
+        'pos_profile': payload.get('pos_profile'),
+        'sale_id': payload.get('sale_id')
+    }
+    try:
+        info = ps.queue_voucher_issue(conn, voucher_payload)
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        app.logger.exception('Failed to queue voucher issue for %s', code)
+        return jsonify({'status': 'error', 'message': 'Unable to issue voucher'}), 500
+    return jsonify({
+        'status': 'success',
+        'voucher': {
+            'code': info.get('voucher_code'),
+            'amount': info.get('amount'),
+            'issue_date': info.get('issue_date'),
+            'expiry_date': info.get('expiry_date'),
+            'auto_generated': auto_generated
+        }
+    }), 201
 
 
 @app.route('/api/pos/sales', methods=['POST'])
@@ -3151,7 +3295,3 @@ def api_invoice_detail(inv_id: str):
     except Exception:
         pass
     return jsonify({'status':'error','message':'Invoice not found'}), 404
-
-
-
-

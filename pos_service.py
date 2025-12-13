@@ -9,6 +9,10 @@ import urllib.error
 
 DB_PATH = os.environ.get("POS_DB_PATH", "pos.db")
 BACKUP_DIR = os.environ.get("POS_BACKUP_DIR", "pos_backup")
+try:
+    ITEM_PULL_PAGE_LIMIT = int(os.environ.get("POS_ITEM_PULL_LIMIT", "500"))
+except ValueError:
+    ITEM_PULL_PAGE_LIMIT = 500
 _BARCODE_PULL_FORBIDDEN = False
 _BIN_PULL_FORBIDDEN = False
 
@@ -18,6 +22,12 @@ ERP_API_KEY = os.environ.get("ERP_API_KEY")
 ERP_API_SECRET = os.environ.get("ERP_API_SECRET")
 # Fully-qualified method path for ingest (your_app.pos_sync.pos_ingest)
 ERP_INGEST_METHOD = os.environ.get("ERP_INGEST_METHOD", "your_app.pos_sync.pos_ingest")
+ERP_VOUCHER_DOCTYPE = os.environ.get("ERP_VOUCHER_DOCTYPE", "Gift Voucher")
+ERP_VOUCHER_REDEEM_CHILD = os.environ.get(
+    "ERP_VOUCHER_REDEEM_CHILD",
+    f"{ERP_VOUCHER_DOCTYPE} Redeem Line"
+)
+ERP_VOUCHER_EVENT_ENDPOINT = os.environ.get("ERP_VOUCHER_EVENT_ENDPOINT", "/api/pos/voucher_event")
 
 # Track docs we repeatedly fail to fetch so we can fall back without noisy retries
 UNFETCHABLE_ITEM_DOCS: Set[str] = set()
@@ -38,6 +48,10 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
         pass
     try:
         _ensure_customer_table(conn)
+    except Exception:
+        pass
+    try:
+        _ensure_voucher_event_table(conn)
     except Exception:
         pass
     return conn
@@ -78,6 +92,27 @@ def _ensure_customer_table(conn: sqlite3.Connection):
       disabled INTEGER NOT NULL DEFAULT 0,
       modified_utc TEXT
     )
+    """)
+
+def _ensure_voucher_event_table(conn: sqlite3.Connection):
+    """Ensure voucher_events exists for issue/redeem event tracking."""
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS voucher_events (
+      event_id      TEXT PRIMARY KEY,
+      voucher_code  TEXT NOT NULL REFERENCES vouchers(voucher_code),
+      created_utc   TEXT NOT NULL,
+      kind          TEXT NOT NULL,
+      amount        NUMERIC NOT NULL,
+      balance_after NUMERIC,
+      currency      TEXT DEFAULT 'GBP',
+      sale_id       TEXT,
+      payload_json  TEXT NOT NULL,
+      queue_status  TEXT NOT NULL DEFAULT 'queued',
+      erp_docname   TEXT
+    )
+    """)
+    conn.execute("""
+    CREATE INDEX IF NOT EXISTS idx_voucher_events_status ON voucher_events(queue_status, created_utc)
     """)
 
 # ---------- UPSERT HELPERS ----------
@@ -221,6 +256,15 @@ def ensure_barcode_placeholder(conn: sqlite3.Connection, barcode: Optional[str],
         INSERT OR IGNORE INTO barcodes (barcode, item_id) VALUES (?,?)
     """, (barcode, item_id))
 
+def ensure_item_stub(conn: sqlite3.Connection, item_id: Optional[str]):
+    """Guarantee that a minimal items row exists so FK inserts (stock, barcodes) never fail."""
+    if not item_id:
+        return
+    conn.execute("""
+        INSERT OR IGNORE INTO items (item_id, parent_id, name, is_template, active, modified_utc)
+        VALUES (?, NULL, ?, 0, 0, ?)
+    """, (item_id, item_id, iso_now()))
+
 def ensure_attribute_definition(conn: sqlite3.Connection, attr_name: str, label: Optional[str] = None):
     """Ensure the attribute definition row exists so FK constraints pass."""
     if not attr_name:
@@ -283,6 +327,7 @@ def _hydrate_attribute_options(conn: sqlite3.Connection, docnames: List[str]):
             """, (attr_name, str(option), int(sort)))
 
 def upsert_stock(conn: sqlite3.Connection, item_id: str, qty: float, warehouse: str = "Shop"):
+    ensure_item_stub(conn, item_id)
     sql = """
     INSERT INTO stock (item_id, warehouse, qty) VALUES (?,?,?)
     ON CONFLICT(item_id, warehouse) DO UPDATE SET qty=excluded.qty;
@@ -301,6 +346,224 @@ def voucher_ledger_add(conn: sqlite3.Connection, code: str, amount: float, typ: 
         "INSERT INTO voucher_ledger (voucher_code, entry_utc, type, amount, sale_id, note) VALUES (?,?,?,?,?,?)",
         (code, iso_now(), typ, amount, sale_id, note)
     )
+
+def _queue_voucher_event(
+    conn: sqlite3.Connection,
+    voucher_code: str,
+    kind: str,
+    amount: float,
+    extra_payload: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    event_id = str(uuid.uuid4())
+    created = iso_now()
+    payload: Dict[str, Any] = {
+        "event_id": event_id,
+        "created_utc": created,
+        "event_type": kind,
+        "voucher_code": voucher_code,
+        "amount": float(amount)
+    }
+    if extra_payload:
+        payload.update(extra_payload)
+    balance_after = payload.get("balance_after")
+    currency = (payload.get("currency") or "GBP") if payload.get("currency") else "GBP"
+    sale_id = payload.get("sale_id")
+    conn.execute("""
+        INSERT INTO voucher_events (event_id, voucher_code, created_utc, kind, amount, balance_after, currency, sale_id, payload_json, queue_status)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (
+        event_id,
+        voucher_code,
+        created,
+        kind,
+        float(amount),
+        float(balance_after) if balance_after is not None else None,
+        str(currency),
+        sale_id,
+        json.dumps(payload, separators=(",",":")),
+        "queued"
+    ))
+    conn.execute("""
+        INSERT INTO outbox (kind, ref_id, created_utc, payload_json) VALUES ('voucher_event', ?, ?, ?)
+    """, (event_id, created, json.dumps(payload, separators=(",",":"))))
+    return payload
+
+def _normalize_issue_utc(raw: Optional[str]) -> str:
+    if raw is None:
+        return iso_now()
+    text = str(raw).strip()
+    if not text:
+        return iso_now()
+    if "T" in text:
+        return text if text.upper().endswith("Z") else text + "Z"
+    return f"{text}T00:00:00Z"
+
+def upsert_voucher_head(
+    conn: sqlite3.Connection,
+    code: str,
+    issue_utc: Optional[str],
+    initial_value: float,
+    active: int = 1,
+    meta: Optional[Dict[str, Any]] = None
+) -> None:
+    meta_json = None
+    if meta is not None:
+        try:
+            meta_json = json.dumps(meta, separators=(",",":"))
+        except Exception:
+            meta_json = json.dumps({})
+    conn.execute(
+        """
+        INSERT INTO vouchers (voucher_code, issued_utc, initial_value, active, meta_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(voucher_code) DO UPDATE SET
+            issued_utc = excluded.issued_utc,
+            initial_value = excluded.initial_value,
+            active = excluded.active,
+            meta_json = COALESCE(excluded.meta_json, vouchers.meta_json)
+        """,
+        (code, _normalize_issue_utc(issue_utc), float(initial_value), int(active or 0), meta_json)
+    )
+
+def voucher_details(conn: sqlite3.Connection, code: str) -> Optional[Dict[str, Any]]:
+    if not code:
+        return None
+    head = conn.execute(
+        "SELECT voucher_code, issued_utc, initial_value, active, meta_json FROM vouchers WHERE voucher_code=?",
+        (code,)
+    ).fetchone()
+    if not head:
+        return None
+    meta = {}
+    if head["meta_json"]:
+        try:
+            meta = json.loads(head["meta_json"])
+        except Exception:
+            meta = {}
+    bal_row = conn.execute(
+        "SELECT balance, active FROM v_voucher_balance WHERE voucher_code=?",
+        (code,)
+    ).fetchone()
+    balance = float(bal_row["balance"]) if bal_row and bal_row["balance"] is not None else 0.0
+    active = int(bal_row["active"]) if bal_row and "active" in bal_row.keys() else int(head["active"])
+    return {
+        "voucher_code": head["voucher_code"],
+        "issued_utc": head["issued_utc"],
+        "initial_value": float(head["initial_value"]),
+        "balance": balance,
+        "active": active,
+        "meta": meta
+    }
+
+def voucher_adjust_balance(conn: sqlite3.Connection, code: str, target_balance: float, note: str = "ERP sync") -> float:
+    row = conn.execute(
+        "SELECT balance FROM v_voucher_balance WHERE voucher_code=?",
+        (code,)
+    ).fetchone()
+    current = float(row["balance"]) if row and row["balance"] is not None else 0.0
+    delta = float(target_balance) - current
+    if abs(delta) > 0.005:
+        voucher_ledger_add(conn, code, delta, "adjust", sale_id=None, note=note)
+        return delta
+    return 0.0
+
+def _erp_lookup_voucher_doc(code: str) -> Optional[Dict[str, Any]]:
+    if not code:
+        return None
+    try:
+        import urllib.parse
+        path = "/api/resource/" + urllib.parse.quote(ERP_VOUCHER_DOCTYPE, safe="")
+        response = _erp_get(
+            path,
+            {
+                "filters": json.dumps([["voucher_code","=",code]]),
+                "fields": json.dumps(["name","voucher_code","status","original_amount","balance_amount"])
+            }
+        )
+    except Exception:
+        return None
+    rows = response.get("data") or response.get("message") or []
+    if not rows:
+        return None
+    name = rows[0].get("name")
+    if not name:
+        return None
+    try:
+        return _erp_get_doc(ERP_VOUCHER_DOCTYPE, name)
+    except Exception:
+        return None
+
+def sync_voucher_from_erp(conn: sqlite3.Connection, code: str) -> Optional[Dict[str, Any]]:
+    doc = _erp_lookup_voucher_doc(code)
+    if not doc:
+        return None
+    original_amount = float(doc.get("original_amount") or doc.get("original_amount_gbp") or 0)
+    balance = float(doc.get("balance_amount") or 0)
+    status = (doc.get("status") or "").strip()
+    issue_date = doc.get("issue_date") or doc.get("issue_datetime") or doc.get("issued_on")
+    expiry_date = doc.get("expiry_date")
+    meta = {
+        "erp_name": doc.get("name"),
+        "customer": doc.get("customer"),
+        "mode_of_payment": doc.get("mode_of_payment"),
+        "expiry_date": expiry_date,
+        "status": status,
+        "remarks": doc.get("remarks"),
+        "last_sync_utc": iso_now()
+    }
+    active = 0 if status in ("Expired","Cancelled") else 1
+    upsert_voucher_head(conn, code, issue_date, original_amount or balance, active, meta)
+    voucher_adjust_balance(conn, code, balance, note="ERP sync")
+    conn.commit()
+    details = voucher_details(conn, code)
+    if details:
+        details["meta"].update({
+            "status": status,
+            "erp_name": doc.get("name")
+        })
+    return details
+
+def queue_voucher_issue(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    code = (payload.get("voucher_code") or "").strip()
+    if not code:
+        raise ValueError("voucher_code is required")
+    existing = conn.execute("SELECT 1 FROM vouchers WHERE voucher_code=?", (code,)).fetchone()
+    if existing:
+        raise ValueError(f"Voucher {code} already exists")
+    amount = float(payload.get("amount") or payload.get("original_amount") or 0)
+    if amount <= 0:
+        raise ValueError("Voucher amount must be greater than zero")
+    issue_date = payload.get("issue_date") or dt.date.today().isoformat()
+    expiry = payload.get("expiry_date")
+    sale_id = payload.get("sale_id")
+    remarks = payload.get("remarks") or payload.get("note") or ""
+    meta = {
+        "customer": payload.get("customer"),
+        "expiry_date": expiry,
+        "remarks": remarks,
+        "till_number": payload.get("till_number"),
+        "pos_profile": payload.get("pos_profile")
+    }
+    upsert_voucher_head(conn, code, issue_date, amount, 1, meta)
+    voucher_ledger_add(conn, code, amount, "issue", sale_id=sale_id, note=remarks or "POS issue")
+    balance_after = voucher_balance(conn, code)
+    event_payload = {
+        "balance_after": balance_after if balance_after is not None else amount,
+        "currency": (payload.get("currency") or "GBP").upper(),
+        "issued_utc": issue_date,
+        "expiry_date": expiry,
+        "customer": payload.get("customer"),
+        "cashier": payload.get("cashier"),
+        "till_number": payload.get("till_number"),
+        "pos_profile": payload.get("pos_profile"),
+        "note": remarks,
+        "sale_id": sale_id,
+        "mode_of_payment": payload.get("mode_of_payment"),
+        "status": payload.get("status") or "Active"
+    }
+    _queue_voucher_event(conn, code, "issue", amount, event_payload)
+    conn.commit()
+    return {"voucher_code": code, "amount": amount, "issue_date": issue_date, "expiry_date": expiry}
 
 # ---------- SALES (transactional) ----------
 def begin_sale_txn(conn: sqlite3.Connection):
@@ -365,6 +628,10 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
         "totals": {"subtotal": subtotal, "total": total},
         "disable_rounded_total": 1,
         "voucher_redeem": sale.get("voucher_redeem", []),
+        "voucher_issue": sale.get("voucher_issue", []),
+        "pos_voucher_code": ",".join(
+            v["code"] for v in sale.get("voucher_redeem", []) if v.get("code")
+        ) or None,
         "tender": sale.get("tender"),
         "cash_given": sale.get("cash_given"),
         "change": sale.get("change"),
@@ -430,6 +697,16 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
             if bal is None or bal < amt - 1e-6:
                 raise ValueError(f"Voucher {code} insufficient balance or not found")
             voucher_ledger_add(conn, code, -amt, "redeem", sale_id=sale_id, note="POS redemption")
+            remaining_after = voucher_balance(conn, code)
+            event_payload = {
+                "balance_after": remaining_after if remaining_after is not None else max(0.0, (bal or 0.0) - amt),
+                "currency": (sale.get("currency_used") or "GBP").upper(),
+                "sale_id": sale_id,
+                "cashier": sale.get("cashier"),
+                "till_number": till_number,
+                "note": "POS redemption"
+            }
+            _queue_voucher_event(conn, code, "redeem", amt, event_payload)
 
         # Outbox enqueue (idempotent ref_id = sale_id)
         conn.execute("""
@@ -457,6 +734,119 @@ def _erp_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
+def _erp_resource_request(path: str, payload: Optional[Dict[str, Any]], method: str = "POST") -> Dict[str, Any]:
+    if not ERP_BASE:
+        return {"ok": True, "dry_run": True, "data": payload or {}}
+    url = ERP_BASE.rstrip("/") + path
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if ERP_API_KEY and ERP_API_SECRET:
+        headers["Authorization"] = f"token {ERP_API_KEY}:{ERP_API_SECRET}"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8")
+        return json.loads(body)
+
+def _erp_post_resource(doctype: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    import urllib.parse
+    path = "/api/resource/" + urllib.parse.quote(doctype, safe="")
+    return _erp_resource_request(path, payload, method="POST")
+
+def _erp_put_resource(doctype: str, name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    import urllib.parse
+    path = "/api/resource/{}/{}".format(
+        urllib.parse.quote(doctype, safe=""),
+        urllib.parse.quote(name, safe="")
+    )
+    return _erp_resource_request(path, payload, method="PUT")
+
+def _post_voucher_issue_to_erp(voucher: Dict[str, Any]) -> Dict[str, Any]:
+    if not voucher.get("voucher_code"):
+        raise ValueError("voucher_code missing for ERP issue")
+    payload = {
+        "doctype": ERP_VOUCHER_DOCTYPE,
+        "voucher_code": voucher.get("voucher_code"),
+        "mode_of_payment": voucher.get("mode_of_payment"),
+        "issue_date": voucher.get("issue_date") or dt.date.today().isoformat(),
+        "expiry_date": voucher.get("expiry_date"),
+        "customer": voucher.get("customer"),
+        "original_amount": float(voucher.get("original_amount") or voucher.get("balance_amount") or 0),
+        "balance_amount": float(voucher.get("balance_amount") or voucher.get("original_amount") or 0),
+        "status": voucher.get("status") or "Active",
+        "is_clearance": 1 if voucher.get("is_clearance") else 0,
+        "remarks": voucher.get("remarks"),
+        "pos_profile": voucher.get("pos_profile"),
+        "till_number": voucher.get("till_number")
+    }
+    res = _erp_post_resource(ERP_VOUCHER_DOCTYPE, payload)
+    data = res.get("data") or res
+    name = data.get("name") or data.get("voucher_code")
+    if name:
+        _erp_request("/api/method/frappe.client.submit", {"doc": {"doctype": ERP_VOUCHER_DOCTYPE, "name": name}})
+    return data
+
+def _post_voucher_event(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not ERP_BASE:
+        return {"ok": True, "dry_run": True}
+    endpoint = ERP_VOUCHER_EVENT_ENDPOINT or "/api/pos/voucher_event"
+    path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+    return _erp_request(path, payload)
+
+def _apply_voucher_redemptions_to_erp(
+    vouchers: List[Dict[str, Any]],
+    sale_docname: Optional[str],
+    sale_payload: Dict[str, Any]
+) -> None:
+    if not vouchers or not ERP_BASE:
+        return
+    posting_date = sale_payload.get("posting_date") or dt.date.today().isoformat()
+    pos_profile = sale_payload.get("till") or sale_payload.get("till_number") or sale_payload.get("warehouse")
+    till_number = sale_payload.get("till_number")
+    for entry in vouchers:
+        code = (entry.get("code") or "").strip()
+        amount = float(entry.get("amount") or 0)
+        if not code or amount <= 0:
+            continue
+        doc = _erp_lookup_voucher_doc(code)
+        if not doc:
+            raise ValueError(f"Voucher {code} not found in ERP")
+        balance = float(doc.get("balance_amount") or 0)
+        if balance + 1e-6 < amount:
+            raise ValueError(f"Voucher {code} balance too low in ERP")
+        redeem_lines = []
+        for ln in doc.get("redeem_lines") or []:
+            redeem_lines.append({
+                "name": ln.get("name"),
+                "doctype": ln.get("doctype") or ERP_VOUCHER_REDEEM_CHILD,
+                "reference_doctype": ln.get("reference_doctype"),
+                "reference_name": ln.get("reference_name"),
+                "posting_date": ln.get("posting_date"),
+                "amount": ln.get("amount"),
+                "pos_profile": ln.get("pos_profile"),
+                "till_number": ln.get("till_number")
+            })
+        redeem_lines.append({
+            "doctype": ERP_VOUCHER_REDEEM_CHILD,
+            "reference_doctype": "Sales Invoice",
+            "reference_name": sale_docname,
+            "posting_date": posting_date,
+            "amount": amount,
+            "pos_profile": pos_profile,
+            "till_number": till_number
+        })
+        new_balance = max(0.0, balance - amount)
+        update_payload = {
+            "redeem_lines": redeem_lines,
+            "balance_amount": new_balance,
+            "status": "Redeemed" if new_balance <= 0.005 else "Partially Redeemed"
+        }
+        _erp_put_resource(ERP_VOUCHER_DOCTYPE, doc.get("name"), update_payload)
+
 def post_sale_to_erpnext(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Example: post to a whitelisted method you expose, e.g. /api/method/your_app.pos_ingest
@@ -469,27 +859,77 @@ def post_sale_to_erpnext(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def push_outbox(conn: sqlite3.Connection, limit: int = 20):
     rows = conn.execute("""
-        SELECT id, ref_id, payload_json FROM outbox
-        WHERE kind='sale' ORDER BY id ASC LIMIT ?
+        SELECT id, kind, ref_id, payload_json FROM outbox
+        ORDER BY id ASC LIMIT ?
     """, (limit,)).fetchall()
     for r in rows:
         oid = r["id"]
+        kind = r["kind"]
         ref = r["ref_id"]
         payload = json.loads(r["payload_json"])
-        try:
-            conn.execute("UPDATE sales SET queue_status='posting' WHERE sale_id=?", (ref,))
-            conn.commit()
-            resp = post_sale_to_erpnext(payload)
-            # Mark posted
-            conn.execute("UPDATE sales SET queue_status='posted', erp_docname=COALESCE(erp_docname,'OK') WHERE sale_id=?", (ref,))
-            conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
-            conn.commit()
-            print(f"Posted sale {ref}: {resp}")
-        except Exception as e:
-            conn.execute("UPDATE sales SET queue_status='failed' WHERE sale_id=?", (ref,))
-            conn.execute("UPDATE outbox SET attempts=attempts+1, last_error=? WHERE id=?", (str(e), oid))
-            conn.commit()
-            print(f"Failed posting sale {ref}: {e}", file=sys.stderr)
+        if kind == "sale":
+            try:
+                conn.execute("UPDATE sales SET queue_status='posting' WHERE sale_id=?", (ref,))
+                conn.commit()
+                resp = post_sale_to_erpnext(payload)
+                sale_docname = resp.get("name") or resp.get("docname") or resp.get("sales_invoice")
+                try:
+                    _apply_voucher_redemptions_to_erp(payload.get("voucher_redeem", []), sale_docname, payload)
+                except Exception as voucher_exc:
+                    raise RuntimeError(f"Voucher sync failed: {voucher_exc}") from voucher_exc
+                conn.execute(
+                    "UPDATE sales SET queue_status='posted', erp_docname=COALESCE(?, erp_docname,'OK') WHERE sale_id=?",
+                    (sale_docname, ref)
+                )
+                conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
+                conn.commit()
+                print(f"Posted sale {ref}: {resp}")
+            except Exception as e:
+                conn.execute("UPDATE sales SET queue_status='failed' WHERE sale_id=?", (ref,))
+                conn.execute("UPDATE outbox SET attempts=attempts+1, last_error=? WHERE id=?", (str(e), oid))
+                conn.commit()
+                print(f"Failed posting sale {ref}: {e}", file=sys.stderr)
+        elif kind == "voucher_event":
+            try:
+                conn.execute("UPDATE voucher_events SET queue_status='posting' WHERE event_id=?", (ref,))
+                conn.commit()
+                resp = _post_voucher_event(payload)
+                docname = resp.get("name") or resp.get("docname") or resp.get("reference")
+                conn.execute(
+                    "UPDATE voucher_events SET queue_status='posted', erp_docname=COALESCE(?, erp_docname,'OK') WHERE event_id=?",
+                    (docname, ref)
+                )
+                conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
+                conn.commit()
+                print(f"Posted voucher event {ref}: {docname or 'OK'}")
+            except Exception as e:
+                conn.execute("UPDATE voucher_events SET queue_status='failed' WHERE event_id=?", (ref,))
+                conn.execute("UPDATE outbox SET attempts=attempts+1, last_error=? WHERE id=?", (str(e), oid))
+                conn.commit()
+                print(f"Failed posting voucher event {ref}: {e}", file=sys.stderr)
+        elif kind == "voucher":
+            try:
+                result = _post_voucher_issue_to_erp(payload.get("voucher") or {})
+                erp_name = result.get("name")
+                head = voucher_details(conn, ref)
+                meta = head["meta"] if head else {}
+                if meta is None:
+                    meta = {}
+                if erp_name:
+                    meta["erp_name"] = erp_name
+                if payload.get("voucher", {}).get("status"):
+                    meta["status"] = payload["voucher"]["status"]
+                conn.execute(
+                    "UPDATE vouchers SET meta_json=? WHERE voucher_code=?",
+                    (json.dumps(meta, separators=(",",":")), ref)
+                )
+                conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
+                conn.commit()
+                print(f"Posted voucher {ref}: {erp_name or 'OK'}")
+            except Exception as e:
+                conn.execute("UPDATE outbox SET attempts=attempts+1, last_error=? WHERE id=?", (str(e), oid))
+                conn.commit()
+                print(f"Failed posting voucher {ref}: {e}", file=sys.stderr)
 
 # ---------- BACKUPS ----------
 def ensure_dir(p: str):
@@ -521,7 +961,15 @@ def backup_ndjson(conn: sqlite3.Connection, day: Optional[str] = None):
         for r in conn.execute(q, (start, end_dt)):
             f.write(json.dumps(dict(r), separators=(",",":")) + "\n")
 
-    print(f"Backed up to {sales_path} and {ledger_path}")
+    events_path = Path(BACKUP_DIR) / f"voucher_events_{day}.ndjson"
+    with open(events_path, "w", encoding="utf-8") as f:
+        for row in conn.execute(
+            "SELECT payload_json FROM voucher_events WHERE created_utc >= ? AND created_utc < ? ORDER BY created_utc",
+            (start, end_dt)
+        ):
+            f.write(row["payload_json"] + "\n")
+
+    print(f"Backed up to {sales_path}, {ledger_path}, and {events_path}")
 
 # ---------- DEMO & CLI ----------
 def demo_seed(conn: sqlite3.Connection):
@@ -722,7 +1170,7 @@ def _erp_get_doc(doctype: str, name: str) -> Dict[str, Any]:
         data = json.loads(resp.read().decode("utf-8"))
     return data.get("data") or data
 
-def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
+def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE_LIMIT):
     """Pull Item (templates + variants) changed since cursor. Upsert into items; barcodes handled separately."""
     last_mod, last_name = _cursor_get(conn, "Item")
     filters = []
@@ -738,8 +1186,31 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
         return 0
     variants_to_hydrate: List[tuple[str, Optional[str]]] = []
     item_rows: List[Dict[str, Any]] = []
+    prefetched_item_docs: Dict[str, Optional[Dict[str, Any]]] = {}
+
+    def _fetch_item_doc_cached(item_id: str) -> Optional[Dict[str, Any]]:
+        if not item_id:
+            return None
+        if item_id in prefetched_item_docs:
+            return prefetched_item_docs[item_id]
+        doc = None
+        try:
+            doc = _erp_get_doc("Item", item_id)
+        except Exception as exc:
+            print(f"Failed to refetch Item {item_id} for metadata fallback: {exc}", file=sys.stderr)
+        prefetched_item_docs[item_id] = doc
+        return doc
+
     for d in data:
         parent = d.get("variant_of")
+        if "variant_of" not in d:
+            doc = _fetch_item_doc_cached(d.get("name"))
+            if doc:
+                parent = doc.get("variant_of") or parent
+                if "barcodes" not in d and doc.get("barcodes"):
+                    d["barcodes"] = doc.get("barcodes")
+                if d.get("image") in (None, "") and doc.get("image"):
+                    d["image"] = doc.get("image")
         price = d.get("standard_rate")
         try:
             price = float(price) if price is not None else None
@@ -767,7 +1238,7 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = 200):
             variants_to_hydrate.append((d["name"], parent))
         _ingest_child_barcodes(conn, d.get("barcodes"), d["name"])
     if variants_to_hydrate:
-        _hydrate_variant_attributes(conn, variants_to_hydrate)
+        _hydrate_variant_attributes(conn, variants_to_hydrate, prefetched_docs=prefetched_item_docs)
     if item_rows:
         _hydrate_item_tax_rates(conn, item_rows)
     _cursor_set(conn, "Item", data[-1]["modified"], data[-1]["name"])
@@ -804,7 +1275,11 @@ def _infer_variant_attributes_from_name(item_id: str) -> Optional[List[Dict[str,
         rows.append({"attribute": "Size", "attribute_value": size})
     return rows or None
 
-def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tuple[str, Optional[str]]]):
+def _hydrate_variant_attributes(
+    conn: sqlite3.Connection,
+    variant_rows: List[Tuple[str, Optional[str]]],
+    prefetched_docs: Optional[Dict[str, Optional[Dict[str, Any]]]] = None
+):
     """Fetch attributes for variants by hitting each Item doc (no child table permission required)."""
     if not variant_rows:
         return
@@ -833,22 +1308,15 @@ def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tup
             continue
         seen.add(item_id)
         attr_rows: Optional[List[Dict[str, Any]]] = None
-        if item_id in UNFETCHABLE_ITEM_DOCS:
+        doc_from_cache = prefetched_docs.get(item_id) if prefetched_docs else None
+        doc: Optional[Dict[str, Any]] = doc_from_cache
+        if doc is None and item_id in UNFETCHABLE_ITEM_DOCS:
             attr_rows = _infer_variant_attributes_from_name(item_id)
-        else:
+        elif doc is None:
             try:
                 doc = _erp_get_doc("Item", item_id)
-                # Persist any barcode field present on the Item doc (single field or child table).
-                if doc:
-                    if doc.get("barcode"):
-                        try:
-                            primary = str(doc.get("barcode")).strip()
-                        except Exception:
-                            primary = None
-                        if primary:
-                            upsert_barcode(conn, primary, item_id)
-                    _ingest_child_barcodes(conn, doc.get("barcodes"), item_id)
-                attr_rows = doc.get("attributes") or doc.get("variant_attributes") or doc.get("attributes_json") or []
+                if prefetched_docs is not None:
+                    prefetched_docs[item_id] = doc
             except Exception as exc:
                 http_status = getattr(exc, "code", None) if isinstance(exc, urllib.error.HTTPError) else None
                 if isinstance(exc, urllib.error.HTTPError):
@@ -870,6 +1338,18 @@ def _hydrate_variant_attributes(conn: sqlite3.Connection, variant_rows: List[Tup
                         if not isinstance(exc, urllib.error.HTTPError) or http_status not in (403, 404):
                             print(f"Failed to fetch attributes for {item_id}: {exc}", file=sys.stderr)
                         continue
+        if doc:
+            # Persist any barcode field present on the Item doc (single field or child table).
+            if doc.get("barcode"):
+                try:
+                    primary = str(doc.get("barcode")).strip()
+                except Exception:
+                    primary = None
+                if primary:
+                    upsert_barcode(conn, primary, item_id)
+            _ingest_child_barcodes(conn, doc.get("barcodes"), item_id)
+            if attr_rows is None:
+                attr_rows = doc.get("attributes") or doc.get("variant_attributes") or doc.get("attributes_json") or []
         if attr_rows is None:
             attr_rows = []
         conn.execute("DELETE FROM variant_attributes WHERE item_id=?", (item_id,))
@@ -1063,17 +1543,21 @@ def pull_bins_incremental(conn: sqlite3.Connection, warehouse: str, limit: int =
         return 0
     asof = iso_now()
     for b in data:
+        item_code = b.get("item_code")
+        if not item_code:
+            continue
+        ensure_item_stub(conn, item_code)
         sellable = float(b.get("projected_qty") if b.get("projected_qty") is not None else (b.get("actual_qty",0) - b.get("reserved_qty",0)))
         conn.execute("""
         INSERT INTO stock_snapshot (item_id, warehouse, qty_base, asof_utc)
         VALUES (?,?,?,?)
         ON CONFLICT(item_id, warehouse) DO UPDATE SET qty_base=excluded.qty_base, asof_utc=excluded.asof_utc
-        """, (b["item_code"], warehouse, sellable, asof))
+        """, (item_code, warehouse, sellable, asof))
         conn.execute("""
         INSERT INTO stock (item_id, warehouse, qty)
         VALUES (?,?,?)
         ON CONFLICT(item_id, warehouse) DO UPDATE SET qty=excluded.qty
-        """, (b["item_code"], warehouse, sellable))
+        """, (item_code, warehouse, sellable))
     _cursor_set(conn, f"Bin:{warehouse}", data[-1]["modified"], data[-1]["name"])
     conn.commit()
     return len(data)

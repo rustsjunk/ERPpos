@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>POS Layout</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111827;
+      color: #e5e7eb;
+    }
+
+    .pos-root {
+      height: 100vh;
+      display: grid;
+      grid-template-rows:
+        56px   /* header 1 */
+        52px   /* header 2 (search) */
+        1fr    /* main grid row 1 */
+        1fr    /* main grid row 2 */
+        80px;  /* footer */
+      gap: 8px;
+      padding: 8px;
+    }
+
+    /* HEADER 1 – top bar */
+
+    .pos-header-main {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: #020617;
+      border: 1px solid #1f2937;
+    }
+
+    .pos-header-left,
+    .pos-header-right {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .pos-header-center {
+      display: flex;
+      justify-content: center;
+      font-size: 14px;
+      opacity: 0.8;
+    }
+
+    .btn {
+      border: 1px solid #1f2937;
+      background: #111827;
+      color: #e5e7eb;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .btn-ghost {
+      background: transparent;
+    }
+
+    .btn-primary {
+      background: #16a34a;
+      border-color: #16a34a;
+      color: #f9fafb;
+    }
+
+    .btn-icon {
+      width: 32px;
+      height: 32px;
+      justify-content: center;
+      padding: 0;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      font-size: 11px;
+      padding: 0 6px;
+      background: #f97316;
+      color: #111827;
+    }
+
+    .notifications {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #020617;
+      border: 1px solid #1f2937;
+    }
+
+    /* HEADER 2 – search bar */
+
+    .pos-header-search {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 10px;
+      background: #020617;
+      border: 1px solid #1f2937;
+      align-items: center;
+    }
+
+    .search-input-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #020617;
+      border-radius: 999px;
+      border: 1px solid #1f2937;
+      padding: 4px 10px;
+    }
+
+    .search-input-wrap input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #e5e7eb;
+      font-size: 14px;
+    }
+
+    .search-shortcuts {
+      font-size: 11px;
+      opacity: 0.7;
+    }
+
+    /* MAIN GRID */
+
+    .pos-main {
+      grid-row: 3 / 5; /* spans rows 3 & 4 of root grid */
+      display: grid;
+      grid-template-columns: 1.2fr 1.8fr 1.2fr; /* = “3x2” columns */
+      grid-template-rows: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .panel {
+      background: #020617;
+      border-radius: 12px;
+      border: 1px solid #1f2937;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+
+    .panel-header small {
+      font-size: 11px;
+      opacity: 0.7;
+      font-weight: 400;
+    }
+
+    .panel-body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      font-size: 13px;
+    }
+
+    /* Recent sold items (left, spans 2 rows) */
+    .panel-recent {
+      grid-column: 1 / 2;
+      grid-row: 1 / 3; /* spans both rows */
+    }
+
+    .recent-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .recent-item {
+      display: grid;
+      grid-template-columns: 40px 1fr auto;
+      align-items: center;
+      gap: 6px;
+      padding: 4px;
+      border-radius: 8px;
+      background: #020617;
+      border: 1px solid #111827;
+      cursor: pointer;
+    }
+
+    .recent-thumb {
+      width: 40px;
+      height: 40px;
+      border-radius: 6px;
+      background: #1f2937;
+    }
+
+    .recent-text-main {
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .recent-text-sub {
+      font-size: 11px;
+      opacity: 0.7;
+    }
+
+    .recent-price {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    /* Cart (middle, spans 2 rows) */
+
+    .panel-cart {
+      grid-column: 2 / 3;
+      grid-row: 1 / 3;
+    }
+
+    .cart-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+
+    .cart-table thead {
+      position: sticky;
+      top: 0;
+      background: #020617;
+    }
+
+    .cart-table th,
+    .cart-table td {
+      padding: 4px 2px;
+      text-align: left;
+      border-bottom: 1px solid #111827;
+    }
+
+    .cart-table th {
+      font-weight: 500;
+      font-size: 11px;
+      opacity: 0.8;
+    }
+
+    .cart-summary {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px dashed #1f2937;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 4px;
+      font-size: 13px;
+    }
+
+    .cart-summary-labels {
+      font-size: 11px;
+      opacity: 0.7;
+    }
+
+    .cart-summary-values {
+      text-align: right;
+    }
+
+    .cart-total {
+      font-size: 16px;
+      font-weight: 700;
+      color: #f97316;
+    }
+
+    /* Keypad (top-right) */
+
+    .panel-keypad {
+      grid-column: 3 / 4;
+      grid-row: 1 / 2;
+    }
+
+    .keypad-display {
+      margin-bottom: 6px;
+      padding: 6px;
+      border-radius: 8px;
+      background: #020617;
+      border: 1px solid #1f2937;
+      font-size: 18px;
+      text-align: right;
+      letter-spacing: 0.05em;
+    }
+
+    .keypad-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+    }
+
+    .keypad-btn {
+      padding: 10px 0;
+      border-radius: 10px;
+      border: 1px solid #1f2937;
+      background: #111827;
+      font-size: 16px;
+      text-align: center;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .keypad-btn.action {
+      font-size: 12px;
+    }
+
+    /* Tender types (bottom-right) */
+
+    .panel-tenders {
+      grid-column: 3 / 4;
+      grid-row: 2 / 3;
+    }
+
+    .tender-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+    }
+
+    .tender-btn {
+      border-radius: 10px;
+      padding: 10px 8px;
+      border: 1px solid #1f2937;
+      background: #111827;
+      text-align: left;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .tender-btn span {
+      display: block;
+      font-size: 11px;
+      opacity: 0.7;
+    }
+
+    .tender-btn.primary-tender {
+      background: #16a34a;
+      border-color: #16a34a;
+      color: #f9fafb;
+    }
+
+    /* FOOTER – barcode + actions */
+
+    .pos-footer {
+      display: grid;
+      grid-template-columns: 1.6fr 1.4fr;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .footer-left,
+    .footer-right {
+      background: #020617;
+      border-radius: 10px;
+      border: 1px solid #1f2937;
+      padding: 8px 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .barcode-input-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px dashed #374151;
+      background: #020617;
+    }
+
+    .barcode-input-wrap input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: #e5e7eb;
+      font-size: 14px;
+    }
+
+    .footer-badges {
+      display: flex;
+      gap: 6px;
+      font-size: 11px;
+      opacity: 0.8;
+    }
+
+    .footer-right {
+      justify-content: flex-end;
+      gap: 6px;
+    }
+
+    .btn-danger {
+      background: #b91c1c;
+      border-color: #b91c1c;
+      color: #fef2f2;
+    }
+
+  </style>
+</head>
+<body>
+  <div class="pos-root">
+    <!-- HEADER 1 -->
+    <header class="pos-header-main">
+      <div class="pos-header-left">
+        <button class="btn btn-icon">☰</button>
+        <button class="btn btn-ghost">Settings</button>
+        <button class="btn btn-ghost">Return by Receipt</button>
+        <button class="btn btn-ghost">Z-Read</button>
+      </div>
+      <div class="pos-header-center">
+        Cashier: <strong style="margin-left: 4px;">Josh</strong> · Till 01
+      </div>
+      <div class="pos-header-right">
+        <div class="notifications">
+          ⚠ <span>2 alerts</span>
+          <span class="badge">2</span>
+        </div>
+        <button class="btn btn-ghost">Change Cashier</button>
+      </div>
+    </header>
+
+    <!-- HEADER 2 (SEARCH) -->
+    <section class="pos-header-search">
+      <div class="search-input-wrap">
+        🔍
+        <input type="text" placeholder="Search by name, style code, or barcode…" />
+      </div>
+      <div class="search-shortcuts">
+        F2: Search · F4: Price Check · F8: Hold Sale
+      </div>
+    </section>
+
+    <!-- MAIN GRID (3x2-ish) -->
+    <main class="pos-main">
+      <!-- Recent sold items -->
+      <section class="panel panel-recent">
+        <div class="panel-header">
+          <span>Recently Sold</span>
+          <small>Tap to re-add to cart</small>
+        </div>
+        <div class="panel-body">
+          <div class="recent-list">
+            <div class="recent-item">
+              <div class="recent-thumb"></div>
+              <div>
+                <div class="recent-text-main">Skechers Bengao Hombre</div>
+                <div class="recent-text-sub">Navy / Red · 39</div>
+              </div>
+              <div class="recent-price">£69.99</div>
+            </div>
+            <div class="recent-item">
+              <div class="recent-thumb"></div>
+              <div>
+                <div class="recent-text-main">Oh! My Sandals 5636-1444</div>
+                <div class="recent-text-sub">Tiger White · 38</div>
+              </div>
+              <div class="recent-price">£79.99</div>
+            </div>
+            <!-- more items... -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Cart -->
+      <section class="panel panel-cart">
+        <div class="panel-header">
+          <span>Cart</span>
+          <small>Items in current transaction</small>
+        </div>
+        <div class="panel-body">
+          <table class="cart-table">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Size</th>
+                <th>Qty</th>
+                <th>Each</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Skechers Bengao Hombre</td>
+                <td>39</td>
+                <td>1</td>
+                <td>£69.99</td>
+                <td>£69.99</td>
+              </tr>
+              <tr>
+                <td>Happy Socks 5-Pack</td>
+                <td>41–46</td>
+                <td>2</td>
+                <td>£24.99</td>
+                <td>£49.98</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="cart-summary">
+            <div class="cart-summary-labels">
+              Items: 3<br />
+              Discounts: £0.00<br />
+              VAT @ 20%: £20.00
+            </div>
+            <div class="cart-summary-values">
+              <div>Subtotal: £99.97</div>
+              <div class="cart-total">Total: £119.97</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Keypad -->
+      <section class="panel panel-keypad">
+        <div class="panel-header">
+          <span>Keypad</span>
+          <small>Price / Qty / Code</small>
+        </div>
+        <div class="panel-body">
+          <div class="keypad-display">0.00</div>
+          <div class="keypad-grid">
+            <div class="keypad-btn">7</div>
+            <div class="keypad-btn">8</div>
+            <div class="keypad-btn">9</div>
+            <div class="keypad-btn">4</div>
+            <div class="keypad-btn">5</div>
+            <div class="keypad-btn">6</div>
+            <div class="keypad-btn">1</div>
+            <div class="keypad-btn">2</div>
+            <div class="keypad-btn">3</div>
+            <div class="keypad-btn">0</div>
+            <div class="keypad-btn">.</div>
+            <div class="keypad-btn action">⌫</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tender types -->
+      <section class="panel panel-tenders">
+        <div class="panel-header">
+          <span>Tender Types</span>
+          <small>Select payment method</small>
+        </div>
+        <div class="panel-body">
+          <div class="tender-grid">
+            <button class="tender-btn primary-tender">
+              Cash
+              <span>F9 · Exact / Change</span>
+            </button>
+            <button class="tender-btn">
+              Card
+              <span>F10 · Integrated terminal</span>
+            </button>
+            <button class="tender-btn">
+              Gift Voucher
+              <span>Scan or enter code</span>
+            </button>
+            <button class="tender-btn">
+              On Account
+              <span>Select customer</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="pos-footer">
+      <div class="footer-left">
+        <div class="barcode-input-wrap">
+          📷
+          <input type="text" placeholder="Scan barcode or type code…" />
+        </div>
+        <div class="footer-badges">
+          <span>Scanner: Online</span>
+          <span>ERP: Synced</span>
+        </div>
+      </div>
+      <div class="footer-right">
+        <button class="btn btn-ghost">Line Discount</button>
+        <button class="btn btn-ghost">Overall Discount</button>
+        <button class="btn btn-danger">Void Line</button>
+        <button class="btn btn-primary">Complete Sale</button>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

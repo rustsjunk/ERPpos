@@ -51,6 +51,10 @@ let sessionPingTimer = null;
 let sessionPingIntervalMs = 60 * 1000;
 const FEATURED_ITEM_LIMIT = 12;
 const RECENT_SALES_LIMIT = 3;
+const giftVoucherItemCode = (document.documentElement && document.documentElement.dataset
+  && document.documentElement.dataset.giftVoucherItem)
+  ? document.documentElement.dataset.giftVoucherItem
+  : 'GIFT-VOUCHER';
 let recentSalesHistory = [];
 
 // Checkout state
@@ -58,6 +62,9 @@ let currentTender = '';
 let cashInput = '';
 let denomSubtract = false;
 let vouchers = [];
+let issuedVouchers = [];
+let voucherOverlayMode = 'redeem'; // 'redeem' | 'issue_refund' | 'issue_sale'
+let voucherSaleMode = false;
 let appliedPayments = [];
 let cashEntryDirty = false;
 let otherEntryDirty = false;
@@ -96,6 +103,31 @@ function displayNameFrom(baseName, attrs){
     if(suffix && name.endsWith(suffix)) return name;
     return (name + suffix).trim();
   }catch(_){ return String(baseName||''); }
+}
+
+function hasSellableStock(item){
+  if(!item) return false;
+  const qty = Number(item.variant_stock != null ? item.variant_stock : (item.stock_qty != null ? item.stock_qty : item.qty));
+  if(Number.isFinite(qty)){
+    return qty > 0;
+  }
+  return true;
+}
+
+function isShowZeroStockEnabled(){
+  return !!(settings && settings.show_zero_stock);
+}
+
+function getVisibleItems(){
+  return isShowZeroStockEnabled() ? items.slice() : items.filter(hasSellableStock);
+}
+
+function setShowZeroStock(show){
+  if(!settings) settings = {};
+  settings.show_zero_stock = !!show;
+  saveSettings();
+  renderItems(items);
+  try { renderSearchResults(); } catch(_){}
 }
 
 // ========== Currency Conversion Helpers ==========
@@ -523,7 +555,8 @@ let settings = {
   z_agg: {},
   receipt_header: RECEIPT_DEFAULT_HEADER,
   receipt_footer: RECEIPT_DEFAULT_FOOTER,
-  open_drawer_after_print: true
+  open_drawer_after_print: true,
+  show_zero_stock: false
 };
 let lastReceiptInfo = null;
 const RECEIPT_PORT_STORAGE_KEY = 'receipt_serial_port';
@@ -1471,6 +1504,7 @@ function renderItems(list){
   items = list || [];
   renderFeaturedPanel(false);
   renderRecentItems();
+  try { renderSearchResults(); } catch(_){}
 }
 
 function formatItemPrice(it){
@@ -1526,11 +1560,12 @@ function renderFeaturedPanel(shuffle = false){
   if(!grid){
     return;
   }
-  if(!items.length){
-    grid.innerHTML='';
+  const source = getVisibleItems();
+  if(!source.length){
+    grid.innerHTML='<div class="col"><div class="card item-card h-100 d-flex align-items-center justify-content-center text-muted small">No in-stock items. Enable "Show zero-stock lines" in Search to browse everything.</div></div>';
     return;
   }
-  const selection=selectFeaturedItems(shuffle);
+  const selection=selectFeaturedItems(source, shuffle);
   grid.innerHTML='';
   selection.forEach(it=>{
     const wrapper=document.createElement('div');
@@ -1577,7 +1612,7 @@ function renderFeaturedPanel(shuffle = false){
   });
 }
 
-function selectFeaturedItems(shuffle){
+function selectFeaturedItems(sourceList, shuffle){
   const grid=document.getElementById('itemsGrid');
   const explicit=(grid&&grid.dataset?grid.dataset.featuredCodes:'')||'';
   const codes=explicit.split(',').map(value=>value.trim()).filter(Boolean);
@@ -1585,12 +1620,12 @@ function selectFeaturedItems(shuffle){
   const used=new Set();
   codes.forEach(code=>{
     const match=findItemByCode(code);
-    if(match && !used.has(match.item_code)){
+    if(match && (isShowZeroStockEnabled() || hasSellableStock(match)) && !used.has(match.item_code)){
       selection.push(match);
       used.add(match.item_code);
     }
   });
-  const pool=items.filter(it=>!used.has(it.item_code));
+  const pool=(Array.isArray(sourceList)?sourceList.slice():items.slice()).filter(it=>!used.has(it.item_code));
   const ordered=shuffle?shuffleArray(pool):pool;
   for(const candidate of ordered){
     if(selection.length>=FEATURED_ITEM_LIMIT){
@@ -2057,10 +2092,16 @@ function bindEvents(){
   if(reprintLastBtn){ reprintLastBtn.addEventListener('click',()=>{ if(lastReceiptInfo) showReceiptOverlay(lastReceiptInfo); else alert('No receipt available to reprint yet.'); }); }
   // search field opens overlay
   const s=document.getElementById('itemSearch'); if(s){ s.addEventListener('focus',()=>showSearchOverlay()); s.addEventListener('input',e=>showSearchOverlay(e.target.value)); }
+  const zeroToggle=document.getElementById('zeroStockToggle');
+  if(zeroToggle){
+    zeroToggle.checked = isShowZeroStockEnabled();
+    zeroToggle.addEventListener('change', e=>setShowZeroStock(e.target.checked));
+  }
   // checkout
   const chk=document.getElementById('checkoutBtn'); if(chk) chk.addEventListener('click',()=>{ if(!currentCashier) return showLogin(); if(cart.length===0) return alert('Cart is empty'); openCheckoutOverlay(); });
   // clear cart
-  const clr=document.getElementById('clearCartBtn'); if(clr) clr.addEventListener('click',()=>{ if(cart.length===0) return; if(confirm('Clear all items from cart?')){ cart=[]; updateCartDisplay(); }});
+  const clr=document.getElementById('clearCartBtn'); if(clr) clr.addEventListener('click',()=>{ if(cart.length===0) return; if(confirm('Clear all items from cart?')){ cart=[]; appliedPayments=[]; vouchers=[]; issuedVouchers=[]; voucherSaleMode=false; updateCartDisplay(); renderAppliedPayments(); updateCashSection(); }});
+  const voucherSaleBtn=document.getElementById('voucherSaleBtn'); if(voucherSaleBtn){ voucherSaleBtn.addEventListener('click', startGiftVoucherSale); }
   // cashier badge/menu
   const badge=document.getElementById('cashierBadge'), menu=document.getElementById('cashierMenu'), logout=document.getElementById('logoutBtn');
   if(!badge) warn('cashierBadge not found');
@@ -2376,15 +2417,16 @@ function loadSettings(){
         opening_date:'',
         net_cash:0,
         net_card:0,
-      net_voucher:0,
-      vat_rate:20,
-      vat_inclusive:true,
-      currency_rate: DEFAULT_STORE_RATE,
-      currency_rate_updated: null,
-      z_agg:{},
-      receipt_header: RECEIPT_DEFAULT_HEADER,
-      receipt_footer: RECEIPT_DEFAULT_FOOTER,
-        open_drawer_after_print: true
+        net_voucher:0,
+        vat_rate:20,
+        vat_inclusive:true,
+        currency_rate: DEFAULT_STORE_RATE,
+        currency_rate_updated: null,
+        z_agg:{},
+        receipt_header: RECEIPT_DEFAULT_HEADER,
+        receipt_footer: RECEIPT_DEFAULT_FOOTER,
+        open_drawer_after_print: true,
+        show_zero_stock: false
       }, s);
     }
   }catch(e){}
@@ -2516,10 +2558,25 @@ function applySettings(){
 }
 
 // Search overlay
-function showSearchOverlay(q=''){ const o=document.getElementById('searchOverlay'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter'); if(!o||!i||!b) return; o.style.display='flex';
+function showSearchOverlay(q=''){
+  const o=document.getElementById('searchOverlay'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter');
+  const zeroToggle=document.getElementById('zeroStockToggle');
+  if(!o||!i||!b) return;
+  o.style.display='flex';
   o.style.visibility='visible';
   o.style.opacity='1';
-  try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} const brands=[...new Set(items.map(it=>it.brand||'Unbranded'))].sort(); b.innerHTML='<option value="">All Brands</option>'+brands.map(x=>`<option value="${x}">${x}</option>`).join(''); i.value=q; renderSearchResults(); setTimeout(()=>i.focus(),0);} 
+  try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){}
+  const source = getVisibleItems();
+  const brandSet = new Set(source.map(it=>(it.brand||'Unbranded')));
+  const brands=[...brandSet].sort();
+  b.innerHTML='<option value="">All Brands</option>'+brands.map(x=>`<option value="${x}">${x}</option>`).join('');
+  if(zeroToggle){
+    zeroToggle.checked = isShowZeroStockEnabled();
+  }
+  i.value=q;
+  renderSearchResults();
+  setTimeout(()=>i.focus(),0);
+}
 function hideSearchOverlay(){ const o=document.getElementById('searchOverlay'); if(o) o.style.display='none'; }
 function itemMatchesSearch(item, needle){
   if(!needle) return true;
@@ -2550,7 +2607,31 @@ function itemMatchesSearch(item, needle){
   }
   return terms.some(t=>t.includes(needle));
 }
-function renderSearchResults(){ const g=document.getElementById('searchGrid'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter'); if(!g) return; let list=items.slice(); const q=(i&&i.value||'').trim().toLowerCase(); const br=(b&&b.value)||''; if(q) list=list.filter(x=>itemMatchesSearch(x,q)); if(br) list=list.filter(x=>(x.brand||'Unbranded')===br); g.innerHTML=''; list.forEach(it=>{ const c=document.createElement('div'); c.className='col'; const imgStyle=it.image?`style="background-image:url('${it.image}')"`:''; const priceHtml=formatItemPrice(it); c.innerHTML=`<div class="product-card" onclick='selectProduct("${it.name}")'><div class="product-img" ${imgStyle}></div><div class="fw-semibold">${it.item_name}</div><div class="text-muted small">${it.brand||'Unbranded'}</div><div class="mt-1">${priceHtml}</div></div>`; g.appendChild(c); }); }
+function renderSearchResults(){
+  const g=document.getElementById('searchGrid'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter');
+  if(!g) return;
+  let list=isShowZeroStockEnabled() ? items.slice() : items.filter(hasSellableStock);
+  const q=(i&&i.value||'').trim().toLowerCase();
+  const br=(b&&b.value)||'';
+  if(q) list=list.filter(x=>itemMatchesSearch(x,q));
+  if(br) list=list.filter(x=>(x.brand||'Unbranded')===br);
+  g.innerHTML='';
+  if(!list.length){
+    const msg=document.createElement('div');
+    msg.className='col-12';
+    msg.innerHTML=`<div class="alert alert-secondary mb-0 small">No matching products${isShowZeroStockEnabled()?'':' with stock'}. Toggle "Show zero-stock lines" to include everything.</div>`;
+    g.appendChild(msg);
+    return;
+  }
+  list.forEach(it=>{
+    const c=document.createElement('div');
+    c.className='col';
+    const imgStyle=it.image?`style="background-image:url('${it.image}')"`:'';
+    const priceHtml=formatItemPrice(it);
+    c.innerHTML=`<div class="product-card" onclick='selectProduct("${it.name}")'><div class="product-img" ${imgStyle}></div><div class="fw-semibold">${it.item_name}</div><div class="text-muted small">${it.brand||'Unbranded'}</div><div class="mt-1">${priceHtml}</div></div>`;
+    g.appendChild(c);
+  });
+}
 function selectProduct(name){ const it=items.find(x=>x.name===name); if(it) openProduct(it); }
 
 // Product detail overlay
@@ -2646,7 +2727,7 @@ function addVariantToCart(item, variant, cellEl, variantRec){
 }
 
 // Checkout overlay
-function openCheckoutOverlay(){
+function openCheckoutOverlay(options = {}){
   const o=document.getElementById('checkoutOverlay');
   const c=document.getElementById('checkoutCart');
   if(!o||!c) return;
@@ -2655,8 +2736,11 @@ function openCheckoutOverlay(){
   // fresh split payments state
   appliedPayments = [];
   vouchers = [];
+  if(!options.preserveIssuedVouchers){
+    issuedVouchers = [];
+  }
   resetTenderInputs();
-  const vbtn = document.getElementById('tenderVoucherBtn'); if(vbtn) vbtn.textContent = 'Voucher';
+  updateVoucherButtonLabel();
   document.querySelectorAll('.tender-btn').forEach(b=>b.classList.remove('active'));
   const cashSection = document.getElementById('cashSection');
   if (cashSection) { cashSection.style.display = 'none'; cashSection.classList.remove('show-keypad'); }
@@ -2712,6 +2796,14 @@ function renderCheckoutCart() {
 function getCartTotal(){
   return cart.reduce((sum, item) => sum + (item.qty * item.rate * (item.refund ? -1 : 1)), 0);
 }
+function updateVoucherButtonLabel(){
+  const btn = document.getElementById('tenderVoucherBtn');
+  if(!btn) return;
+  const count = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length;
+  const baseLabel = getCartTotal() < 0 ? 'Voucher Refund' : 'Voucher';
+  btn.textContent = count>0 ? `${baseLabel} (${count})` : baseLabel;
+}
+
 function renderAppliedPayments(){
   const list = document.getElementById('appliedPaymentsList');
   const totalEl = document.getElementById('paymentsTotal');
@@ -2740,17 +2832,24 @@ function renderAppliedPayments(){
       const rm = document.createElement('button');
       rm.className = 'btn btn-sm btn-outline-danger';
       rm.textContent = 'Remove';
+      if (p.created_voucher) {
+        rm.disabled = true;
+        rm.title = 'Voucher already issued';
+      }
       rm.addEventListener('click', ()=>{
         if(p.mode_of_payment === 'Voucher' && p.reference_no){
           const i = vouchers.findIndex(v=> (v.code===p.reference_no) && Number(v.amount||0)===Number(p.amount||0));
           if(i>=0) vouchers.splice(i,1);
         }
+        if(p.created_voucher && p.reference_no){
+          const idx = issuedVouchers.findIndex(v=> v.code===p.reference_no && Number(v.amount||0)===Number(p.amount||0));
+          if(idx>=0) issuedVouchers.splice(idx,1);
+        }
         appliedPayments.splice(idx,1);
         renderAppliedPayments();
         updateCashSection();
         resetTenderInputs();
-        const btn = document.getElementById('tenderVoucherBtn');
-        if(btn){ const count = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length; btn.textContent = count>0? `Voucher (${count})` : 'Voucher'; }
+        updateVoucherButtonLabel();
       });
       right.appendChild(amt);
       right.appendChild(rm);
@@ -2763,6 +2862,7 @@ function renderAppliedPayments(){
     const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
     totalEl.textContent = paid>0 ? money(paid) : '';
   }
+  updateVoucherButtonLabel();
 }
 function updateCashSection() {
   const due = document.getElementById('amountDue');
@@ -2799,10 +2899,9 @@ function updateCashSection() {
   if (applyCashBtn) applyCashBtn.disabled = false;
   if (applyOtherBtn) applyOtherBtn.disabled = false;
   if (voucherBtn){
-    const voucherCount = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length;
-    voucherBtn.textContent = voucherCount>0 ? `Voucher (${voucherCount})` : 'Voucher';
-    voucherBtn.disabled = isRefund;
+    voucherBtn.disabled = false;
   }
+  updateVoucherButtonLabel();
   if (otherFullBtn) otherFullBtn.disabled = false;
   
   renderAppliedPayments();
@@ -2862,13 +2961,16 @@ function selectTender(t){
   }catch(e){ err('selectTender error', e); }
 }
 
-async function completeSaleFromOverlay() {
-  let customer = '';
+function getSelectedCustomerId(){
   const topSelect = document.getElementById('topCustomerSelect');
   const bottomSelect = document.getElementById('customerSelect');
-  if (topSelect && topSelect.value) customer = topSelect.value;
-  else if (bottomSelect && bottomSelect.value) customer = bottomSelect.value;
-  if (!customer) customer = getDefaultCustomerValue();
+  if (topSelect && topSelect.value) return topSelect.value;
+  if (bottomSelect && bottomSelect.value) return bottomSelect.value;
+  return getDefaultCustomerValue();
+}
+
+async function completeSaleFromOverlay() {
+  let customer = getSelectedCustomerId();
   if (cart.length === 0) { alert('Cart is empty'); return; }
 
   const total = getCartTotal();
@@ -2923,6 +3025,7 @@ async function completeSaleFromOverlay() {
     change: isRefund ? refundDue : changeVal,
     total: total,
     vouchers: voucherList,
+    voucher_issue: issuedVouchers.map(v=>({ code: v.code, amount: Number(v.amount||0) })),
     till_number: settings.till_number,
     cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
     // Currency information - include full FX metadata if EUR conversion was active
@@ -3010,6 +3113,7 @@ async function completeSaleFromOverlay() {
       cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
       created: new Date().toISOString(),
       vouchers: voucherList,
+      issued_vouchers: issuedVouchers.slice(),
       isRefund,
       vat_rate: settings.vat_rate,
       vat_inclusive: settings.vat_inclusive,
@@ -3022,6 +3126,8 @@ async function completeSaleFromOverlay() {
     };
     appliedPayments = [];
     vouchers = [];
+    issuedVouchers = [];
+    voucherSaleMode = false;
     hideCheckoutOverlay();
     updateCashSection();
     lastReceiptInfo = info;
@@ -3113,17 +3219,57 @@ async function holdCurrentTransaction(){
   }catch(e){ err('hold failed', e); alert('Failed to hold current transaction'); }
 }
 
+function getVoucherTenderState(){
+  const total = getCartTotal();
+  const isRefund = total < 0;
+  const due = isRefund ? Math.abs(total) : Math.max(0, total);
+  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+  const remaining = Math.max(0, due - paid);
+  return { total, isRefund, due, paid, remaining };
+}
+
 // Voucher overlay
-function openVoucherOverlay(){
+function startGiftVoucherSale(){
+  if(!currentCashier){
+    showLogin();
+    return;
+  }
+  if(cart.length>0 && !confirm('Clear the current cart and start a gift voucher sale?')){
+    return;
+  }
+  cart = [];
+  appliedPayments = [];
+  vouchers = [];
+  issuedVouchers = [];
+  voucherSaleMode = true;
+  updateCartDisplay();
+  renderAppliedPayments();
+  updateCashSection();
+  openVoucherOverlay({ forceSaleIssue: true });
+}
+
+function openVoucherOverlay(options = {}){
   const overlay = document.getElementById('voucherOverlay');
   const codeInput = document.getElementById('voucherCodeInput');
   const amountInput = document.getElementById('voucherAmountInput');
+  const titleEl = document.getElementById('voucherOverlayTitle');
+  const hintEl = document.getElementById('voucherOverlayHint');
+  const statusEl = document.getElementById('voucherOverlayStatus');
+  const submitBtn = document.getElementById('voucherSubmitBtn');
   if (!overlay) { err('loginOverlay element missing'); return; }
   neutralizeForeignOverlays();
-  const total = getCartTotal();
-  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
-  const remaining = Math.max(0, total - paid);
-  const suggested = remaining;
+  const state = getVoucherTenderState();
+  const forceSaleIssue = options.forceSaleIssue === true;
+  if (forceSaleIssue) {
+    voucherOverlayMode = 'issue_sale';
+  } else if (state.isRefund) {
+    voucherOverlayMode = 'issue_refund';
+  } else {
+    voucherOverlayMode = 'redeem';
+  }
+  const isIssue = voucherOverlayMode !== 'redeem';
+  const isSaleIssue = voucherOverlayMode === 'issue_sale';
+  const suggested = isSaleIssue ? 0 : (state.remaining > 0 ? state.remaining : state.due);
   overlay.style.display = 'flex';
   overlay.style.visibility = 'visible';
   overlay.style.opacity = '1';
@@ -3131,33 +3277,211 @@ function openVoucherOverlay(){
     const cs = getComputedStyle(overlay);
     log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity });
   } catch (_) {}
+  if (titleEl){
+    if (isSaleIssue) {
+      titleEl.textContent = 'Issue Gift Voucher';
+    } else if (isIssue) {
+      titleEl.textContent = 'Issue Gift Voucher';
+    } else {
+      titleEl.textContent = 'Scan Gift Voucher';
+    }
+  }
+  if (hintEl){
+    if (isSaleIssue) {
+      hintEl.textContent = 'Enter the voucher amount to sell. A voucher line will be added to the cart so you can take payment.';
+    } else if (voucherOverlayMode === 'issue_refund') {
+      hintEl.textContent = 'Issue a new voucher for the refund amount. Leave the code empty to auto-generate one.';
+    } else {
+      hintEl.textContent = 'Focus the input and scan the voucher barcode, or type it in. Enter the voucher amount to apply.';
+    }
+  }
+  if (statusEl){
+    statusEl.style.display = 'none';
+    statusEl.classList.remove('alert-danger','alert-success','alert-warning');
+    statusEl.classList.add('alert-info');
+    statusEl.textContent = '';
+  }
   if (codeInput) {
+    if (isIssue){
+      codeInput.placeholder = 'Voucher code (leave blank to auto-generate)';
+    } else {
+      codeInput.placeholder = 'Voucher barcode';
+    }
     codeInput.value = '';
     setTimeout(() => codeInput.focus(), 0);
   }
   if (amountInput) {
-    amountInput.value = suggested.toFixed(2);
+    amountInput.value = isSaleIssue ? '' : suggested.toFixed(2);
+    amountInput.removeAttribute('max');
+    delete amountInput.dataset.prefilledFor;
+    delete amountInput.dataset.maxVoucherAmount;
+  }
+  if (submitBtn){
+    submitBtn.textContent = isIssue ? 'Issue Voucher' : 'Use Voucher';
   }
 }
 
-function hideVoucherOverlay(){ const o=document.getElementById('voucherOverlay'); if(o) o.style.display='none'; }
-function submitVoucher(){
+function hideVoucherOverlay(){
+  const o=document.getElementById('voucherOverlay');
+  if(o) o.style.display='none';
+  voucherOverlayMode = 'redeem';
+  if(voucherSaleMode && !cart.some(line=>line && line.isVoucherProduct)){
+    voucherSaleMode = false;
+  }
+  const statusEl = document.getElementById('voucherOverlayStatus');
+  if(statusEl){
+    statusEl.style.display='none';
+    statusEl.textContent='';
+  }
+}
+async function submitVoucher(){
   const codeEl = document.getElementById('voucherCodeInput');
   const amountEl = document.getElementById('voucherAmountInput');
   const btn = document.getElementById('tenderVoucherBtn');
-  const code = (codeEl && codeEl.value.trim()) || '';
+  const statusEl = document.getElementById('voucherOverlayStatus');
+  const rawCode = (codeEl && codeEl.value.trim()) || '';
   const amount = Number(amountEl && amountEl.value) || 0;
-  if (!code) return alert('Please enter or scan a voucher code.');
-  if (amount <= 0) return alert('Please enter a voucher amount greater than 0.');
-  const total = getCartTotal();
-  const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
-  const remaining = Math.max(0, total - paid);
-  const applied = Math.min(amount, remaining>0?remaining:amount);
-  appliedPayments.push({ mode_of_payment: 'Voucher', amount: applied, reference_no: code });
-  vouchers.push({ code, amount: applied });
-  if (btn){ const count = appliedPayments.filter(x=>x.mode_of_payment==='Voucher').length; btn.textContent = count>0? `Voucher (${count})` : 'Voucher'; }
+  const state = getVoucherTenderState();
+  const mode = voucherOverlayMode;
+  const isIssue = mode !== 'redeem';
+  const isSaleIssue = mode === 'issue_sale';
+  const isRefundIssue = mode === 'issue_refund';
+  if (isIssue && amount <= 0) return alert('Please enter a voucher amount greater than 0.');
+  if (!isIssue && amount < 0) return alert('Voucher amount cannot be negative.');
+  if (!isIssue && !rawCode) return alert('Please enter or scan a voucher code.');
+  const remaining = state.remaining;
+  try {
+    if (isIssue) {
+      const maxApplicable = remaining > 0 ? remaining : state.due;
+      const applyAmount = isSaleIssue ? amount : Math.min(amount, maxApplicable);
+      if (applyAmount <= 0) {
+        alert(isSaleIssue ? 'Voucher amount must be greater than zero.' : 'Voucher amount cannot be applied to this transaction.');
+        return;
+      }
+      const payload = {
+        voucher_code: rawCode || undefined,
+        amount: applyAmount,
+        customer: getSelectedCustomerId() || undefined,
+        till_number: settings.till_number || undefined,
+        pos_profile: settings.branch_name || undefined,
+        is_clearance: false,
+        remarks: isSaleIssue ? 'POS gift voucher sale' : 'Refund voucher'
+      };
+      const issueResp = await fetch('/api/vouchers/issue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const issueData = await issueResp.json();
+      if (issueResp.status !== 201 && issueResp.status !== 200) {
+        throw new Error(issueData.message || 'Unable to issue voucher');
+      }
+      const issued = issueData.voucher || {};
+      const finalCode = issued.code || issued.voucher_code || rawCode;
+      if (!finalCode) {
+        throw new Error('Voucher code missing from response');
+      }
+      if (isSaleIssue) {
+        handleVoucherSaleIssue(finalCode, applyAmount);
+      } else {
+        appliedPayments.push({ mode_of_payment: 'Voucher', amount: applyAmount, reference_no: finalCode, created_voucher: true });
+        issuedVouchers.push({ code: finalCode, amount: applyAmount });
+        if (statusEl){
+          statusEl.classList.remove('alert-info','alert-danger');
+          statusEl.classList.add('alert-success');
+          statusEl.textContent = `Issued voucher ${finalCode} for ${money(applyAmount)}.`;
+          statusEl.style.display = 'block';
+        }
+        alert(`Issued voucher ${finalCode} for ${money(applyAmount)}.`);
+        hideVoucherOverlay();
+      }
+    } else {
+      const resp = await fetch('/api/vouchers/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: rawCode, amount })
+      });
+      const data = await resp.json();
+      if (resp.status !== 200 || data.status !== 'success') {
+        throw new Error(data.message || 'Voucher not accepted');
+      }
+      const info = data.voucher || {};
+      if (!info.can_redeem) {
+        alert(info.note || 'Voucher cannot be redeemed right now.');
+        return;
+      }
+      const voucherCode = info.code || rawCode;
+      const serverAllowed = Number(info.allowed_amount ?? info.balance ?? 0) || 0;
+      const dueLimited = remaining > 0 ? remaining : serverAllowed;
+      const cap = Math.min(serverAllowed, dueLimited);
+      if (!Number.isFinite(cap) || cap <= 0) {
+        alert('Voucher has no remaining balance.');
+        return;
+      }
+      if (amountEl) {
+        amountEl.max = cap.toFixed(2);
+        amountEl.dataset.maxVoucherAmount = cap.toFixed(2);
+      }
+      const requested = amount > 0 ? amount : cap;
+      const alreadyPrefilled = amountEl
+        && amountEl.dataset.prefilledFor === voucherCode
+        && Math.abs((Number(amountEl.value) || 0) - cap) < 0.005;
+      if (!alreadyPrefilled && (amount <= 0 || requested - cap > 0.005)) {
+        if (amountEl) {
+          amountEl.value = cap.toFixed(2);
+          amountEl.dataset.prefilledFor = voucherCode;
+        }
+        const msg = `Voucher balance is ${money(serverAllowed)}. Applied amount set to ${money(cap)}.`;
+        if (statusEl) {
+          statusEl.classList.remove('alert-info','alert-success','alert-danger');
+          statusEl.classList.add('alert-warning');
+          statusEl.textContent = msg;
+          statusEl.style.display = 'block';
+        } else {
+          alert(msg);
+        }
+        return;
+      }
+      const applied = Math.min(requested, cap);
+      if (applied <= 0) {
+        alert('Voucher amount cannot be applied to this sale.');
+        return;
+      }
+      appliedPayments.push({ mode_of_payment: 'Voucher', amount: applied, reference_no: voucherCode });
+      vouchers.push({ code: voucherCode, amount: applied });
+      hideVoucherOverlay();
+    }
+    if (!isSaleIssue) {
+      updateVoucherButtonLabel();
+      renderAppliedPayments();
+      updateCashSection();
+    }
+  } catch (err) {
+    console.error('Voucher validation failed', err);
+    alert(err && err.message ? `Voucher error: ${err.message}` : 'Unable to validate voucher.');
+  }
+}
+
+function handleVoucherSaleIssue(voucherCode, amount){
+  const rate = Number(amount || 0);
+  const voucherLine = {
+    item_code: giftVoucherItemCode,
+    item_name: `Gift Voucher ${voucherCode}`,
+    qty: 1,
+    rate,
+    brand: 'Gift Voucher',
+    vat_rate: 0,
+    attributes: { Voucher: voucherCode },
+    isVoucherProduct: true
+  };
+  cart = [voucherLine];
+  issuedVouchers = [{ code: voucherCode, amount: rate }];
+  voucherSaleMode = true;
   hideVoucherOverlay();
-  updateCashSection();
+  updateCartDisplay();
+  updateVoucherButtonLabel();
+  alert(`Voucher ${voucherCode} added to cart. Take payment and complete the sale.`);
+  openCheckoutOverlay({ preserveIssuedVouchers: true });
 }
 
 // Opening/Closing helpers
@@ -3661,6 +3985,32 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   const giftEl = document.getElementById('giftReceiptCheckbox');
   if(giftEl){
     giftEl.checked = false;
+  }
+  const voucherBox = document.getElementById('receiptVoucherDetails');
+  const voucherList = document.getElementById('receiptVoucherList');
+  if (voucherBox && voucherList){
+    const entries = [];
+    const redeemed = Array.isArray(info.vouchers) ? info.vouchers : [];
+    redeemed.forEach(v=>{
+      if(!v || !v.code) return;
+      entries.push(`Redeemed ${v.code} (${money(Number(v.amount||0))})`);
+    });
+    const issued = Array.isArray(info.issued_vouchers) ? info.issued_vouchers : [];
+    issued.forEach(v=>{
+      if(!v || !v.code) return;
+      entries.push(`Issued ${v.code} (${money(Number(v.amount||0))})`);
+    });
+    voucherList.innerHTML = '';
+    if(entries.length){
+      entries.forEach(text=>{
+        const li = document.createElement('li');
+        li.textContent = text;
+        voucherList.appendChild(li);
+      });
+      voucherBox.style.display = 'block';
+    } else {
+      voucherBox.style.display = 'none';
+    }
   }
   const fxWrap = document.getElementById('receiptFxSummary');
   if (fxWrap) {
@@ -4342,13 +4692,3 @@ function assembleLineSections(body, headerLines = [], footerLines = []) {
   }
   return segments.join('\n');
 }
-
-
-
-
-
-
-
-
-
-
