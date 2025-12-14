@@ -54,6 +54,10 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
         _ensure_voucher_event_table(conn)
     except Exception:
         pass
+    try:
+        _ensure_voucher_balance_view(conn)
+    except Exception:
+        pass
     return conn
 
 def init_db(conn: sqlite3.Connection, schema_path: str):
@@ -114,6 +118,32 @@ def _ensure_voucher_event_table(conn: sqlite3.Connection):
     conn.execute("""
     CREATE INDEX IF NOT EXISTS idx_voucher_events_status ON voucher_events(queue_status, created_utc)
     """)
+
+def _ensure_voucher_balance_view(conn: sqlite3.Connection):
+    """Ensure balance view ignores issue ledger rows to avoid double-counting."""
+    conn.execute("DROP VIEW IF EXISTS v_voucher_balance")
+    conn.execute(
+        """
+        CREATE VIEW v_voucher_balance AS
+        SELECT
+            v.voucher_code,
+            v.active,
+            v.issued_utc,
+            v.initial_value
+            + COALESCE(
+                SUM(
+                    CASE
+                        WHEN l.type = 'issue' THEN 0
+                        ELSE l.amount
+                    END
+                ),
+                0
+            ) AS balance
+        FROM vouchers v
+        LEFT JOIN voucher_ledger l ON l.voucher_code = v.voucher_code
+        GROUP BY v.voucher_code
+        """
+    )
 
 # ---------- UPSERT HELPERS ----------
 def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]):

@@ -191,10 +191,17 @@ CREATE TABLE IF NOT EXISTS voucher_ledger (
 
 DROP VIEW IF EXISTS v_voucher_balance;
 CREATE VIEW v_voucher_balance AS
-SELECT v.voucher_code,
-       v.active,
-       v.issued_utc,
-       v.initial_value + COALESCE(SUM(l.amount),0) AS balance
+SELECT
+  v.voucher_code,
+  v.active,
+  v.issued_utc,
+  v.initial_value
+  + COALESCE(
+      SUM(
+        CASE WHEN l.type = 'issue' THEN 0 ELSE l.amount END
+      ),
+      0
+    ) AS balance
 FROM vouchers v
 LEFT JOIN voucher_ledger l ON l.voucher_code = v.voucher_code
 GROUP BY v.voucher_code;

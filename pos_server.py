@@ -13,6 +13,7 @@ import time
 import logging
 import hmac
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     from serial.tools import list_ports
@@ -120,6 +121,25 @@ POS_QUEUE_ONLY = os.getenv('POS_QUEUE_ONLY', '0') == '1'
 
 # Till posting queue configuration
 POS_RECEIPT_KEY = _env_string('POS_RECEIPT_KEY', 'SUPERSECRET123')
+
+def _derive_voucher_forward_url(base_url: Optional[str]) -> Optional[str]:
+    if not base_url:
+        return None
+    try:
+        parsed = urlsplit(base_url)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, '/api/vouchers/issue', '', ''))
+
+TILL_POST_URL = _env_string('TILL_POST_URL')
+POS_VOUCHER_FORWARD_URL = _env_string('POS_VOUCHER_FORWARD_URL') or _derive_voucher_forward_url(TILL_POST_URL)
+POS_VOUCHER_FORWARD_KEY = _env_string('POS_VOUCHER_FORWARD_KEY', POS_RECEIPT_KEY)
+try:
+    POS_VOUCHER_FORWARD_TIMEOUT = float(os.getenv('POS_VOUCHER_FORWARD_TIMEOUT', '5'))
+except ValueError:
+    POS_VOUCHER_FORWARD_TIMEOUT = 5.0
 POS_QUEUE_DB_PATH = _env_string('POS_QUEUE_DB', 'pos_sales_queue.sqlite3')
 POS_QUEUE_DIR = Path(_env_string('POS_QUEUE_DIR', os.path.join('invoices', 'queue')))
 _POS_QUEUE_DIR_STATES = {
@@ -232,6 +252,38 @@ def _write_queue_file(invoice_name: str, payload: Any, status: str) -> None:
             _json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         app.logger.warning('Failed to maintain queue file for %s', invoice_name)
+
+
+def _forward_voucher_issue_remote(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not POS_VOUCHER_FORWARD_URL:
+        return None
+    headers = {'Content-Type': 'application/json'}
+    if POS_VOUCHER_FORWARD_KEY:
+        headers['X-POS-KEY'] = POS_VOUCHER_FORWARD_KEY
+    try:
+        resp = requests.post(
+            POS_VOUCHER_FORWARD_URL,
+            json=payload,
+            headers=headers,
+            timeout=POS_VOUCHER_FORWARD_TIMEOUT,
+        )
+        resp.raise_for_status()
+        app.logger.info(
+            'Forwarded voucher %s to %s',
+            payload.get('voucher_code'),
+            POS_VOUCHER_FORWARD_URL,
+        )
+        try:
+            return resp.json()
+        except Exception:
+            return None
+    except Exception as exc:
+        app.logger.warning(
+            'Voucher forward to %s failed: %s',
+            POS_VOUCHER_FORWARD_URL,
+            exc,
+        )
+        return None
 
 
 def _valid_pos_shared_key(provided: Optional[str]) -> bool:
@@ -1754,6 +1806,7 @@ def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
             'change': data.get('change'),
             'total': data.get('total'),
             'vouchers': data.get('vouchers') or [],
+            'voucher_issue': data.get('voucher_issue') or [],
             'cashier': data.get('cashier'),
             'currency_used': data.get('currency_used', 'GBP'),
             'currency_rate_used': data.get('currency_rate_used', 1.0),
@@ -2135,6 +2188,7 @@ def api_voucher_issue():
         'pos_profile': payload.get('pos_profile'),
         'sale_id': payload.get('sale_id')
     }
+    voucher_payload['currency'] = payload.get('currency') or 'GBP'
     try:
         info = ps.queue_voucher_issue(conn, voucher_payload)
     except ValueError as exc:
@@ -2142,7 +2196,12 @@ def api_voucher_issue():
     except Exception as exc:
         app.logger.exception('Failed to queue voucher issue for %s', code)
         return jsonify({'status': 'error', 'message': 'Unable to issue voucher'}), 500
-    return jsonify({
+    forward_result = None
+    if POS_VOUCHER_FORWARD_URL:
+        forward_payload = dict(voucher_payload)
+        forward_payload['cashier'] = payload.get('cashier')
+        forward_result = _forward_voucher_issue_remote(forward_payload)
+    response = {
         'status': 'success',
         'voucher': {
             'code': info.get('voucher_code'),
@@ -2151,7 +2210,10 @@ def api_voucher_issue():
             'expiry_date': info.get('expiry_date'),
             'auto_generated': auto_generated
         }
-    }), 201
+    }
+    if POS_VOUCHER_FORWARD_URL:
+        response['forwarded'] = bool(forward_result)
+    return jsonify(response), 201
 
 
 @app.route('/api/pos/sales', methods=['POST'])
