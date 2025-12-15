@@ -13,7 +13,7 @@ import time
 import logging
 import hmac
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, quote
 
 try:
     from serial.tools import list_ports
@@ -57,6 +57,26 @@ ERPNEXT_URL = _env_string('ERPNEXT_URL')
 API_KEY = _env_string('ERPNEXT_API_KEY')
 API_SECRET = _env_string('ERPNEXT_API_SECRET')
 ERP_RECEIPT_FIELD = _env_string('POS_ERP_RECEIPT_FIELD', 'pos_receipt_id')
+ERP_VOUCHER_DOCTYPE = _env_string('ERP_VOUCHER_DOCTYPE', 'Gift Voucher')
+if ERP_VOUCHER_DOCTYPE and not os.getenv('ERP_VOUCHER_DOCTYPE'):
+    os.environ['ERP_VOUCHER_DOCTYPE'] = ERP_VOUCHER_DOCTYPE
+
+
+def _parse_receipt_field_list(raw: Optional[str]) -> Tuple[str, ...]:
+    names: List[str] = []
+    if raw:
+        for entry in str(raw).split(','):
+            name = entry.strip()
+            if name and name not in names:
+                names.append(name)
+    for fallback in ('pos_receipt_id', 'custom_receipt_id', 'custom_pos_receipt_id'):
+        if fallback and fallback not in names:
+            names.append(fallback)
+    return tuple(names or ('pos_receipt_id',))
+
+
+ERP_RECEIPT_FIELD_OPTIONS = _parse_receipt_field_list(ERP_RECEIPT_FIELD)
+_ERP_RECEIPT_FIELD_ACTIVE: Optional[str] = None
 
 # Keep pos_service ERP env vars aligned with Flask env names
 if ERPNEXT_URL and not os.getenv('ERP_BASE'):
@@ -168,6 +188,13 @@ except ValueError:
     ERP_PULL_SALES_LIMIT = 25
 ERP_PULL_SALES_LIMIT = max(5, ERP_PULL_SALES_LIMIT)
 ERP_SALES_CURSOR_KEY = _env_string('POS_PULL_ERP_SALES_CURSOR', 'SalesInvoiceERP')
+ERP_PULL_VOUCHERS_ENABLED = os.getenv('POS_PULL_ERP_VOUCHERS', '1') == '1'
+try:
+    ERP_PULL_VOUCHERS_LIMIT = int(os.getenv('POS_PULL_ERP_VOUCHERS_LIMIT', '50'))
+except ValueError:
+    ERP_PULL_VOUCHERS_LIMIT = 50
+ERP_PULL_VOUCHERS_LIMIT = max(5, ERP_PULL_VOUCHERS_LIMIT)
+ERP_VOUCHER_CURSOR_KEY = _env_string('POS_PULL_ERP_VOUCHER_CURSOR', 'GiftVoucherERP')
 
 
 def _utcnow_z() -> str:
@@ -679,6 +706,13 @@ def _run_idle_maintenance_tasks():
                     summary.append(f"erp sales pulled={pulled} matched={matched} new={inserted}")
             except Exception as exc:
                 app.logger.warning("Idle ERP sales reconciliation failed: %s", exc)
+        if not USE_MOCK and ERP_PULL_VOUCHERS_ENABLED and _has_erp_credentials():
+            try:
+                pulled, updated, inserted = _reconcile_erp_gift_vouchers(conn)
+                if pulled or updated or inserted:
+                    summary.append(f"erp vouchers pulled={pulled} updated={updated} new={inserted}")
+            except Exception as exc:
+                app.logger.warning("Idle ERP voucher reconciliation failed: %s", exc)
         if summary:
             app.logger.info("Idle maintenance completed (%s)", ", ".join(summary))
         try:
@@ -1159,8 +1193,7 @@ def _erp_headers():
         raise RuntimeError("Missing ERPNEXT_URL/ERPNEXT_API_KEY/ERPNEXT_API_SECRET in environment")
     headers = {
         'Authorization': f'token {API_KEY}:{API_SECRET}',
-        'Accept': 'application/json',
-        'Expect': ''
+        'Accept': 'application/json'
     }
     headers['Content-Type'] = 'application/json'
     return headers
@@ -1251,6 +1284,17 @@ def _erp_invoice_created_ts(record: Dict[str, Any]) -> Optional[str]:
             base = stamp.split('.')[0]
             return base.replace(' ', 'T') + 'Z'
     return None
+
+
+def _normalize_date_to_utc(value: Optional[str], fallback: Optional[str] = None) -> str:
+    text = _clean_text(value)
+    if text:
+        if 'T' in text:
+            return text if text.upper().endswith('Z') else text + 'Z'
+        return f"{text}T00:00:00Z"
+    if fallback:
+        return fallback
+    return _utcnow_z()
 
 
 def _erp_receipt_id(record: Dict[str, Any]) -> Optional[str]:
@@ -1506,6 +1550,253 @@ def _reconcile_erp_sales_invoices(conn: Optional[sqlite3.Connection]) -> Tuple[i
         except Exception:
             pass
     return (len(rows), matched, inserted)
+
+
+def _fetch_gift_voucher_batch(cursor_modified: Optional[str], limit: int) -> List[Dict[str, Any]]:
+    if not ERPNEXT_URL or not ERP_VOUCHER_DOCTYPE:
+        return []
+    limit = max(1, min(limit, 200))
+    doctype_path = quote(ERP_VOUCHER_DOCTYPE, safe='')
+    fields = [
+        "name",
+        "modified",
+        "voucher_code",
+        "status",
+        "original_amount",
+        "issue_date",
+        "expiry_date",
+        "customer",
+        "mode_of_payment",
+        "is_clearance",
+        "remarks",
+    ]
+    filters: List[List[Any]] = [['voucher_code', '!=', '']]
+    if cursor_modified:
+        filters.append(['modified', '>=', cursor_modified])
+    params = {
+        'fields': _json.dumps(fields),
+        'filters': _json.dumps(filters),
+        'order_by': 'modified asc, name asc',
+        'limit_start': 0,
+        'limit_page_length': limit,
+    }
+    resp = _erp_session_get(f"{ERPNEXT_URL}/api/resource/{doctype_path}", params=params, timeout=20)
+    resp.raise_for_status()
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise RuntimeError('ERP voucher list response was not valid JSON') from exc
+    return body.get('data') or body.get('message') or []
+
+
+
+def _fetch_gift_voucher_doc(docname: str) -> Optional[Dict[str, Any]]:
+    if not docname or not ERPNEXT_URL or not ERP_VOUCHER_DOCTYPE:
+        return None
+    doc_path = quote(ERP_VOUCHER_DOCTYPE, safe='')
+    resp = _erp_session_get(f"{ERPNEXT_URL}/api/resource/{doc_path}/{quote(docname, safe='')}", timeout=20)
+    resp.raise_for_status()
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise RuntimeError(f'ERP voucher {docname} response was not JSON') from exc
+    return body.get('data') or body.get('message') or {}
+
+
+def _map_remote_sale_id(conn: sqlite3.Connection, reference_name: Optional[str]) -> Optional[str]:
+    ref = _clean_text(reference_name)
+    if not ref:
+        return None
+    try:
+        row = conn.execute("SELECT sale_id FROM sales WHERE erp_docname=?", (ref,)).fetchone()
+        if row and row['sale_id']:
+            return row['sale_id']
+    except Exception:
+        pass
+    return ref
+
+
+def _ensure_remote_voucher_issue_entry(
+    conn: sqlite3.Connection,
+    ledger_rows: List[Dict[str, Any]],
+    code: str,
+    doc_name: str,
+    issue_date: Optional[str],
+    original_amount: float
+) -> None:
+    if original_amount <= 0:
+        return
+    has_issue = any(row.get('type') == 'issue' for row in ledger_rows)
+    if has_issue:
+        return
+    entry_utc = _normalize_date_to_utc(issue_date, _utcnow_z())
+    note = f"ERP issue:{doc_name}"
+    cur = conn.execute(
+        "INSERT INTO voucher_ledger (voucher_code, entry_utc, type, amount, sale_id, note) VALUES (?,?,?,?,?,?)",
+        (code, entry_utc, 'issue', float(original_amount), None, note)
+    )
+    ledger_rows.append({
+        'id': cur.lastrowid,
+        'type': 'issue',
+        'sale_id': None,
+        'amount': float(original_amount),
+        'note': note
+    })
+
+
+def _find_matching_ledger_row(
+    ledger_rows: List[Dict[str, Any]],
+    sale_id: Optional[str],
+    amount: float
+) -> Optional[Dict[str, Any]]:
+    for row in ledger_rows:
+        row_sale = row.get('sale_id') or None
+        if (row_sale or None) != (sale_id or None):
+            continue
+        try:
+            if abs(float(row.get('amount') or 0) - amount) < 0.005:
+                return row
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _ensure_remote_voucher_redemptions(
+    conn: sqlite3.Connection,
+    ledger_rows: List[Dict[str, Any]],
+    code: str,
+    doc: Dict[str, Any]
+) -> None:
+    redeem_lines = doc.get('redeem_lines') or []
+    if not isinstance(redeem_lines, list):
+        return
+    known_notes = {row.get('note') for row in ledger_rows if row.get('note')}
+    for idx, line in enumerate(redeem_lines):
+        if not isinstance(line, dict):
+            continue
+        amount = _float_or_zero(line.get('amount'))
+        if amount <= 0:
+            continue
+        sale_id = _map_remote_sale_id(conn, line.get('reference_name'))
+        ledger_amt = -abs(amount)
+        match = _find_matching_ledger_row(ledger_rows, sale_id, ledger_amt)
+        child_name = _clean_text(line.get('name')) or f"{doc.get('name') or 'ERP'}:{idx}"
+        note = f"ERP redeem:{child_name}"
+        location = _clean_text(line.get('pos_profile') or doc.get('pos_profile') or line.get('till_number') or doc.get('till_number'))
+        note_with_loc = f"{note} @ {location}" if location else note
+        if match:
+            if child_name and (match.get('note') or '').find(child_name) == -1:
+                conn.execute("UPDATE voucher_ledger SET note=? WHERE id=?", (note_with_loc, match.get('id')))
+                match['note'] = note_with_loc
+            continue
+        if note_with_loc in known_notes:
+            continue
+        entry_utc = _normalize_date_to_utc(line.get('posting_date'), _normalize_date_to_utc(doc.get('modified')))
+        cur = conn.execute(
+            "INSERT INTO voucher_ledger (voucher_code, entry_utc, type, amount, sale_id, note) VALUES (?,?,?,?,?,?)",
+            (code, entry_utc, 'redeem', ledger_amt, sale_id, note_with_loc)
+        )
+        new_row = {
+            'id': cur.lastrowid,
+            'type': 'redeem',
+            'sale_id': sale_id,
+            'amount': ledger_amt,
+            'note': note_with_loc
+        }
+        ledger_rows.append(new_row)
+        known_notes.add(note_with_loc)
+
+
+def _upsert_voucher_from_doc(conn: sqlite3.Connection, doc: Dict[str, Any]) -> None:
+    if not ps:
+        return
+    code = _clean_text(doc.get('voucher_code') or doc.get('name'))
+    if not code:
+        return
+    issue_date = doc.get('issue_date') or doc.get('issue_datetime') or doc.get('creation')
+    original_amount = _float_or_zero(doc.get('original_amount') or doc.get('original_amount_gbp') or doc.get('balance_amount'))
+    status = _clean_text(doc.get('status')) or 'Active'
+    balance = _float_or_zero(doc.get('balance_amount'))
+    expiry_date = doc.get('expiry_date')
+    meta = {
+        'erp_name': doc.get('name'),
+        'customer': doc.get('customer'),
+        'mode_of_payment': doc.get('mode_of_payment'),
+        'expiry_date': expiry_date,
+        'status': status,
+        'remarks': doc.get('remarks'),
+        'pos_profile': doc.get('pos_profile'),
+        'till_number': doc.get('till_number'),
+        'is_clearance': int(doc.get('is_clearance') or 0),
+        'last_sync_utc': _utcnow_z()
+    }
+    ps.upsert_voucher_head(conn, code, issue_date, original_amount or balance, 0 if status in ('Expired', 'Cancelled') else 1, meta)
+    rows = []
+    try:
+        rows = [dict(row) for row in conn.execute(
+            "SELECT id, type, sale_id, amount, note FROM voucher_ledger WHERE voucher_code=?",
+            (code,)
+        ).fetchall()]
+    except Exception:
+        rows = []
+    _ensure_remote_voucher_issue_entry(conn, rows, code, _clean_text(doc.get('name')) or code, issue_date, original_amount)
+    _ensure_remote_voucher_redemptions(conn, rows, code, doc)
+    ps.voucher_adjust_balance(conn, code, balance, note="ERP voucher pull")
+
+
+def _reconcile_erp_gift_vouchers(conn: Optional[sqlite3.Connection]) -> Tuple[int, int, int]:
+    if not conn or USE_MOCK or not ERP_PULL_VOUCHERS_ENABLED or not _has_erp_credentials():
+        return (0, 0, 0)
+    cursor_mod, cursor_name = _sync_cursor_get(conn, ERP_VOUCHER_CURSOR_KEY)
+    try:
+        rows = _fetch_gift_voucher_batch(cursor_mod, ERP_PULL_VOUCHERS_LIMIT)
+    except Exception as exc:
+        raise RuntimeError(f"ERP voucher fetch failed: {exc}") from exc
+    if not rows:
+        return (0, 0, 0)
+    updated = 0
+    inserted = 0
+    latest_mod = None
+    latest_name = None
+    current_cursor = (cursor_mod, cursor_name)
+    for rec in rows:
+        mod = _clean_text(rec.get('modified'))
+        name = _clean_text(rec.get('name'))
+        if not name or not mod:
+            continue
+        if not _cursor_tuple_is_newer(mod, name, current_cursor):
+            continue
+        doc = None
+        try:
+            doc = _fetch_gift_voucher_doc(name)
+        except Exception as exc:
+            app.logger.warning('Failed to fetch ERP voucher %s: %s', name, exc)
+        if not doc:
+            continue
+        code = _clean_text(doc.get('voucher_code') or doc.get('name'))
+        if not code:
+            continue
+        exists = conn.execute("SELECT 1 FROM vouchers WHERE voucher_code=?", (code,)).fetchone()
+        try:
+            _upsert_voucher_from_doc(conn, doc)
+        except Exception as exc:
+            app.logger.warning('Failed to reconcile ERP voucher %s: %s', code, exc)
+            continue
+        if exists:
+            updated += 1
+        else:
+            inserted += 1
+        latest_mod = mod
+        latest_name = name
+        current_cursor = (mod, name)
+    if latest_mod and latest_name:
+        _sync_cursor_set(conn, ERP_VOUCHER_CURSOR_KEY, latest_mod, latest_name)
+    if updated or inserted or latest_mod:
+        try:
+            conn.commit()
+        except Exception:
+            pass
+    return (len(rows), updated, inserted)
 
 def _absolute_image_url(path: Optional[str]) -> Optional[str]:
     if not path:
