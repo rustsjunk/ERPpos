@@ -1708,16 +1708,31 @@ def _ensure_remote_voucher_redemptions(
 
 
 def _upsert_voucher_from_doc(conn: sqlite3.Connection, doc: Dict[str, Any]) -> None:
+    """Upsert a local voucher + ledger rows from an ERPNext Gift Voucher doc."""
     if not ps:
         return
+
+    # Normalise / derive core fields from ERP doc
     code = _clean_text(doc.get('voucher_code') or doc.get('name'))
     if not code:
         return
-    issue_date = doc.get('issue_date') or doc.get('issue_datetime') or doc.get('creation')
-    original_amount = _float_or_zero(doc.get('original_amount') or doc.get('original_amount_gbp') or doc.get('balance_amount'))
+
+    issue_date = (
+        doc.get('issue_date')
+        or doc.get('issue_datetime')
+        or doc.get('creation')
+    )
+
+    original_amount = _float_or_zero(
+        doc.get('original_amount')
+        or doc.get('original_amount_gbp')
+        or doc.get('balance_amount')  # fallback if original is missing
+    )
+
     status = _clean_text(doc.get('status')) or 'Active'
-    balance = _float_or_zero(doc.get('balance_amount'))
+    balance = _float_or_zero(doc.get('balance_amount'))  # can be zero / unused, harmless to keep
     expiry_date = doc.get('expiry_date')
+
     meta = {
         'erp_name': doc.get('name'),
         'customer': doc.get('customer'),
@@ -1728,20 +1743,50 @@ def _upsert_voucher_from_doc(conn: sqlite3.Connection, doc: Dict[str, Any]) -> N
         'pos_profile': doc.get('pos_profile'),
         'till_number': doc.get('till_number'),
         'is_clearance': int(doc.get('is_clearance') or 0),
-        'last_sync_utc': _utcnow_z()
+        'last_sync_utc': _utcnow_z(),
     }
-    ps.upsert_voucher_head(conn, code, issue_date, original_amount or balance, 0 if status in ('Expired', 'Cancelled') else 1, meta)
-    rows = []
+
+    # Upsert voucher head: initial value is original_amount if present, else balance_amount as a fallback
+    ps.upsert_voucher_head(
+        conn,
+        code,
+        issue_date,
+        original_amount or balance,
+        0 if status in ('Expired', 'Cancelled') else 1,
+        meta,
+    )
+
+    # Load existing ledger rows for this voucher (if any)
     try:
-        rows = [dict(row) for row in conn.execute(
-            "SELECT id, type, sale_id, amount, note FROM voucher_ledger WHERE voucher_code=?",
-            (code,)
-        ).fetchall()]
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT id, type, sale_id, amount, note "
+                "FROM voucher_ledger WHERE voucher_code=?",
+                (code,),
+            ).fetchall()
+        ]
     except Exception:
         rows = []
-    _ensure_remote_voucher_issue_entry(conn, rows, code, _clean_text(doc.get('name')) or code, issue_date, original_amount)
+
+    # Ensure we have an ERP "issue" entry for the original amount
+    _ensure_remote_voucher_issue_entry(
+        conn,
+        rows,
+        code,
+        _clean_text(doc.get('name')) or code,
+        issue_date,
+        original_amount,
+    )
+
+    # Ensure we have ERP "redeem" entries for each redemption line
     _ensure_remote_voucher_redemptions(conn, rows, code, doc)
-    ps.voucher_adjust_balance(conn, code, balance, note="ERP voucher pull")
+
+    # IMPORTANT: do NOT adjust balance to doc['balance_amount'] (ERP doesn't maintain it
+    # and doing so was zeroing out the voucher locally).
+    # So we REMOVE this:
+    # ps.voucher_adjust_balance(conn, code, balance, note="ERP voucher pull")
+
 
 
 def _reconcile_erp_gift_vouchers(conn: Optional[sqlite3.Connection]) -> Tuple[int, int, int]:
