@@ -1083,7 +1083,6 @@ const FX_SLIP_WAIT_AFTER_RECEIPT_MS = 150;
 const FX_SLIP_WAIT_AFTER_FIRST_CUT_MS = 80;
 const FX_SLIP_WAIT_AFTER_SLIP_MS = 140;
 const GIFT_RECEIPT_EXTRA_CUT_DELAY_MS = 130;
-const VOUCHER_PRINT_DELAY_MS = 140;
 
 function waitFor(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1228,26 +1227,16 @@ function buildVoucherPrintPayload(issuedVoucher, saleInfo = {}){
   return payload;
 }
 
-async function autoPrintIssuedVouchers(info){
-  if(!info || info.__voucherPrintAttempted) return;
-  info.__voucherPrintAttempted = true;
+async function printVoucherSlip(voucherInfo, context = {}){
   if(!receiptAgentClient || typeof receiptAgentClient.printVoucher !== 'function' || !receiptAgentClient.isReady()){
     return;
   }
-  const issued = Array.isArray(info.issued_vouchers) ? info.issued_vouchers : [];
-  if(!issued.length) return;
-  for(const voucher of issued){
-    const payload = buildVoucherPrintPayload(voucher, info);
-    if(!payload) continue;
-    try{
-      const ok = await receiptAgentClient.printVoucher(payload);
-      if(!ok){
-        warn('Voucher printer rejected payload', payload);
-      }
-    }catch(err){
-      warn('Voucher print failed', err);
-    }
-    await waitFor(VOUCHER_PRINT_DELAY_MS);
+  const payload = buildVoucherPrintPayload(voucherInfo, context);
+  if(!payload) return;
+  try{
+    await receiptAgentClient.printVoucher(payload);
+  }catch(err){
+    warn('Voucher print failed', err);
   }
 }
 
@@ -3227,7 +3216,6 @@ async function completeSaleFromOverlay() {
     lastReceiptInfo = info;
     trackRecentItems(receiptItems);
     showReceiptOverlay(info);
-    autoPrintIssuedVouchers(info).catch(err=> warn('Auto voucher print failed', err));
     clearSaleFxState();
     if(wantsDrawerPulseFor(info)){
       pulseCashDrawer().catch(err=> warn('Drawer pulse failed', err));
@@ -3403,13 +3391,16 @@ function openVoucherOverlay(options = {}){
       codeInput.placeholder = 'Voucher barcode';
     }
     codeInput.value = '';
-    setTimeout(() => codeInput.focus(), 0);
   }
   if (amountInput) {
     amountInput.value = isSaleIssue ? '' : suggested.toFixed(2);
     amountInput.removeAttribute('max');
     delete amountInput.dataset.prefilledFor;
     delete amountInput.dataset.maxVoucherAmount;
+  }
+  const focusTarget = isIssue ? amountInput : codeInput;
+  if(focusTarget){
+    setTimeout(() => focusTarget.focus(), 0);
   }
   if (submitBtn){
     submitBtn.textContent = isIssue ? 'Issue Voucher' : 'Use Voucher';
@@ -3476,6 +3467,21 @@ async function submitVoucher(){
       if (!finalCode) {
         throw new Error('Voucher code missing from response');
       }
+      const voucherPrintContext = {
+        cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
+        till_number: settings && settings.till_number,
+        till: settings && settings.till_number,
+        currency_used: (settings && settings.currency) || 'GBP',
+        created: new Date().toISOString()
+      };
+      const voucherPrintDetails = {
+        code: finalCode,
+        voucher_code: finalCode,
+        amount: applyAmount,
+        name: issued.voucher_name || issued.name || undefined,
+        voucher_name: issued.voucher_name || issued.name || undefined
+      };
+      printVoucherSlip(voucherPrintDetails, voucherPrintContext).catch(err=> warn('Voucher slip print failed', err));
       if (isSaleIssue) {
         handleVoucherSaleIssue(finalCode, applyAmount);
       } else {
