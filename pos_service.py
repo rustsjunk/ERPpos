@@ -485,6 +485,7 @@ def voucher_details(conn: sqlite3.Connection, code: str) -> Optional[Dict[str, A
         "meta": meta
     }
 
+
 def voucher_adjust_balance(conn: sqlite3.Connection, code: str, target_balance: float, note: str = "ERP sync") -> float:
     row = conn.execute(
         "SELECT balance FROM v_voucher_balance WHERE voucher_code=?",
@@ -497,6 +498,7 @@ def voucher_adjust_balance(conn: sqlite3.Connection, code: str, target_balance: 
         return delta
     return 0.0
 
+
 def _erp_lookup_voucher_doc(code: str) -> Optional[Dict[str, Any]]:
     if not code:
         return None
@@ -506,32 +508,71 @@ def _erp_lookup_voucher_doc(code: str) -> Optional[Dict[str, Any]]:
         response = _erp_get(
             path,
             {
-                "filters": json.dumps([["voucher_code","=",code]]),
-                "fields": json.dumps(["name","voucher_code","status","original_amount","balance_amount"])
-            }
+                "filters": json.dumps([["voucher_code", "=", code]]),
+                "fields": json.dumps([
+                    "name",
+                    "voucher_code",
+                    "status",
+                    "original_amount",
+                    # "balance_amount",  # optional now
+                ]),
+            },
         )
     except Exception:
         return None
+
     rows = response.get("data") or response.get("message") or []
     if not rows:
         return None
+
     name = rows[0].get("name")
     if not name:
         return None
+
     try:
+        # Full doc, including child redemption lines
         return _erp_get_doc(ERP_VOUCHER_DOCTYPE, name)
     except Exception:
         return None
+
 
 def sync_voucher_from_erp(conn: sqlite3.Connection, code: str) -> Optional[Dict[str, Any]]:
     doc = _erp_lookup_voucher_doc(code)
     if not doc:
         return None
-    original_amount = float(doc.get("original_amount") or doc.get("original_amount_gbp") or 0)
-    balance = float(doc.get("balance_amount") or 0)
+
+    # 1) Base voucher amounts from ERP
+    original_amount = float(
+        doc.get("original_amount")
+        or doc.get("original_amount_gbp")
+        or 0
+    )
+
     status = (doc.get("status") or "").strip()
     issue_date = doc.get("issue_date") or doc.get("issue_datetime") or doc.get("issued_on")
     expiry_date = doc.get("expiry_date")
+
+    # 2) Compute redeemed total from child table
+    #    Adjust the fieldname "redeem_lines" if your child table field is named differently.
+    #    The individual child rows should have an "amount" field.
+    redeem_children = (
+        doc.get("redeem_lines")
+        or doc.get("redemption_lines")
+        or doc.get("redeem_log")
+        or []
+    )
+
+    redeemed_total = 0.0
+    for row in redeem_children:
+        try:
+            redeemed_total += float(row.get("amount") or 0)
+        except (TypeError, ValueError):
+            # ignore bad rows rather than blowing up
+            continue
+
+    # 3) Calculate balance locally
+    balance = max(0.0, original_amount - redeemed_total)
+
     meta = {
         "erp_name": doc.get("name"),
         "customer": doc.get("customer"),
@@ -539,19 +580,39 @@ def sync_voucher_from_erp(conn: sqlite3.Connection, code: str) -> Optional[Dict[
         "expiry_date": expiry_date,
         "status": status,
         "remarks": doc.get("remarks"),
-        "last_sync_utc": iso_now()
+        "last_sync_utc": iso_now(),
+        # Optional but handy for debugging / reporting
+        "redeemed_total": redeemed_total,
+        "original_amount": original_amount,
     }
-    active = 0 if status in ("Expired","Cancelled") else 1
-    upsert_voucher_head(conn, code, issue_date, original_amount or balance, active, meta)
-    voucher_adjust_balance(conn, code, balance, note="ERP sync")
+
+    active = 0 if status in ("Expired", "Cancelled") else 1
+
+    # 4) Upsert voucher head – store original amount as the initial value
+    upsert_voucher_head(
+        conn,
+        code,
+        issue_date,
+        original_amount or balance,
+        active,
+        meta,
+    )
+
+    # 5) Adjust the *event* ledger to match the ERP-derived balance
+    #    For a brand-new voucher with no events, this will create a single "adjust"
+    #    event with amount = balance. For partially used ones, it will nudge the
+    #    local balance to whatever ERP says is correct.
+    voucher_adjust_balance(conn, code, balance, note="ERP sync (orig - redemptions)")
     conn.commit()
+
     details = voucher_details(conn, code)
     if details:
         details["meta"].update({
             "status": status,
-            "erp_name": doc.get("name")
+            "erp_name": doc.get("name"),
         })
     return details
+
 
 def queue_voucher_issue(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
     code = (payload.get("voucher_code") or "").strip()

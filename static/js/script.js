@@ -979,8 +979,35 @@ const receiptAgentClient = (() => {
   const endpoint = rawUrl.trim();
   if(!endpoint) return null;
 
-  async function send(payload) {
-    const response = await fetch(endpoint, {
+  function deriveVoucherEndpoint(baseUrl) {
+    if(!baseUrl) return '';
+    try {
+      const url = new URL(baseUrl);
+      const normalized = url.pathname.endsWith('/print-voucher')
+        ? url.pathname
+        : url.pathname.replace(/\/print(?:\/)?$/i, '/print-voucher');
+      url.pathname = normalized.endsWith('/print-voucher')
+        ? normalized
+        : `${normalized.replace(/\/$/, '')}/print-voucher`;
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch(_) {
+      if(/\/print\/?$/i.test(baseUrl)){
+        return baseUrl.replace(/\/print\/?$/i, '/print-voucher');
+      }
+      return baseUrl.endsWith('/')
+        ? `${baseUrl}print-voucher`
+        : `${baseUrl}/print-voucher`;
+    }
+  }
+
+  const voucherEndpoint = deriveVoucherEndpoint(endpoint);
+
+  async function send(payload, targetUrl) {
+    const target = targetUrl || endpoint;
+    if(!target) throw new Error('Receipt agent endpoint missing');
+    const response = await fetch(target, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1032,6 +1059,17 @@ const receiptAgentClient = (() => {
     async printText(text, opts = {}) {
       return await send({ text, line_feeds: opts.line_feeds ?? 4, ...opts });
     },
+    async printVoucher(voucherPayload = {}) {
+      if(!voucherEndpoint) return false;
+      const payload = { ...voucherPayload };
+      if(!Object.prototype.hasOwnProperty.call(payload, 'line_feeds')){
+        payload.line_feeds = 6;
+      }
+      if(!Object.prototype.hasOwnProperty.call(payload, 'cut')){
+        payload.cut = true;
+      }
+      return await send(payload, voucherEndpoint);
+    },
     async cut() {
       return await send({ text: '', line_feeds: 0, cut: true });
     },
@@ -1045,6 +1083,7 @@ const FX_SLIP_WAIT_AFTER_RECEIPT_MS = 150;
 const FX_SLIP_WAIT_AFTER_FIRST_CUT_MS = 80;
 const FX_SLIP_WAIT_AFTER_SLIP_MS = 140;
 const GIFT_RECEIPT_EXTRA_CUT_DELAY_MS = 130;
+const VOUCHER_PRINT_DELAY_MS = 140;
 
 function waitFor(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1155,6 +1194,61 @@ function handleReceiptPrintRequest(info, wantsGift){
     }
     resetGiftCheckbox();
   })().catch(e=> err('receipt print handler failed', e));
+}
+
+function buildVoucherPrintPayload(issuedVoucher, saleInfo = {}){
+  if(!issuedVoucher) return null;
+  const code = issuedVoucher.code || issuedVoucher.voucher_code;
+  if(!code) return null;
+  const voucherNameRaw = issuedVoucher.name || issuedVoucher.label || issuedVoucher.voucher_name || `Voucher ${code}`;
+  const amountRaw = issuedVoucher.amount ?? issuedVoucher.value ?? issuedVoucher.balance;
+  const title = (settings && settings.voucher_print_title) || 'GIFT VOUCHER';
+  const currency = saleInfo.currency_used || (settings && settings.currency) || 'GBP';
+  const issuedTs = saleInfo.created ? new Date(saleInfo.created) : new Date();
+  const issueDate = Number.isNaN(issuedTs.getTime()) ? new Date() : issuedTs;
+  const tillRef = saleInfo.till_number || saleInfo.till || (settings && settings.till_number) || undefined;
+  const termsSetting = settings && settings.voucher_terms;
+  const parsedAmount = Number(amountRaw);
+  const displayName = String(voucherNameRaw).trim() || code;
+  const payload = {
+    voucher_code: code,
+    voucher_name: displayName,
+    amount: Number.isFinite(parsedAmount) ? parsedAmount : amountRaw,
+    currency,
+    title,
+    issue_date: issueDate.toISOString().slice(0, 10),
+    cashier: saleInfo.cashier ? (saleInfo.cashier.name || saleInfo.cashier.code || '') : undefined,
+    till_number: tillRef
+  };
+  if(Array.isArray(termsSetting) && termsSetting.length){
+    payload.terms = termsSetting;
+  } else if(typeof termsSetting === 'string' && termsSetting.trim()){
+    payload.terms = [termsSetting.trim()];
+  }
+  return payload;
+}
+
+async function autoPrintIssuedVouchers(info){
+  if(!info || info.__voucherPrintAttempted) return;
+  info.__voucherPrintAttempted = true;
+  if(!receiptAgentClient || typeof receiptAgentClient.printVoucher !== 'function' || !receiptAgentClient.isReady()){
+    return;
+  }
+  const issued = Array.isArray(info.issued_vouchers) ? info.issued_vouchers : [];
+  if(!issued.length) return;
+  for(const voucher of issued){
+    const payload = buildVoucherPrintPayload(voucher, info);
+    if(!payload) continue;
+    try{
+      const ok = await receiptAgentClient.printVoucher(payload);
+      if(!ok){
+        warn('Voucher printer rejected payload', payload);
+      }
+    }catch(err){
+      warn('Voucher print failed', err);
+    }
+    await waitFor(VOUCHER_PRINT_DELAY_MS);
+  }
 }
 
 // Currency
@@ -3133,6 +3227,7 @@ async function completeSaleFromOverlay() {
     lastReceiptInfo = info;
     trackRecentItems(receiptItems);
     showReceiptOverlay(info);
+    autoPrintIssuedVouchers(info).catch(err=> warn('Auto voucher print failed', err));
     clearSaleFxState();
     if(wantsDrawerPulseFor(info)){
       pulseCashDrawer().catch(err=> warn('Drawer pulse failed', err));
@@ -3980,7 +4075,10 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
-  const printBtn=document.getElementById('printReceiptBtn'); const doneBtn=document.getElementById('receiptDoneBtn'); const closeBtn=document.getElementById('receiptCloseBtn'); const reprintBtn=document.getElementById('receiptReprintBtn');
+  const printBtn=document.getElementById('printReceiptBtn'); 
+  const doneBtn=document.getElementById('receiptDoneBtn'); 
+  const closeBtn=document.getElementById('receiptCloseBtn'); 
+  const reprintBtn=document.getElementById('receiptReprintBtn');
   const returnBtn=document.getElementById('receiptReturnBtn');
   const giftEl = document.getElementById('giftReceiptCheckbox');
   if(giftEl){
@@ -4063,6 +4161,8 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   const finish = ()=>{ if(giftEl){ giftEl.checked=false; } o.style.display='none'; hideCheckoutOverlay(); cart=[]; updateCartDisplay(); logoutToLogin(); };
   if(doneBtn) doneBtn.onclick = finish; if(closeBtn) closeBtn.onclick = finish;
 }
+
+
 function layoutCashPanel(){
   const panel = document.querySelector('.tender-panel');
   const actions = document.querySelector('.tender-actions');

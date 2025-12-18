@@ -26,6 +26,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 *.sqlite3
+*.db-shm
+*.db-wal
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
