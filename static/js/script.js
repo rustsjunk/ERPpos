@@ -65,11 +65,6 @@ let vouchers = [];
 let issuedVouchers = [];
 let pendingVoucherBalancePrints = [];
 const CLOSING_DENOM_VALUES = [50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
-const FLOAT_COIN_LIMIT = 2;
-const DEFAULT_FLOAT_NOTE_PLAN = [
-  { denom: 10, total: 50 },
-  { denom: 5, total: 50 }
-];
 let voucherOverlayMode = 'redeem'; // 'redeem' | 'issue_refund' | 'issue_sale'
 let voucherSaleMode = false;
 let appliedPayments = [];
@@ -606,6 +601,7 @@ let settings = {
   net_cash: 0,
   net_card: 0,
   net_voucher: 0,
+  net_cash_change: 0,
   vat_rate: 20,
   vat_inclusive: true,
   currency_rate: DEFAULT_STORE_RATE,
@@ -854,7 +850,8 @@ const receiptBuilder = (() => {
 
     // Newline + human-readable text
     out += '\n';
-    out += `Invoice: ${safe}\n`;
+    out += centerText(`Invoice: ${safe}`);
+    out += '\n';
 
     log('buildBarcode', {
       invoice: value,
@@ -1000,7 +997,7 @@ const receiptBuilder = (() => {
     if(barcodeHex.length){
       buffer += '\n';
       if(sanitizedBarcodeValue){
-        write(`Invoice: ${sanitizedBarcodeValue}`);
+        write(centerText(`Invoice: ${sanitizedBarcodeValue}`));
       }
     } else if(sanitizedBarcodeValue){
       buffer += '\n';
@@ -1008,7 +1005,7 @@ const receiptBuilder = (() => {
       if(barcodeChunk){
         buffer += barcodeChunk;
       } else {
-        write(`Invoice: ${sanitizedBarcodeValue}`);
+        write(centerText(`Invoice: ${sanitizedBarcodeValue}`));
       }
     }
 
@@ -2721,6 +2718,7 @@ function loadSettings(){
         net_cash:0,
         net_card:0,
         net_voucher:0,
+        net_cash_change:0,
         vat_rate:20,
         vat_inclusive:true,
         currency_rate: DEFAULT_STORE_RATE,
@@ -2739,6 +2737,7 @@ function loadSettings(){
   try{
     if(settings.opening_date !== todayStr()){
       settings.till_open = false;
+      settings.net_cash_change = 0;
     }
   }catch(_){}
 }
@@ -3536,12 +3535,16 @@ async function completeSaleFromOverlay() {
       if (settings.net_cash == null) settings.net_cash = 0;
       if (settings.net_card == null) settings.net_card = 0;
       if (settings.net_voucher == null) settings.net_voucher = 0;
+      if (settings.net_cash_change == null) settings.net_cash_change = 0;
       (payments||[]).forEach(p=>{
         const m = (p.mode_of_payment||'').toString();
         if(/cash/i.test(m)) settings.net_cash += Number(p.amount||0);
         else if(/card/i.test(m)) settings.net_card += Number(p.amount||0);
         else if(/voucher/i.test(m)) settings.net_voucher += Number(p.amount||0);
       });
+      if(!isRefund && changeVal > 0){
+        settings.net_cash_change += changeVal;
+      }
       saveSettings();
     } catch(_){}
     // Update Z-read aggregates for today
@@ -4122,82 +4125,11 @@ function saveOpeningFloat(){
 }
 
 function guessClosingDenominationCounts(){
-  const inputs = Array.from(document.querySelectorAll('#denomsGrid .denom-qty'));
-  if(!inputs.length) return;
-  const map = new Map();
-  inputs.forEach(inp=>{
-    const denom = parseFloat(inp.getAttribute('data-denom') || inp.dataset.denom || '');
-    if(!Number.isFinite(denom)) return;
-    map.set(denom, inp);
+  document.querySelectorAll('#denomsGrid .denom-qty').forEach(inp=>{
+    inp.value = '';
   });
-  if(!map.size) return;
-  const floatTarget = Number(settings.opening_float || 0);
-  if(floatTarget > 0){
-    let remainingFloat = floatTarget;
-    const protectedDenoms = new Set();
-    DEFAULT_FLOAT_NOTE_PLAN.forEach(plan=>{
-      const denom = Number(plan.denom);
-      if(!Number.isFinite(denom) || denom <= FLOAT_COIN_LIMIT) return;
-      const desiredValue = Math.max(0, Number(plan.total) || 0);
-      const actualValue = Math.min(desiredValue, Math.max(0, remainingFloat));
-      const count = denom > 0 ? Math.floor(actualValue / denom) : 0;
-      const input = map.get(denom);
-      if(input){
-        input.value = count > 0 ? String(count) : '';
-      }
-      remainingFloat = Math.max(0, remainingFloat - (count * denom));
-      protectedDenoms.add(denom);
-    });
-    map.forEach((input, denom)=>{
-      if(denom > FLOAT_COIN_LIMIT && !protectedDenoms.has(denom)){
-        input.value = '';
-      }
-    });
-    let coinRemainingCents = Math.round(Math.max(0, remainingFloat) * 100);
-    const coinDenoms = CLOSING_DENOM_VALUES.filter(value=> value <= FLOAT_COIN_LIMIT);
-    coinDenoms.forEach(value=>{
-      const input = map.get(value);
-      if(!input) return;
-      const cents = Math.round(value * 100);
-      const qty = cents > 0 ? Math.floor(coinRemainingCents / cents) : 0;
-      input.value = qty > 0 ? String(qty) : '';
-      coinRemainingCents -= qty * cents;
-    });
-    if(coinRemainingCents > 0){
-      const smallest = coinDenoms[coinDenoms.length - 1];
-      const cents = Math.round(smallest * 100) || 1;
-      const extra = Math.max(1, Math.round(coinRemainingCents / cents));
-      const smallestInput = map.get(smallest);
-      if(smallestInput){
-        const base = Number(smallestInput.value || 0) || 0;
-        smallestInput.value = String(base + extra);
-      }
-    }
-    computeReconciliation(true);
-    return;
-  }
-  const payouts = Number(document.getElementById('sumPayoutsInput')?.value || 0) || 0;
-  const opening = Number(settings.opening_float || 0);
-  const cashSales = Number(settings.net_cash || 0);
-  let remaining = Math.max(0, Math.round((opening + cashSales - payouts) * 100) / 100);
-  CLOSING_DENOM_VALUES.forEach(value=>{
-    const input = map.get(value);
-    if(!input) return;
-    const qty = Math.floor((remaining + 1e-6) / value);
-    input.value = qty > 0 ? String(qty) : '';
-    remaining = Math.max(0, Math.round((remaining - qty * value) * 100) / 100);
-  });
-  if(remaining > 0.0001){
-    const smallest = CLOSING_DENOM_VALUES[CLOSING_DENOM_VALUES.length - 1];
-    const extra = Math.max(1, Math.round(remaining / smallest));
-    const smallestInput = map.get(smallest);
-    if(smallestInput){
-      const base = Number(smallestInput.value || 0) || 0;
-      smallestInput.value = String(base + extra);
-    }
-  }
-  computeReconciliation(true);
 }
+
 function showClosingOverlay(){
   const o=document.getElementById('closingOverlay'); if(!o) return; neutralizeForeignOverlays();
   const sumBox=document.getElementById('reconSummary'); if(sumBox) sumBox.style.display='none';
@@ -4223,12 +4155,14 @@ function computeReconciliation(reveal){
   const opening = Number(settings.opening_float||0);
   const cashSales = Number(settings.net_cash||0);
   const cardSales = Number(settings.net_card||0);
-  const expected = opening + cashSales - payouts;
+  const changeGiven = Number(settings.net_cash_change||0);
+  const expected = opening + cashSales - payouts - changeGiven;
   const variance = counted - expected;
   const setText = (id, val)=>{ const el=document.getElementById(id); if(el) el.textContent = money(val); };
   setText('sumOpening', opening);
   setText('sumCashSales', cashSales);
   setText('sumCardSales', cardSales);
+  setText('sumChange', changeGiven);
   setText('sumExpected', expected);
   setText('sumCounted', counted);
   setText('sumVariance', variance);
@@ -4262,8 +4196,9 @@ async function printReconciliation(){
     const opening = Number(settings.opening_float||0);
     const cashSales = Number(settings.net_cash||0);
     const cardSales = Number(settings.net_card||0);
+    const changeGiven = Number(settings.net_cash_change||0);
     const payouts = Number(document.getElementById('sumPayoutsInput')?.value||0) || 0;
-    const expected = opening + cashSales - payouts;
+    const expected = opening + cashSales - payouts - changeGiven;
     let counted = 0; const denomLines=[];
     document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{ 
       const qty = Number(el.value||0) || 0; 
@@ -4280,6 +4215,7 @@ async function printReconciliation(){
       `Opening Float: ${money(opening)}`,
       `Cash Sales (net): ${money(cashSales)}`,
       `Card Sales (net): ${money(cardSales)}`,
+      `Change Given: ${money(changeGiven)}`,
       `Payouts: ${money(payouts)}`,
       `Expected Till: ${money(expected)}`,
       '',
@@ -4886,6 +4822,7 @@ async function printZRead(){
       settings.net_cash = 0;
       settings.net_card = 0;
       settings.net_voucher = 0;
+      settings.net_cash_change = 0;
       settings.till_open = false;
       settings.till_closed_at = new Date().toISOString();
       const d = todayStr();

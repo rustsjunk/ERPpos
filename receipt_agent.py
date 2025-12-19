@@ -277,7 +277,8 @@ def print_voucher():
         lines.append("\n")
         lines.append(center(f"{value_big_on}{amount_label}{huge_off}"))
         lines.append(center(""))
-    lines.append("\nScan barcode to redeem\n\n")
+    lines.append(center("Scan barcode to redeem"))
+    lines.append("\n")
     if fun_line:
         lines.append(center(fun_line))
         lines.append("\n")
