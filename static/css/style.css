@@ -986,6 +986,11 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     user-select: none;
 }
 .variant-cell:hover { background: #f8f9fa; }
+.variant-cell.queued {
+    background: #fff8e1;
+    border-color: #ffe69c;
+    font-weight: 600;
+}
 .variant-cell.disabled {
     color: #adb5bd;
     cursor: not-allowed;

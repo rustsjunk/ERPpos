@@ -220,6 +220,7 @@ def print_voucher():
     center_on = f"{esc}\x61\x01"
     center_off = f"{esc}\x61\x00"
     big_on = f"{esc}!\x38"
+    huge_on = f"{esc}!\x30"
     normal = f"{esc}!\x00"
     bold_on = f"{esc}\x45\x01"
     bold_off = f"{esc}\x45\x00"
@@ -232,7 +233,8 @@ def print_voucher():
     lines.append(center(f"{big_on}{title.upper()}{normal}"))
     lines.append(center(f"{bold_on}{display_name}{bold_off}"))
     if amount_label:
-        lines.append(center(amount_label))
+        lines.append(center(f"{huge_on}{amount_label}{normal}"))
+        lines.append("\n")
     lines.append(center(line))
     lines.append(f"Voucher: {safe_code}\n")
     if location:

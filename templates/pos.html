@@ -143,7 +143,22 @@
                             <tbody id="matrixBody"></tbody>
                         </table>
                     </div>
-                    <div class="text-muted small">Click a size cell to add 1 to cart.</div></div></div></div>
+                    <div class="text-muted small mb-2">Tap a size to queue it, then use the button below to add everything to the cart.</div>
+                    <div class="variant-queue mt-2">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div class="fw-semibold">Queued Selections</div>
+                            <button id="clearVariantQueueBtn" class="btn btn-link btn-sm" type="button" disabled>Clear</button>
+                        </div>
+                        <div id="variantQueueList" class="variant-queue-list list-group small">
+                            <div class="list-group-item text-muted small">No variants queued. Tap a size to select it.</div>
+                        </div>
+                        <div class="text-end mt-2">
+                            <button id="addQueuedVariantsBtn" class="btn btn-primary" type="button" disabled>Add Selections to Cart</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Checkout Overlay -->
