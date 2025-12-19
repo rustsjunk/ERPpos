@@ -233,9 +233,6 @@ def print_voucher():
     lines = [f"{esc}@"]  # reset printer
     lines.append(center(f"{big_on}{title.upper()}{normal}"))
     lines.append(center(f"{bold_on}{display_name}{bold_off}"))
-    if amount_label:
-        lines.append(center(f"{huge_on}{amount_label}{huge_off}"))
-        lines.append(center(""))
     lines.append(center(line))
     lines.append(f"Voucher: {safe_code}\n")
     if location:
@@ -244,6 +241,10 @@ def print_voucher():
         lines.append(f"Cashier: {cashier}\n")
     if issue_date:
         lines.append(f"Issued: {issue_date}\n")
+    if amount_label:
+        lines.append("\n")
+        lines.append(center(f"{huge_on}{amount_label}{huge_off}"))
+        lines.append(center(""))
     lines.append("\nScan barcode to redeem\n\n")
     if terms_lines:
         lines.append("T&C's:\n")
