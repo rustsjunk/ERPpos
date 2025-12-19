@@ -88,6 +88,18 @@ def _terms_payload(payload) -> list[str]:
     ]
 
 
+def _normalized_lines(value) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        source = value.splitlines()
+    elif isinstance(value, (list, tuple)):
+        source = value
+    else:
+        source = [value]
+    return [str(entry).strip() for entry in source if str(entry).strip()]
+
+
 
 @app.after_request
 def allow_cors(response):
@@ -212,6 +224,10 @@ def print_voucher():
     voucher_name = payload.get("voucher_name") or payload.get("voucher_label") or ""
     location = payload.get("till_number") or payload.get("till") or payload.get("location")
     terms_lines = _terms_payload(payload)
+    header_lines = _normalized_lines(payload.get("header_lines"))
+    footer_lines = _normalized_lines(payload.get("footer_lines"))
+    fun_raw = payload.get("fun_line") or "Enjoy the surprise!"
+    fun_line = str(fun_raw).strip()
 
     safe_code = _code39_sanitize(voucher_code)
     display_name = (voucher_name or safe_code).strip() or safe_code
@@ -220,7 +236,7 @@ def print_voucher():
     center_on = f"{esc}\x61\x01"
     center_off = f"{esc}\x61\x00"
     big_on = f"{esc}!\x38"
-    huge_on = "\x1D!\x11"
+    huge_on = "\x1D!\x55"
     huge_off = "\x1D!\x00"
     normal = f"{esc}!\x00"
     bold_on = f"{esc}\x45\x01"
@@ -231,6 +247,10 @@ def print_voucher():
         return f"{center_on}{text}{center_off}\n"
 
     lines = [f"{esc}@"]  # reset printer
+    if header_lines:
+        for entry in header_lines:
+            lines.append(center(entry))
+        lines.append("\n")
     lines.append(center(f"{big_on}{title.upper()}{normal}"))
     lines.append(center(f"{bold_on}{display_name}{bold_off}"))
     lines.append(center(line))
@@ -246,10 +266,17 @@ def print_voucher():
         lines.append(center(f"{huge_on}{amount_label}{huge_off}"))
         lines.append(center(""))
     lines.append("\nScan barcode to redeem\n\n")
+    if fun_line:
+        lines.append(center(fun_line))
+        lines.append("\n")
     if terms_lines:
         lines.append("T&C's:\n")
         for entry in terms_lines:
             lines.append(f"- {entry}\n")
+        lines.append("\n")
+    if footer_lines:
+        for entry in footer_lines:
+            lines.append(center(entry))
         lines.append("\n")
 
     text = "".join(lines)

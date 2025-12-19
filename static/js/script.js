@@ -136,6 +136,43 @@ function setShowZeroStock(show){
   try { renderSearchResults(); } catch(_){}
 }
 
+const DEFAULT_VOUCHER_FUN_LINE = 'Thanks for sharing the joy!';
+
+function normalizeReceiptLines(value){
+  if(!value) return [];
+  if(Array.isArray(value)){
+    return value.map(v=> (v == null ? '' : String(v).trim())).filter(Boolean);
+  }
+  if(typeof value === 'string'){
+    return value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function standardReceiptHeaderLines(){
+  return normalizeReceiptLines(settings && settings.receipt_header);
+}
+
+function standardReceiptFooterLines(){
+  return normalizeReceiptLines(settings && settings.receipt_footer);
+}
+
+function resolveReceiptLines(primary, secondary, fallback){
+  const first = normalizeReceiptLines(primary);
+  if(first.length) return first;
+  const second = normalizeReceiptLines(secondary);
+  if(second.length) return second;
+  if(fallback === undefined) return [];
+  return Array.isArray(fallback)
+    ? normalizeReceiptLines(fallback)
+    : normalizeReceiptLines(fallback);
+}
+
+function defaultVoucherFunLine(){
+  const custom = settings && typeof settings.voucher_fun_line === 'string' ? settings.voucher_fun_line.trim() : '';
+  return custom || DEFAULT_VOUCHER_FUN_LINE;
+}
+
 function refreshBrandFilterOptions(){
   const select = document.getElementById('brandFilter');
   if(!select) return;
@@ -1243,10 +1280,35 @@ function buildVoucherPrintPayload(issuedVoucher, saleInfo = {}){
     cashier: saleInfo.cashier ? (saleInfo.cashier.name || saleInfo.cashier.code || '') : undefined,
     till_number: tillRef
   };
+  const headerLines = resolveReceiptLines(
+    issuedVoucher.header_lines,
+    saleInfo.header_lines || saleInfo.header,
+    standardReceiptHeaderLines()
+  );
+  const footerLines = resolveReceiptLines(
+    issuedVoucher.footer_lines,
+    saleInfo.footer_lines || saleInfo.footer,
+    standardReceiptFooterLines()
+  );
+  if(headerLines.length){
+    payload.header_lines = headerLines;
+  }
+  if(footerLines.length){
+    payload.footer_lines = footerLines;
+  }
   if(Array.isArray(termsSetting) && termsSetting.length){
     payload.terms = termsSetting;
   } else if(typeof termsSetting === 'string' && termsSetting.trim()){
     payload.terms = [termsSetting.trim()];
+  }
+  const funCandidates = [issuedVoucher.fun_line, saleInfo.voucher_fun_line, defaultVoucherFunLine()];
+  for(const candidate of funCandidates){
+    if(candidate == null) continue;
+    const line = String(candidate).trim();
+    if(line){
+      payload.fun_line = line;
+      break;
+    }
   }
   return payload;
 }
@@ -1285,7 +1347,10 @@ async function printIssuedVouchersAfterSale(info){
     till_number: info.till_number || info.till || (settings && settings.till_number),
     till: info.till_number || info.till || (settings && settings.till_number),
     currency_used: info.currency_used || info.currency || (settings && settings.currency) || 'GBP',
-    created: info.created || new Date().toISOString()
+    created: info.created || new Date().toISOString(),
+    header_lines: info.header_lines || standardReceiptHeaderLines(),
+    footer_lines: info.footer_lines || standardReceiptFooterLines(),
+    voucher_fun_line: info.voucher_fun_line || defaultVoucherFunLine()
   };
   const context = buildVoucherPrintContext(overrides);
   for (const voucherInfo of issued){
@@ -1308,7 +1373,10 @@ async function printVoucherBalanceSlipsAfterSale(info){
     till_number: info.till_number || info.till || (settings && settings.till_number),
     till: info.till_number || info.till || (settings && settings.till_number),
     currency_used: info.currency_used || info.currency || (settings && settings.currency) || 'GBP',
-    created: info.created || new Date().toISOString()
+    created: info.created || new Date().toISOString(),
+    header_lines: info.header_lines || standardReceiptHeaderLines(),
+    footer_lines: info.footer_lines || standardReceiptFooterLines(),
+    voucher_fun_line: info.voucher_fun_line || defaultVoucherFunLine()
   };
   const context = buildVoucherPrintContext(overrides);
   for (const voucherInfo of balances){
@@ -3437,6 +3505,9 @@ async function completeSaleFromOverlay() {
     const barcodeHex = Array.isArray(data.invoice_barcode_hex)
       ? data.invoice_barcode_hex.filter(entry => typeof entry === 'string' && entry.trim())
       : [];
+    const receiptHeaderLines = standardReceiptHeaderLines();
+    const receiptFooterLines = standardReceiptFooterLines();
+    const voucherFunLine = defaultVoucherFunLine();
     const info = {
       invoice: data.invoice_name || 'N/A',
       change: isRefund ? Math.abs(total) : changeVal,
@@ -3458,6 +3529,9 @@ async function completeSaleFromOverlay() {
       vat_inclusive: settings.vat_inclusive,
       header: settings.receipt_header,
       footer: settings.receipt_footer,
+      header_lines: receiptHeaderLines,
+      footer_lines: receiptFooterLines,
+      voucher_fun_line: voucherFunLine,
       barcode_value: barcodeValue,
       barcode_hex: barcodeHex,
       cash_given: cashGiven,
@@ -3801,6 +3875,8 @@ async function submitVoucher(){
       const fullBalance = Number(info.balance ?? info.allowed_amount ?? serverAllowed) || serverAllowed;
       const remainingBalance = Math.max(0, fullBalance - applied);
       if(remainingBalance > 0.009){
+        const balanceHeader = standardReceiptHeaderLines();
+        const balanceFooter = standardReceiptFooterLines();
         pendingVoucherBalancePrints.push({
           code: voucherCode,
           voucher_code: voucherCode,
@@ -3808,7 +3884,10 @@ async function submitVoucher(){
           name: info.voucher_name || info.name || undefined,
           voucher_name: info.voucher_name || info.name || undefined,
           currency: info.currency || undefined,
-          title: (settings && settings.voucher_balance_title) || 'VOUCHER BALANCE'
+          title: (settings && settings.voucher_balance_title) || 'VOUCHER BALANCE',
+          header_lines: balanceHeader,
+          footer_lines: balanceFooter,
+          fun_line: defaultVoucherFunLine()
         });
       }
       vouchers.push({ code: voucherCode, amount: applied });
