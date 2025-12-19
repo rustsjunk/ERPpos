@@ -1274,6 +1274,29 @@ function buildVoucherPrintContext(overrides = {}){
   return Object.assign(base, overrides);
 }
 
+async function printIssuedVouchersAfterSale(info){
+  if(!info || info.__voucherPrintComplete) return;
+  const issued = Array.isArray(info.issued_vouchers) ? info.issued_vouchers : [];
+  if(!issued.length) return;
+  info.__voucherPrintComplete = true;
+  const overrides = {
+    cashier: info.cashier || currentCashier || null,
+    till_number: info.till_number || info.till || (settings && settings.till_number),
+    till: info.till_number || info.till || (settings && settings.till_number),
+    currency_used: info.currency_used || info.currency || (settings && settings.currency) || 'GBP',
+    created: info.created || new Date().toISOString()
+  };
+  const context = buildVoucherPrintContext(overrides);
+  for (const voucherInfo of issued){
+    try{
+      await printVoucherSlip(voucherInfo, context);
+      await waitFor(60);
+    }catch(err){
+      warn('Voucher slip failed after sale', err);
+    }
+  }
+}
+
 // Currency
 const CURRENCY = 'GBP';
 const fmt = new Intl.NumberFormat(undefined, { style: 'currency', currency: CURRENCY });
@@ -3425,6 +3448,7 @@ async function completeSaleFromOverlay() {
     lastReceiptInfo = info;
     trackRecentItems(receiptItems);
     showReceiptOverlay(info);
+    printIssuedVouchersAfterSale(info).catch(err=> warn('Voucher slip failed after sale', err));
     clearSaleFxState();
     if(wantsDrawerPulseFor(info)){
       pulseCashDrawer().catch(err=> warn('Drawer pulse failed', err));
@@ -3676,15 +3700,6 @@ async function submitVoucher(){
       if (!finalCode) {
         throw new Error('Voucher code missing from response');
       }
-      const voucherPrintContext = buildVoucherPrintContext();
-      const voucherPrintDetails = {
-        code: finalCode,
-        voucher_code: finalCode,
-        amount: applyAmount,
-        name: issued.voucher_name || issued.name || undefined,
-        voucher_name: issued.voucher_name || issued.name || undefined
-      };
-      printVoucherSlip(voucherPrintDetails, voucherPrintContext).catch(err=> warn('Voucher slip print failed', err));
       if (isSaleIssue) {
         handleVoucherSaleIssue(finalCode, applyAmount);
       } else {
