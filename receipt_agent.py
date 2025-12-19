@@ -97,7 +97,15 @@ def _normalized_lines(value) -> list[str]:
         source = value
     else:
         source = [value]
-    return [str(entry).strip() for entry in source if str(entry).strip()]
+    cleaned = []
+    for entry in source:
+        try:
+            text = str(entry).strip()
+        except Exception:
+            text = ""
+        if text:
+            cleaned.append(text)
+    return cleaned
 
 
 
@@ -224,9 +232,9 @@ def print_voucher():
     voucher_name = payload.get("voucher_name") or payload.get("voucher_label") or ""
     location = payload.get("till_number") or payload.get("till") or payload.get("location")
     terms_lines = _terms_payload(payload)
-    header_lines = _normalized_lines(payload.get("header_lines"))
-    footer_lines = _normalized_lines(payload.get("footer_lines"))
-    fun_raw = payload.get("fun_line") or "Enjoy the surprise!"
+    header_lines = _normalized_lines(payload.get("header_lines")) or _normalized_lines(payload.get("header"))
+    footer_lines = _normalized_lines(payload.get("footer_lines")) or _normalized_lines(payload.get("footer"))
+    fun_raw = payload.get("fun_line") or "Thanks for sharing the joy!"
     fun_line = str(fun_raw).strip()
 
     safe_code = _code39_sanitize(voucher_code)
@@ -236,7 +244,7 @@ def print_voucher():
     center_on = f"{esc}\x61\x01"
     center_off = f"{esc}\x61\x00"
     big_on = f"{esc}!\x38"
-    huge_on = "\x1D!\x55"
+    huge_on = "\x1D!\x33"
     huge_off = "\x1D!\x00"
     normal = f"{esc}!\x00"
     bold_on = f"{esc}\x45\x01"

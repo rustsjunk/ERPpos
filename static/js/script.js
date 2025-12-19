@@ -1332,7 +1332,10 @@ function buildVoucherPrintContext(overrides = {}){
     till_number: settings && settings.till_number,
     till: settings && settings.till_number,
     currency_used: (settings && settings.currency) || 'GBP',
-    created: new Date().toISOString()
+    created: new Date().toISOString(),
+    header_lines: standardReceiptHeaderLines(),
+    footer_lines: standardReceiptFooterLines(),
+    voucher_fun_line: defaultVoucherFunLine()
   };
   return Object.assign(base, overrides);
 }
