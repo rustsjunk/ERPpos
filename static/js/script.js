@@ -1340,11 +1340,15 @@ function buildVoucherPrintContext(overrides = {}){
   return Object.assign(base, overrides);
 }
 
-async function printIssuedVouchersAfterSale(info){
-  if(!info || info.__voucherPrintComplete) return;
+async function printIssuedVouchersAfterSale(info, opts = {}){
+  if(!info) return false;
   const issued = Array.isArray(info.issued_vouchers) ? info.issued_vouchers : [];
-  if(!issued.length) return;
-  info.__voucherPrintComplete = true;
+  if(!issued.length) return false;
+  const force = !!opts.force;
+  if(info.__voucherPrintComplete && !force) return false;
+  if(!force){
+    info.__voucherPrintComplete = true;
+  }
   const overrides = {
     cashier: info.cashier || currentCashier || null,
     till_number: info.till_number || info.till || (settings && settings.till_number),
@@ -1356,21 +1360,28 @@ async function printIssuedVouchersAfterSale(info){
     voucher_fun_line: info.voucher_fun_line || defaultVoucherFunLine()
   };
   const context = buildVoucherPrintContext(overrides);
+  let printed = false;
   for (const voucherInfo of issued){
     try{
       await printVoucherSlip(voucherInfo, context);
+      printed = true;
       await waitFor(60);
     }catch(err){
       warn('Voucher slip failed after sale', err);
     }
   }
+  return printed;
 }
 
-async function printVoucherBalanceSlipsAfterSale(info){
-  if(!info || info.__voucherBalancePrintComplete) return;
+async function printVoucherBalanceSlipsAfterSale(info, opts = {}){
+  if(!info) return false;
   const balances = Array.isArray(info.voucher_balance_prints) ? info.voucher_balance_prints : [];
-  if(!balances.length) return;
-  info.__voucherBalancePrintComplete = true;
+  if(!balances.length) return false;
+  const force = !!opts.force;
+  if(info.__voucherBalancePrintComplete && !force) return false;
+  if(!force){
+    info.__voucherBalancePrintComplete = true;
+  }
   const overrides = {
     cashier: info.cashier || currentCashier || null,
     till_number: info.till_number || info.till || (settings && settings.till_number),
@@ -1382,13 +1393,35 @@ async function printVoucherBalanceSlipsAfterSale(info){
     voucher_fun_line: info.voucher_fun_line || defaultVoucherFunLine()
   };
   const context = buildVoucherPrintContext(overrides);
+  let printed = false;
   for (const voucherInfo of balances){
     try{
       await printVoucherSlip(voucherInfo, context);
+      printed = true;
       await waitFor(60);
     }catch(err){
       warn('Voucher balance slip failed after sale', err);
     }
+  }
+  return printed;
+}
+
+function hasVoucherPrintData(info){
+  if(!info) return false;
+  const issued = Array.isArray(info.issued_vouchers) && info.issued_vouchers.length>0;
+  const balances = Array.isArray(info.voucher_balance_prints) && info.voucher_balance_prints.length>0;
+  return issued || balances;
+}
+
+async function reprintVouchersForInfo(info){
+  if(!hasVoucherPrintData(info)){
+    alert('No vouchers to print for this receipt.');
+    return;
+  }
+  const issuedOk = await printIssuedVouchersAfterSale(info, { force:true }).catch(err=>{ warn('Voucher reprint failed', err); return false; });
+  const balanceOk = await printVoucherBalanceSlipsAfterSale(info, { force:true }).catch(err=>{ warn('Voucher balance reprint failed', err); return false; });
+  if(!issuedOk && !balanceOk){
+    alert('Unable to reprint voucher for this receipt.');
   }
 }
 
@@ -4432,11 +4465,12 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
-  const printBtn=document.getElementById('printReceiptBtn'); 
-  const doneBtn=document.getElementById('receiptDoneBtn'); 
-  const closeBtn=document.getElementById('receiptCloseBtn'); 
+  const printBtn=document.getElementById('printReceiptBtn');
+  const doneBtn=document.getElementById('receiptDoneBtn');
+  const closeBtn=document.getElementById('receiptCloseBtn');
   const reprintBtn=document.getElementById('receiptReprintBtn');
   const returnBtn=document.getElementById('receiptReturnBtn');
+  const voucherPrintBtn=document.getElementById('printVoucherBtn');
   const giftEl = document.getElementById('giftReceiptCheckbox');
   if(giftEl){
     giftEl.checked = false;
@@ -4505,6 +4539,16 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
     const giftEl = document.getElementById('giftReceiptCheckbox');
     handleReceiptPrintRequest(info, giftEl ? !!giftEl.checked : false);
   };
+  if(voucherPrintBtn){
+    if(hasVoucherPrintData(info)){
+      voucherPrintBtn.style.display='inline-flex';
+      voucherPrintBtn.disabled=false;
+      voucherPrintBtn.onclick = ()=>{ reprintVouchersForInfo(info); };
+    }else{
+      voucherPrintBtn.style.display='none';
+      voucherPrintBtn.onclick = null;
+    }
+  }
   if(reprintBtn) reprintBtn.onclick = triggerPrint;
   if(returnBtn) returnBtn.onclick = ()=>{
     try{
@@ -4846,9 +4890,51 @@ async function openInvoiceDetail(invId){
     }
   }catch(e){ err('load invoice detail failed', e); }
 }
+
+function normalizeVoucherPrintEntries(source){
+  if(!Array.isArray(source)) return [];
+  const rows = [];
+  source.forEach(entry=>{
+    if(!entry) return;
+    const codeRaw = entry.code || entry.voucher_code || entry.id;
+    if(!codeRaw) return;
+    const code = String(codeRaw).trim();
+    if(!code) return;
+    const normalized = Object.assign({}, entry);
+    normalized.code = code;
+    if(!normalized.voucher_code){
+      normalized.voucher_code = code;
+    }
+    if(normalized.amount == null){
+      const fallback = entry.value ?? entry.balance ?? entry.remaining ?? entry.allowed_amount;
+      if(fallback != null){
+        const amt = Number(fallback);
+        normalized.amount = Number.isFinite(amt) ? amt : fallback;
+      }
+    }else{
+      const amt = Number(normalized.amount);
+      if(Number.isFinite(amt)){
+        normalized.amount = amt;
+      }
+    }
+    if(!normalized.voucher_name && entry.name){
+      normalized.voucher_name = entry.name;
+    }
+    if(!normalized.name && normalized.voucher_name){
+      normalized.name = normalized.voucher_name;
+    }
+    rows.push(normalized);
+  });
+  return rows;
+}
+
 function buildReceiptInfoFromInvoice(inv){
   if(!inv) return null;
   const vatInclusive = inv.vat_inclusive!=null ? !!inv.vat_inclusive : !!settings.vat_inclusive;
+  const headerLines = resolveReceiptLines(inv.header_lines, inv.header, standardReceiptHeaderLines());
+  const footerLines = resolveReceiptLines(inv.footer_lines, inv.footer, standardReceiptFooterLines());
+  const funRaw = inv.voucher_fun_line != null ? String(inv.voucher_fun_line).trim() : '';
+  const voucherFunLine = funRaw || defaultVoucherFunLine();
   const items = (inv.items||[]).map(it=>{
     const qtyRaw = Number(it.qty||0);
     const qty = Math.abs(qtyRaw);
@@ -4882,7 +4968,23 @@ function buildReceiptInfoFromInvoice(inv){
     ? (isRefund ? 'refund_split' : 'split')
     : (payments[0]?.mode || payments[0]?.mode_of_payment || (isRefund ? 'refund' : ''));
   const changeRaw = inv.change!=null ? Number(inv.change) : (isRefund ? Math.abs(totalProvided) : Math.max(0, paid - totalProvided));
-  return {
+  let cashierInfo = null;
+  if(inv.cashier){
+    if(typeof inv.cashier === 'object'){
+      cashierInfo = Object.assign({}, inv.cashier);
+    }else if(String(inv.cashier||'').trim()){
+      cashierInfo = { name: String(inv.cashier).trim() };
+    }
+  }
+  const tillValue = inv.till_number || inv.till || (settings && settings.till_number) || '';
+  const branchValue = inv.branch || (settings && settings.branch_name) || '';
+  const redeemed = Array.isArray(inv.vouchers) ? inv.vouchers : (Array.isArray(inv.voucher_redeem) ? inv.voucher_redeem : []);
+  const issuedSource = Array.isArray(inv.issued_vouchers) && inv.issued_vouchers.length
+    ? inv.issued_vouchers
+    : (Array.isArray(inv.voucher_issue) ? inv.voucher_issue : []);
+  const issued = normalizeVoucherPrintEntries(issuedSource);
+  const balances = normalizeVoucherPrintEntries(inv.voucher_balance_prints);
+  const info = {
     invoice: inv.id || inv.erp_docname || '',
     change: isRefund ? Math.abs(changeRaw||0) : changeRaw,
     total: totalProvided,
@@ -4891,19 +4993,33 @@ function buildReceiptInfoFromInvoice(inv){
     paid,
     tender,
     customer: inv.customer || '',
-    branch: settings.branch_name || '',
-    till: settings.till_number || '',
-    till_number: settings.till_number || '',
-    cashier: inv.cashier ? { name: inv.cashier } : null,
+    branch: branchValue,
+    till: tillValue,
+    till_number: tillValue,
+    cashier: cashierInfo,
     created: inv.created_at || inv.created || new Date().toISOString(),
-    vouchers: inv.vouchers || [],
+    vouchers: redeemed,
     isRefund,
     vat_rate: inv.vat_rate!=null ? inv.vat_rate : settings.vat_rate,
     vat_inclusive: vatInclusive,
-    header: settings.receipt_header,
-      footer: settings.receipt_footer,
-      vat_inclusive: vatInclusive
+    header: inv.header!=null ? inv.header : settings.receipt_header,
+    footer: inv.footer!=null ? inv.footer : settings.receipt_footer,
+    header_lines: headerLines,
+    footer_lines: footerLines,
+    voucher_fun_line: voucherFunLine,
+    currency_used: inv.currency_used || inv.currency || undefined
   };
+  if(issued.length){
+    info.issued_vouchers = issued;
+  }else if(Array.isArray(issuedSource) && issuedSource.length){
+    info.issued_vouchers = issuedSource.slice();
+  }
+  if(balances.length){
+    info.voucher_balance_prints = balances;
+  }else if(Array.isArray(inv.voucher_balance_prints) && inv.voucher_balance_prints.length){
+    info.voucher_balance_prints = inv.voucher_balance_prints.slice();
+  }
+  return info;
 }
 
 function renderInvoiceDetail(inv){
@@ -4958,6 +5074,8 @@ function renderInvoiceDetail(inv){
     if(totalBox){ totalBox.textContent = money(inv.total||0); }
     // Wire return button in this overlay
     try{
+      const getReceiptInfo = ()=> buildReceiptInfoFromInvoice(inv);
+      const previewInfo = getReceiptInfo();
       const btn = document.getElementById('invDetailReturnBtn');
       if(btn){
         btn.onclick = ()=>{
@@ -4969,14 +5087,33 @@ function renderInvoiceDetail(inv){
       }
       const printBtn = document.getElementById('invDetailPrintBtn');
       if(printBtn){
+        printBtn.disabled = !previewInfo;
         printBtn.onclick = ()=>{
-          const info = buildReceiptInfoFromInvoice(inv);
+          const info = getReceiptInfo();
           if(!info){
             alert('Unable to prepare receipt for printing.');
             return;
           }
           handleReceiptPrintRequest(info, false);
         };
+      }
+      const voucherBtn = document.getElementById('invDetailVoucherBtn');
+      if(voucherBtn){
+        if(previewInfo && hasVoucherPrintData(previewInfo)){
+          voucherBtn.style.display = 'inline-flex';
+          voucherBtn.disabled = false;
+          voucherBtn.onclick = ()=>{
+            const info = getReceiptInfo();
+            if(!info || !hasVoucherPrintData(info)){
+              alert('No vouchers to print for this receipt.');
+              return;
+            }
+            reprintVouchersForInfo(info);
+          };
+        }else{
+          voucherBtn.style.display = 'none';
+          voucherBtn.onclick = null;
+        }
       }
     }catch(_){ }
   }catch(e){ err('renderInvoiceDetail failed', e); }
