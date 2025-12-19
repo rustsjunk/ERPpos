@@ -2172,6 +2172,7 @@ def _build_barcode_sequence_code39(value: str) -> List[str]:
     value_hex = " ".join(f"{ord(c):02x}" for c in clean)
     return [
         "1b 40",
+        "1d 4c 18 00",
         "1d 68 50",
         "1d 77 02",
         "1d 48 02",

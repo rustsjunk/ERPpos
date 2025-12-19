@@ -64,6 +64,12 @@ let denomSubtract = false;
 let vouchers = [];
 let issuedVouchers = [];
 let pendingVoucherBalancePrints = [];
+const CLOSING_DENOM_VALUES = [50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
+const FLOAT_COIN_LIMIT = 2;
+const DEFAULT_FLOAT_NOTE_PLAN = [
+  { denom: 10, total: 50 },
+  { denom: 5, total: 50 }
+];
 let voucherOverlayMode = 'redeem'; // 'redeem' | 'issue_refund' | 'issue_sale'
 let voucherSaleMode = false;
 let appliedPayments = [];
@@ -610,7 +616,10 @@ let settings = {
   receipt_header: RECEIPT_DEFAULT_HEADER,
   receipt_footer: RECEIPT_DEFAULT_FOOTER,
   open_drawer_after_print: true,
-  show_zero_stock: false
+  show_zero_stock: false,
+  till_open: false,
+  till_opened_at: null,
+  till_closed_at: null
 };
 let lastReceiptInfo = null;
 const RECEIPT_PORT_STORAGE_KEY = 'receipt_serial_port';
@@ -830,6 +839,8 @@ const receiptBuilder = (() => {
 
     // ESC @ (init)
     out += ESC + '@';
+    // Set a modest left margin so barcode appears centered
+    out += GS + 'L' + '\x18' + '\x00';
 
     // Barcode parameters (match test 1)
     out += GS + 'h' + '\x50';  // height 80
@@ -2280,8 +2291,19 @@ function bindEvents(){
   const openingSaveBtn=document.getElementById('openingSaveBtn');
   const openingKeypad=document.getElementById('openingKeypad');
   const openingInput=document.getElementById('openingFloatInput');
-  if(openingCloseBtn){ openingCloseBtn.addEventListener('click', ()=>{ if(openingOverlay) openingOverlay.style.display='none'; }); }
-  if(openingOverlay){ openingOverlay.addEventListener('click', e=>{ if(e.target===openingOverlay) openingOverlay.style.display='none'; }); }
+  if(openingCloseBtn){
+    openingCloseBtn.addEventListener('click', ()=>{
+      if(!canDismissOpeningOverlay()) return;
+      if(openingOverlay) openingOverlay.style.display='none';
+    });
+  }
+  if(openingOverlay){
+    openingOverlay.addEventListener('click', e=>{
+      if(e.target===openingOverlay && canDismissOpeningOverlay()){
+        openingOverlay.style.display='none';
+      }
+    });
+  }
   if(openingSaveBtn){ openingSaveBtn.addEventListener('click', saveOpeningFloat); }
   if(openingKeypad){
     openingKeypad.querySelectorAll('.key-btn').forEach(btn=>{
@@ -2310,18 +2332,16 @@ function bindEvents(){
   const reconSummary=document.getElementById('reconSummary');
   const reconResult=document.getElementById('reconResult');
   const sumPayoutsInput=document.getElementById('sumPayoutsInput');
-  // Denomination +/- buttons
-  document.querySelectorAll('#denomsGrid .add-denom').forEach(btn=>{
-    btn.addEventListener('click', ()=>{ const d=btn.getAttribute('data-denom'); const inp = document.querySelector(`#denomsGrid .denom-qty[data-denom="${CSS.escape(d)}"]`); if(!inp) return; const v = Number(inp.value||0); inp.value = String(v+1); });
-  });
-  document.querySelectorAll('#denomsGrid .sub-denom').forEach(btn=>{
-    btn.addEventListener('click', ()=>{ const d=btn.getAttribute('data-denom'); const inp = document.querySelector(`#denomsGrid .denom-qty[data-denom="${CSS.escape(d)}"]`); if(!inp) return; const v = Number(inp.value||0); inp.value = String(Math.max(0, v-1)); });
+  const denomInputs = document.querySelectorAll('#denomsGrid .denom-qty');
+  denomInputs.forEach(input=>{
+    input.addEventListener('input', ()=>{ computeReconciliation(true); });
+    input.addEventListener('focus', ()=>{ try{ input.select(); }catch(_){ } });
   });
   if(closingCloseBtn){ closingCloseBtn.addEventListener('click', ()=>{ if(closingOverlay) closingOverlay.style.display='none'; }); }
   if(closingOverlay){ closingOverlay.addEventListener('click', e=>{ if(e.target===closingOverlay) closingOverlay.style.display='none'; }); }
   if(reconcileBtn){ reconcileBtn.addEventListener('click', ()=>{ computeReconciliation(true); }); }
-  if(reconConfirmBtn){ reconConfirmBtn.addEventListener('click', printReconciliation); }
-  if(sumPayoutsInput){ sumPayoutsInput.addEventListener('input', computeReconciliation); }
+  if(reconConfirmBtn){ reconConfirmBtn.addEventListener('click', completeClosingFlow); }
+  if(sumPayoutsInput){ sumPayoutsInput.addEventListener('input', ()=>{ computeReconciliation(true); }); }
   // Closing menu overlay wiring
   const closingMenuOverlay=document.getElementById('closingMenuOverlay');
   const closingMenuCloseBtn=document.getElementById('closingMenuCloseBtn');
@@ -2709,10 +2729,18 @@ function loadSettings(){
         receipt_header: RECEIPT_DEFAULT_HEADER,
         receipt_footer: RECEIPT_DEFAULT_FOOTER,
         open_drawer_after_print: true,
-        show_zero_stock: false
+        show_zero_stock: false,
+        till_open: false,
+        till_opened_at: null,
+        till_closed_at: null
       }, s);
     }
   }catch(e){}
+  try{
+    if(settings.opening_date !== todayStr()){
+      settings.till_open = false;
+    }
+  }catch(_){}
 }
 function saveSettings(){ try{ localStorage.setItem('pos_settings', JSON.stringify(settings)); }catch(e){} }
 function normalizeMultilineInput(value){
@@ -3982,10 +4010,50 @@ function handleVoucherSaleIssue(voucherCode, amount){
 
 // Opening/Closing helpers
 function todayStr(){ const d=new Date(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return `${d.getFullYear()}-${m}-${day}`; }
-function showOpeningOverlay(){ const o=document.getElementById('openingOverlay'); const input=document.getElementById('openingFloatInput'); if(!o) return; neutralizeForeignOverlays();
-  const amt = Number(settings.opening_float||0); openingDigits = amt>0 ? String(Math.round(amt*100)) : '';
-  if(input){ input.value = (openingDigits? (parseInt(openingDigits,10)/100).toFixed(2) : '0.00'); setTimeout(()=>input.focus(),0); }
-  o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1'; }
+function isTillOpenForToday(){
+  try{
+    const today = todayStr();
+    return !!(settings && settings.till_open && settings.opening_date === today);
+  }catch(_){
+    return false;
+  }
+}
+
+function enforceTillOpenState(){
+  if(isTillOpenForToday()) return true;
+  showOpeningOverlay({ force:true });
+  return false;
+}
+
+function canDismissOpeningOverlay(){
+  return isTillOpenForToday();
+}
+
+function showOpeningOverlay(options = {}){
+  const o=document.getElementById('openingOverlay');
+  const input=document.getElementById('openingFloatInput');
+  const closeBtn=document.getElementById('openingCloseBtn');
+  if(!o) return;
+  neutralizeForeignOverlays();
+  const forceOpen = options.force === true || !isTillOpenForToday();
+  if(closeBtn){
+    closeBtn.style.display = forceOpen ? 'none' : '';
+  }
+  if(forceOpen){
+    o.setAttribute('data-force-open','1');
+  }else{
+    o.removeAttribute('data-force-open');
+  }
+  const amt = Number(settings.opening_float||0);
+  openingDigits = amt>0 ? String(Math.round(amt*100)) : '';
+  if(input){
+    input.value = (openingDigits? (parseInt(openingDigits,10)/100).toFixed(2) : '0.00');
+    setTimeout(()=>input.focus(),0);
+  }
+  o.style.display='flex';
+  o.style.visibility='visible';
+  o.style.opacity='1';
+}
 function digitsToAmountStr(d){ if(!d) return '0.00'; const n = Math.max(0, parseInt(d,10)||0); const v = (n/100).toFixed(2); return v; }
 function setOpeningFromDigits(){ const input=document.getElementById('openingFloatInput'); if(input){ input.value = digitsToAmountStr(openingDigits); } }
 function appendOpeningDigit(k){ openingDigits = (openingDigits||''); if(k>='0'&&k<='9'){ if(openingDigits.length>12) return; openingDigits = openingDigits + k; } }
@@ -4036,6 +4104,9 @@ function saveOpeningFloat(){
   settings.opening_float = isNaN(v) ? 0 : v;
   settings.opening_date = todayStr();
   settings.net_cash = 0;
+  settings.till_open = true;
+  settings.till_opened_at = new Date().toISOString();
+  settings.till_closed_at = null;
   saveSettings();
   openingDigits = '';
   
@@ -4049,12 +4120,97 @@ function saveOpeningFloat(){
     amount: settings.opening_float
   });
 }
-function showClosingOverlay(){ const o=document.getElementById('closingOverlay'); if(!o) return; neutralizeForeignOverlays();
-  document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{ el.value=''; });
+
+function guessClosingDenominationCounts(){
+  const inputs = Array.from(document.querySelectorAll('#denomsGrid .denom-qty'));
+  if(!inputs.length) return;
+  const map = new Map();
+  inputs.forEach(inp=>{
+    const denom = parseFloat(inp.getAttribute('data-denom') || inp.dataset.denom || '');
+    if(!Number.isFinite(denom)) return;
+    map.set(denom, inp);
+  });
+  if(!map.size) return;
+  const floatTarget = Number(settings.opening_float || 0);
+  if(floatTarget > 0){
+    let remainingFloat = floatTarget;
+    const protectedDenoms = new Set();
+    DEFAULT_FLOAT_NOTE_PLAN.forEach(plan=>{
+      const denom = Number(plan.denom);
+      if(!Number.isFinite(denom) || denom <= FLOAT_COIN_LIMIT) return;
+      const desiredValue = Math.max(0, Number(plan.total) || 0);
+      const actualValue = Math.min(desiredValue, Math.max(0, remainingFloat));
+      const count = denom > 0 ? Math.floor(actualValue / denom) : 0;
+      const input = map.get(denom);
+      if(input){
+        input.value = count > 0 ? String(count) : '';
+      }
+      remainingFloat = Math.max(0, remainingFloat - (count * denom));
+      protectedDenoms.add(denom);
+    });
+    map.forEach((input, denom)=>{
+      if(denom > FLOAT_COIN_LIMIT && !protectedDenoms.has(denom)){
+        input.value = '';
+      }
+    });
+    let coinRemainingCents = Math.round(Math.max(0, remainingFloat) * 100);
+    const coinDenoms = CLOSING_DENOM_VALUES.filter(value=> value <= FLOAT_COIN_LIMIT);
+    coinDenoms.forEach(value=>{
+      const input = map.get(value);
+      if(!input) return;
+      const cents = Math.round(value * 100);
+      const qty = cents > 0 ? Math.floor(coinRemainingCents / cents) : 0;
+      input.value = qty > 0 ? String(qty) : '';
+      coinRemainingCents -= qty * cents;
+    });
+    if(coinRemainingCents > 0){
+      const smallest = coinDenoms[coinDenoms.length - 1];
+      const cents = Math.round(smallest * 100) || 1;
+      const extra = Math.max(1, Math.round(coinRemainingCents / cents));
+      const smallestInput = map.get(smallest);
+      if(smallestInput){
+        const base = Number(smallestInput.value || 0) || 0;
+        smallestInput.value = String(base + extra);
+      }
+    }
+    computeReconciliation(true);
+    return;
+  }
+  const payouts = Number(document.getElementById('sumPayoutsInput')?.value || 0) || 0;
+  const opening = Number(settings.opening_float || 0);
+  const cashSales = Number(settings.net_cash || 0);
+  let remaining = Math.max(0, Math.round((opening + cashSales - payouts) * 100) / 100);
+  CLOSING_DENOM_VALUES.forEach(value=>{
+    const input = map.get(value);
+    if(!input) return;
+    const qty = Math.floor((remaining + 1e-6) / value);
+    input.value = qty > 0 ? String(qty) : '';
+    remaining = Math.max(0, Math.round((remaining - qty * value) * 100) / 100);
+  });
+  if(remaining > 0.0001){
+    const smallest = CLOSING_DENOM_VALUES[CLOSING_DENOM_VALUES.length - 1];
+    const extra = Math.max(1, Math.round(remaining / smallest));
+    const smallestInput = map.get(smallest);
+    if(smallestInput){
+      const base = Number(smallestInput.value || 0) || 0;
+      smallestInput.value = String(base + extra);
+    }
+  }
+  computeReconciliation(true);
+}
+function showClosingOverlay(){
+  const o=document.getElementById('closingOverlay'); if(!o) return; neutralizeForeignOverlays();
   const sumBox=document.getElementById('reconSummary'); if(sumBox) sumBox.style.display='none';
   const resBox=document.getElementById('reconResult'); if(resBox){ resBox.style.display='none'; resBox.textContent=''; }
-  const confirm=document.getElementById('reconConfirmBtn'); if(confirm) confirm.style.display='none';
+  const confirm=document.getElementById('reconConfirmBtn'); if(confirm){ confirm.style.display='none'; confirm.disabled=false; confirm.textContent='Confirm and Print'; }
+  const payoutsInput = document.getElementById('sumPayoutsInput'); if(payoutsInput) payoutsInput.value='';
+  guessClosingDenominationCounts();
   o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1';
+  computeReconciliation(true);
+  const firstInput = document.querySelector('#denomsGrid .denom-qty');
+  if(firstInput){
+    setTimeout(()=>{ try{ firstInput.focus(); firstInput.select(); }catch(_){ firstInput.focus(); } }, 50);
+  }
 }
 function computeReconciliation(reveal){
   const payouts = Number(document.getElementById('sumPayoutsInput')?.value||0) || 0;
@@ -4076,11 +4232,17 @@ function computeReconciliation(reveal){
   setText('sumExpected', expected);
   setText('sumCounted', counted);
   setText('sumVariance', variance);
-  const sumBox=document.getElementById('reconSummary'); if(reveal && sumBox) sumBox.style.display='block';
+  const sumBox=document.getElementById('reconSummary');
+  const shouldReveal = reveal || (sumBox && sumBox.style.display==='block');
+  if(shouldReveal && sumBox) sumBox.style.display='block';
   const resBox=document.getElementById('reconResult');
   const confirm=document.getElementById('reconConfirmBtn');
   if(resBox){
-    resBox.style.display='block';
+    resBox.style.display = shouldReveal ? 'block' : 'none';
+    if(!shouldReveal){
+      if(confirm) confirm.style.display='none';
+      return;
+    }
     if(Math.abs(variance) < 0.005){
       resBox.innerHTML = '<div class="text-success">Till matches expected. Well done.</div>';
       if(confirm) confirm.style.display='block';
@@ -4133,9 +4295,31 @@ async function printReconciliation(){
     const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5 });
     if(!ok) throw new Error('Receipt agent not ready');
     const closingOverlayEl = document.getElementById('closingOverlay'); if(closingOverlayEl) closingOverlayEl.style.display='none';
+    return true;
   }catch(e){
     err('reconciliation print failed', e);
     alert('Failed to print reconciliation');
+    return false;
+  }
+}
+
+async function completeClosingFlow(){
+  const btn = document.getElementById('reconConfirmBtn');
+  if(!btn || btn.disabled) return;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Printing...';
+  try{
+    const reconOk = await printReconciliation();
+    if(!reconOk) return;
+    await waitFor(200);
+    const zOk = await printZRead();
+    if(!zOk) return;
+  }catch(err){
+    console.error('Closing flow failed', err);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
 }
 
@@ -4405,6 +4589,7 @@ async function attemptLogin(){
     updateCashierInfo();
     hideLogin();
     resetIdleTimer();
+    enforceTillOpenState();
   }catch(e){
     err('login error', e);
     if(errEl){ errEl.textContent='Unable to contact database'; errEl.style.display='block'; }
@@ -4701,6 +4886,8 @@ async function printZRead(){
       settings.net_cash = 0;
       settings.net_card = 0;
       settings.net_voucher = 0;
+      settings.till_open = false;
+      settings.till_closed_at = new Date().toISOString();
       const d = todayStr();
       if(settings.z_agg && settings.z_agg[d]) delete settings.z_agg[d];
       saveSettings();
@@ -4711,10 +4898,12 @@ async function printZRead(){
       const closingOverlay = document.getElementById('closingOverlay'); if(closingOverlay) closingOverlay.style.display='none';
       const closingMenu = document.getElementById('closingMenuOverlay'); if(closingMenu) closingMenu.style.display='none';
     }catch(_){ }
-    showOpeningOverlay();
+    showOpeningOverlay({ force:true });
+    return true;
   }catch(e){
     err('z-read print failed', e);
     alert('Failed to print Z-read');
+    return false;
   }
 }
 

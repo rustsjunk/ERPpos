@@ -49,6 +49,7 @@ def _escpos_barcode_code39_hex(value: str, height: int = 80, width: int = 2, hri
 
     # Initialize (ESC @)
     cmds.append("1b 40")
+    cmds.append("1d 4c 18 00")
 
     # Barcode params
     cmds.append(f"1d 68 {height:02x}")  # GS h n
