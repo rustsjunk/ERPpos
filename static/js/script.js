@@ -3476,6 +3476,24 @@ async function completeSaleFromOverlay() {
     currency_rate_used: fxMetadata ? Number(currencyRateUsed) : 1.0,
     fx_metadata: fxMetadata
   };
+  if(pendingVoucherBalancePrints.length){
+    payload.voucher_balance_prints = pendingVoucherBalancePrints.map(entry=>{
+      const voucherCode = entry.voucher_code || entry.code || '';
+      const amount = Number(entry.amount ?? entry.balance ?? 0);
+      return {
+        code: voucherCode,
+        voucher_code: voucherCode,
+        amount: Number.isFinite(amount) ? amount : entry.amount,
+        name: entry.name || entry.voucher_name,
+        voucher_name: entry.voucher_name || entry.name,
+        currency: entry.currency,
+        title: entry.title,
+        header_lines: entry.header_lines,
+        footer_lines: entry.footer_lines,
+        fun_line: entry.fun_line
+      };
+    });
+  }
 
   try {
     const response = await fetch('/api/create-sale', {
@@ -4470,7 +4488,6 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   const closeBtn=document.getElementById('receiptCloseBtn');
   const reprintBtn=document.getElementById('receiptReprintBtn');
   const returnBtn=document.getElementById('receiptReturnBtn');
-  const voucherPrintBtn=document.getElementById('printVoucherBtn');
   const giftEl = document.getElementById('giftReceiptCheckbox');
   if(giftEl){
     giftEl.checked = false;
@@ -4539,16 +4556,6 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
     const giftEl = document.getElementById('giftReceiptCheckbox');
     handleReceiptPrintRequest(info, giftEl ? !!giftEl.checked : false);
   };
-  if(voucherPrintBtn){
-    if(hasVoucherPrintData(info)){
-      voucherPrintBtn.style.display='inline-flex';
-      voucherPrintBtn.disabled=false;
-      voucherPrintBtn.onclick = ()=>{ reprintVouchersForInfo(info); };
-    }else{
-      voucherPrintBtn.style.display='none';
-      voucherPrintBtn.onclick = null;
-    }
-  }
   if(reprintBtn) reprintBtn.onclick = triggerPrint;
   if(returnBtn) returnBtn.onclick = ()=>{
     try{

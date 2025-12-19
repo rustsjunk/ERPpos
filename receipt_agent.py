@@ -244,7 +244,7 @@ def print_voucher():
     center_on = f"{esc}\x61\x01"
     center_off = f"{esc}\x61\x00"
     big_on = f"{esc}!\x38"
-    huge_on = "\x1D!\x33"
+    value_big_on = "\x1D!\x22"
     huge_off = "\x1D!\x00"
     normal = f"{esc}!\x00"
     bold_on = f"{esc}\x45\x01"
@@ -256,8 +256,11 @@ def print_voucher():
 
     lines = [f"{esc}@"]  # reset printer
     if header_lines:
-        for entry in header_lines:
-            lines.append(center(entry))
+        for idx, entry in enumerate(header_lines):
+            if idx == 0:
+                lines.append(center(f"{bold_on}{big_on}{entry}{normal}{bold_off}"))
+            else:
+                lines.append(center(entry))
         lines.append("\n")
     lines.append(center(f"{big_on}{title.upper()}{normal}"))
     lines.append(center(f"{bold_on}{display_name}{bold_off}"))
@@ -271,7 +274,7 @@ def print_voucher():
         lines.append(f"Issued: {issue_date}\n")
     if amount_label:
         lines.append("\n")
-        lines.append(center(f"{huge_on}{amount_label}{huge_off}"))
+        lines.append(center(f"{value_big_on}{amount_label}{huge_off}"))
         lines.append(center(""))
     lines.append("\nScan barcode to redeem\n\n")
     if fun_line:

@@ -720,6 +720,7 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
         "disable_rounded_total": 1,
         "voucher_redeem": sale.get("voucher_redeem", []),
         "voucher_issue": sale.get("voucher_issue", []),
+        "voucher_balance_prints": sale.get("voucher_balance_prints", []),
         "pos_voucher_code": ",".join(
             v["code"] for v in sale.get("voucher_redeem", []) if v.get("code")
         ) or None,

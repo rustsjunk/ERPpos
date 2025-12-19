@@ -2143,6 +2143,7 @@ def _save_invoice_file(invoice_name: str, data: dict, mode_label: str) -> None:
             'total': data.get('total'),
             'vouchers': data.get('vouchers') or [],
             'voucher_issue': data.get('voucher_issue') or [],
+            'voucher_balance_prints': data.get('voucher_balance_prints') or [],
             'cashier': data.get('cashier'),
             'currency_used': data.get('currency_used', 'GBP'),
             'currency_rate_used': data.get('currency_rate_used', 1.0),
@@ -2273,6 +2274,7 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
             {'code': v.get('code'), 'amount': float(v.get('amount') or 0)}
             for v in voucher_issue if v.get('code')
         ],
+        'voucher_balance_prints': data.get('voucher_balance_prints') or [],
         'discount': float(data.get('discount') or 0),
         'tax': float(data.get('tax') or 0),
         'tender': tender,
@@ -3624,7 +3626,11 @@ def api_invoice_detail(inv_id: str):
                     'total': float(row['total'] or 0),
                     'items': items,
                     'payments': pays,
-                    'source': 'db'
+                    'source': 'db',
+                    'vouchers': payload.get('voucher_redeem') or [],
+                    'issued_vouchers': payload.get('voucher_issue') or [],
+                    'voucher_issue': payload.get('voucher_issue') or [],
+                    'voucher_balance_prints': payload.get('voucher_balance_prints') or []
                 }
                 return jsonify({'status':'success','invoice': inv})
     except Exception:
@@ -3678,16 +3684,24 @@ def api_invoice_detail(inv_id: str):
             pays = []
             for p in (rec.get('payments') or []):
                 pays.append({'method': p.get('mode_of_payment') or p.get('method') or 'Payment', 'amount': float(p.get('amount') or 0), 'ref': p.get('ref')})
+            cashier_info = rec.get('cashier')
+            if isinstance(cashier_info, dict):
+                cashier_value = f"{cashier_info.get('code') or ''} {cashier_info.get('name') or ''}".strip()
+            else:
+                cashier_value = cashier_info or ''
             inv = {
                 'id': rec.get('invoice_name') or sid,
                 'created_at': rec.get('created_at') or '',
                 'customer': rec.get('customer') or '',
-                    'cashier': (((rec.get('cashier') or {}).get('code','') + ' ' + (rec.get('cashier') or {}).get('name','')).strip()),
-                'cashier': '',
+                'cashier': cashier_value,
                 'total': float(rec.get('total') or 0),
                 'items': data_items,
                 'payments': pays,
-                'source': 'file'
+                'source': 'file',
+                'vouchers': rec.get('vouchers') or [],
+                'issued_vouchers': rec.get('voucher_issue') or [],
+                'voucher_issue': rec.get('voucher_issue') or [],
+                'voucher_balance_prints': rec.get('voucher_balance_prints') or []
             }
             return jsonify({'status':'success','invoice': inv})
     except Exception:
