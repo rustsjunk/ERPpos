@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_file
 from dotenv import load_dotenv
 import requests
 import os
@@ -12,8 +12,11 @@ import re
 import time
 import logging
 import hmac
+import hashlib
+from io import BytesIO
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlsplit, urlunsplit, quote
+from PIL import Image
 
 try:
     from serial.tools import list_ports
@@ -104,6 +107,57 @@ CASHIER_EXTRA_FIELDS = [
     if field.strip()
 ]
 CASHIER_FILTERS_RAW = (os.getenv('POS_CASHIER_FILTERS', '') or '').strip()
+
+# Thumbnail cache configuration
+THUMB_CACHE_DIR = Path(os.getenv('POS_THUMB_CACHE_DIR', 'static/thumbs'))
+try:
+    THUMB_DEFAULT_SIZE = int(os.getenv('POS_THUMB_SIZE', '160'))
+except ValueError:
+    THUMB_DEFAULT_SIZE = 160
+try:
+    THUMB_MAX_SIZE = int(os.getenv('POS_THUMB_MAX_SIZE', '512'))
+except ValueError:
+    THUMB_MAX_SIZE = 512
+try:
+    THUMB_JPEG_QUALITY = int(os.getenv('POS_THUMB_JPEG_QUALITY', '75'))
+except ValueError:
+    THUMB_JPEG_QUALITY = 75
+try:
+    THUMB_TIMEOUT = int(os.getenv('POS_THUMB_TIMEOUT', '15'))
+except ValueError:
+    THUMB_TIMEOUT = 15
+try:
+    THUMB_MAX_BYTES = int(os.getenv('POS_THUMB_MAX_BYTES', '5000000'))
+except ValueError:
+    THUMB_MAX_BYTES = 5000000
+
+# Browse cache configuration (brands/groups/recent items)
+try:
+    BROWSE_CACHE_TTL = int(os.getenv('POS_BROWSE_CACHE_TTL', '120'))
+except ValueError:
+    BROWSE_CACHE_TTL = 120
+BROWSE_CACHE_TTL = max(10, BROWSE_CACHE_TTL)
+try:
+    BROWSE_RECENT_LIMIT = int(os.getenv('POS_BROWSE_RECENT_LIMIT', '36'))
+except ValueError:
+    BROWSE_RECENT_LIMIT = 36
+BROWSE_RECENT_LIMIT = max(4, BROWSE_RECENT_LIMIT)
+try:
+    BROWSE_ITEMS_LIMIT = int(os.getenv('POS_BROWSE_ITEMS_LIMIT', '240'))
+except ValueError:
+    BROWSE_ITEMS_LIMIT = 240
+BROWSE_ITEMS_LIMIT = max(20, BROWSE_ITEMS_LIMIT)
+_BROWSE_CACHE: Dict[str, Tuple[float, Any]] = {}
+_BROWSE_CACHE_LOCK = threading.Lock()
+_ITEM_COLUMNS_CACHE: Optional[Set[str]] = None
+
+# Cashier sync configuration
+try:
+    CASHIER_SYNC_INTERVAL = int(os.getenv('POS_CASHIER_SYNC_INTERVAL', '3600'))
+except ValueError:
+    CASHIER_SYNC_INTERVAL = 3600
+CASHIER_SYNC_INTERVAL = max(300, CASHIER_SYNC_INTERVAL)
+_LAST_CASHIER_SYNC = 0.0
 
 # Attribute normalization map (ERP vs POS expectations)
 ATTRIBUTE_SYNONYMS = {
@@ -428,6 +482,7 @@ def _record_queue_entry(queue_conn: sqlite3.Connection, main_conn: Optional[sqli
             ps.record_sale_with_fx(main_conn, sale_payload, fx_metadata)
         else:
             ps.record_sale(main_conn, sale_payload)
+        _browse_cache_invalidate('browse:')
         queue_conn.execute(
             "UPDATE pos_sales_queue SET sale_id=?, status='queued', updated_utc=?, error=NULL WHERE id=?",
             (sale_id, _utcnow_z(), row['id'])
@@ -693,6 +748,13 @@ def _run_idle_maintenance_tasks():
                 summary.append("synced ERP catalog")
             except Exception as exc:
                 app.logger.warning("Idle ERP sync failed: %s", exc)
+        if not USE_MOCK and _has_erp_credentials():
+            try:
+                updated = _maybe_sync_cashiers(conn)
+                if updated:
+                    summary.append(f"synced cashiers={updated}")
+            except Exception as exc:
+                app.logger.warning("Idle cashier sync failed: %s", exc)
         if not POS_QUEUE_ONLY and not USE_MOCK and _has_erp_credentials():
             try:
                 ps.push_outbox(conn)
@@ -745,9 +807,67 @@ def _db_connect():
     except Exception:
         return None
 
+
+def _item_columns(conn: sqlite3.Connection) -> Set[str]:
+    global _ITEM_COLUMNS_CACHE
+    if _ITEM_COLUMNS_CACHE is not None:
+        return _ITEM_COLUMNS_CACHE
+    try:
+        rows = conn.execute("PRAGMA table_info(items)").fetchall()
+        _ITEM_COLUMNS_CACHE = {row["name"] for row in rows}
+    except Exception:
+        _ITEM_COLUMNS_CACHE = set()
+    return _ITEM_COLUMNS_CACHE
+
+
+def _has_item_group(conn: sqlite3.Connection) -> bool:
+    return "item_group" in _item_columns(conn)
+
+
+def _browse_cache_get(key: str) -> Optional[Any]:
+    if not key:
+        return None
+    now = time.time()
+    with _BROWSE_CACHE_LOCK:
+        entry = _BROWSE_CACHE.get(key)
+        if not entry:
+            return None
+        expires_at, value = entry
+        if expires_at <= now:
+            _BROWSE_CACHE.pop(key, None)
+            return None
+        return value
+
+
+def _browse_cache_set(key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+    if not key:
+        return
+    ttl = ttl_seconds if ttl_seconds is not None else BROWSE_CACHE_TTL
+    ttl = max(5, ttl)
+    with _BROWSE_CACHE_LOCK:
+        _BROWSE_CACHE[key] = (time.time() + ttl, value)
+
+
+def _browse_cache_invalidate(prefix: Optional[str] = None) -> None:
+    with _BROWSE_CACHE_LOCK:
+        if not prefix:
+            _BROWSE_CACHE.clear()
+            return
+        for key in list(_BROWSE_CACHE.keys()):
+            if key.startswith(prefix):
+                _BROWSE_CACHE.pop(key, None)
+
 def _db_has_items(conn: sqlite3.Connection) -> bool:
     try:
         row = conn.execute("SELECT COUNT(*) AS c FROM items WHERE active=1 AND is_template=0").fetchone()
+        return (row and row['c'] and row['c'] > 0) or False
+    except Exception:
+        return False
+
+
+def _db_has_templates(conn: sqlite3.Connection) -> bool:
+    try:
+        row = conn.execute("SELECT COUNT(*) AS c FROM items WHERE active=1 AND is_template=1").fetchone()
         return (row and row['c'] and row['c'] > 0) or False
     except Exception:
         return False
@@ -760,6 +880,7 @@ def _db_items_payload(conn: sqlite3.Connection):
            i.item_id AS item_code,
            i.name AS item_name,
            i.brand AS brand,
+           i.item_group AS item_group,
            i.custom_style_code AS custom_style_code,
            i.custom_simple_colour AS custom_simple_colour,
            i.vat_rate AS vat_rate,
@@ -847,6 +968,7 @@ def _db_items_payload(conn: sqlite3.Connection):
             "item_code": r["item_code"],
             "item_name": r["item_name"],
             "brand": r["brand"],
+            "item_group": r["item_group"],
             "custom_style_code": _merge_custom_field_value(
                 r["custom_style_code"],
                 custom_entry["custom_style_code"] if custom_entry else None
@@ -866,6 +988,77 @@ def _db_items_payload(conn: sqlite3.Connection):
             "price_min": float(min_var) if min_var is not None else None,
             "price_max": float(max_var) if max_var is not None else None,
             "variant_stock": float(r["variant_stock"]) if r["variant_stock"] is not None else 0.0,
+        }
+        out.append(payload)
+    if out:
+        return out
+    # If the catalog has no templates, fall back to active variants/items.
+    return _db_variant_items_payload(conn)
+
+
+def _db_variant_items_payload(conn: sqlite3.Connection):
+    """Return active non-template items for search/browse when templates aren't present."""
+    q_items = f"""
+    SELECT i.item_id AS name,
+           i.item_id AS item_code,
+           i.name AS item_name,
+           i.brand AS brand,
+           i.item_group AS item_group,
+           i.custom_style_code AS custom_style_code,
+           i.custom_simple_colour AS custom_simple_colour,
+           i.vat_rate AS vat_rate,
+        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
+        COALESCE((SELECT qty FROM stock s WHERE s.item_id = i.item_id AND s.warehouse='{POS_WAREHOUSE}'), 0) AS stock_qty,
+        'Each' AS stock_uom,
+        (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image
+    FROM items i
+    WHERE i.active=1 AND i.is_template=0
+    ORDER BY COALESCE(i.brand,''), i.name
+    """
+    attr_map: Dict[str, Dict[str, str]] = {}
+    q_attr = """
+      SELECT item_id, attr_name, value
+      FROM variant_attributes
+    """
+    for row in conn.execute(q_attr):
+        entry = attr_map.setdefault(row["item_id"], {})
+        entry[row["attr_name"]] = row["value"]
+
+    barcode_map: Dict[str, Set[str]] = {}
+    q_barcodes = """
+      SELECT item_id, barcode
+      FROM barcodes
+      WHERE barcode IS NOT NULL
+    """
+    for row in conn.execute(q_barcodes):
+        item_id = row["item_id"]
+        bc = (row["barcode"] or '').strip()
+        if not bc:
+            continue
+        barcode_map.setdefault(item_id, set()).add(bc)
+
+    out = []
+    for r in conn.execute(q_items):
+        barcodes = sorted(barcode_map.get(r["name"], set()))
+        payload = {
+            "name": r["name"],
+            "item_code": r["item_code"],
+            "item_name": r["item_name"],
+            "brand": r["brand"],
+            "item_group": r["item_group"],
+            "custom_style_code": r["custom_style_code"],
+            "custom_simple_colour": r["custom_simple_colour"],
+            "vat_rate": float(r["vat_rate"]) if r["vat_rate"] is not None else None,
+            "barcode": barcodes[0] if barcodes else None,
+            "standard_rate": float(r["standard_rate"]) if r["standard_rate"] is not None else None,
+            "stock_uom": r["stock_uom"],
+            "image": _absolute_image_url(r["image"]),
+            "attributes": attr_map.get(r["name"], {}),
+            "barcodes": barcodes,
+            "stock_qty": float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0,
+            "price_min": None,
+            "price_max": None,
+            "variant_stock": None,
         }
         out.append(payload)
     return out
@@ -890,6 +1083,301 @@ def _merge_custom_field_value(base_value: Optional[str], variants: Optional[Set[
     dedup.sort()
     return ", ".join(dedup)
 
+
+def _db_template_payload_for_ids(conn: sqlite3.Connection, ids: List[str], light: bool = False) -> List[Dict[str, Any]]:
+    if not ids:
+        return []
+    placeholders = ",".join(["?"] * len(ids))
+    q_tpl = f"""
+    SELECT i.item_id AS name,
+           i.item_id AS item_code,
+           i.name AS item_name,
+           i.brand AS brand,
+           i.item_group AS item_group,
+           i.custom_style_code AS custom_style_code,
+           i.custom_simple_colour AS custom_simple_colour,
+           i.vat_rate AS vat_rate,
+        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
+        (SELECT MIN(ip.rate) FROM item_prices ip JOIN items v2 ON v2.item_id = ip.item_id WHERE v2.parent_id = i.item_id) AS min_variant_price,
+        (SELECT MAX(ip.rate) FROM item_prices ip JOIN items v2 ON v2.item_id = ip.item_id WHERE v2.parent_id = i.item_id) AS max_variant_price,
+        (SELECT COALESCE(SUM(s.qty),0) FROM stock s JOIN items v2 ON v2.item_id = s.item_id WHERE v2.parent_id = i.item_id AND s.warehouse='{POS_WAREHOUSE}') AS variant_stock,
+        'Each' AS stock_uom,
+        (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image
+    FROM items i
+    WHERE i.active=1 AND i.is_template=1 AND i.item_id IN ({placeholders})
+    """
+    agg: Dict[str, Dict[str, Set[str]]] = {}
+    custom_agg: Dict[str, Dict[str, Set[str]]] = {}
+    if not light:
+        q_attr = f"""
+          SELECT t.item_id AS template_id, va.attr_name, va.value
+          FROM items v
+          JOIN items t ON t.item_id = v.parent_id
+          JOIN variant_attributes va ON va.item_id = v.item_id
+          WHERE v.active=1 AND v.is_template=0 AND t.item_id IN ({placeholders})
+        """
+        for row in conn.execute(q_attr, tuple(ids)):
+            tpl = row["template_id"]
+            d = agg.setdefault(tpl, {})
+            vals = d.setdefault(row["attr_name"], set())
+            vals.add(row["value"])
+
+        q_custom = f"""
+          SELECT parent_id AS template_id, custom_style_code, custom_simple_colour
+          FROM items
+          WHERE parent_id IN ({placeholders})
+            AND (custom_style_code IS NOT NULL OR custom_simple_colour IS NOT NULL)
+        """
+        for row in conn.execute(q_custom, tuple(ids)):
+            tpl = row["template_id"]
+            if not tpl:
+                continue
+            entry = custom_agg.setdefault(tpl, {"custom_style_code": set(), "custom_simple_colour": set()})
+            if row["custom_style_code"]:
+                entry["custom_style_code"].add(str(row["custom_style_code"]))
+            if row["custom_simple_colour"]:
+                entry["custom_simple_colour"].add(str(row["custom_simple_colour"]))
+
+    barcode_map: Dict[str, Set[str]] = {}
+    q_barcodes = f"""
+      SELECT v.parent_id AS template_id, b.barcode
+      FROM barcodes b
+      JOIN items v ON v.item_id = b.item_id
+      WHERE v.parent_id IN ({placeholders})
+        AND b.barcode IS NOT NULL
+    """
+    for row in conn.execute(q_barcodes, tuple(ids)):
+        tpl = row["template_id"]
+        if not tpl:
+            continue
+        bc = (row["barcode"] or '').strip()
+        if not bc:
+            continue
+        barcode_map.setdefault(tpl, set()).add(bc)
+
+    out = []
+    for r in conn.execute(q_tpl, tuple(ids)):
+        attrs = {}
+        if not light and r["name"] in agg:
+            for aname, values in agg[r["name"]].items():
+                disp = " ".join(sorted(values))
+                for key in _attribute_payload_keys(aname):
+                    attrs[key] = disp
+
+        template_rate = r["standard_rate"] if r["standard_rate"] is not None else None
+        min_var = r["min_variant_price"] if r["min_variant_price"] is not None else None
+        max_var = r["max_variant_price"] if r["max_variant_price"] is not None else None
+        display_rate = template_rate if template_rate is not None else (min_var if min_var is not None else None)
+
+        custom_entry = custom_agg.get(r["name"]) if not light else None
+        barcodes = sorted(barcode_map.get(r["name"], set()))
+        payload = {
+            "name": r["name"],
+            "item_code": r["item_code"],
+            "item_name": r["item_name"],
+            "brand": r["brand"],
+            "item_group": r["item_group"],
+            "custom_style_code": r["custom_style_code"] if light else _merge_custom_field_value(
+                r["custom_style_code"],
+                custom_entry["custom_style_code"] if custom_entry else None
+            ),
+            "custom_simple_colour": r["custom_simple_colour"] if light else _merge_custom_field_value(
+                r["custom_simple_colour"],
+                custom_entry["custom_simple_colour"] if custom_entry else None
+            ),
+            "vat_rate": float(r["vat_rate"]) if r["vat_rate"] is not None else None,
+            "barcode": barcodes[0] if barcodes else None,
+            "standard_rate": float(display_rate) if display_rate is not None else None,
+            "stock_uom": r["stock_uom"],
+            "image": _absolute_image_url(r["image"]),
+            "attributes": attrs,
+            "barcodes": barcodes,
+            "price_min": float(min_var) if min_var is not None else None,
+            "price_max": float(max_var) if max_var is not None else None,
+            "variant_stock": float(r["variant_stock"]) if r["variant_stock"] is not None else 0.0,
+        }
+        out.append(payload)
+    return out
+
+
+def _db_variant_payload_for_ids(conn: sqlite3.Connection, ids: List[str], light: bool = False) -> List[Dict[str, Any]]:
+    if not ids:
+        return []
+    placeholders = ",".join(["?"] * len(ids))
+    q_items = f"""
+    SELECT i.item_id AS name,
+           i.item_id AS item_code,
+           i.name AS item_name,
+           i.brand AS brand,
+           i.item_group AS item_group,
+           i.custom_style_code AS custom_style_code,
+           i.custom_simple_colour AS custom_simple_colour,
+           i.vat_rate AS vat_rate,
+        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
+        COALESCE((SELECT qty FROM stock s WHERE s.item_id = i.item_id AND s.warehouse='{POS_WAREHOUSE}'), 0) AS stock_qty,
+        'Each' AS stock_uom,
+        (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image
+    FROM items i
+    WHERE i.active=1 AND i.is_template=0 AND i.item_id IN ({placeholders})
+    """
+    attr_map: Dict[str, Dict[str, str]] = {}
+    if not light:
+        q_attr = f"""
+          SELECT item_id, attr_name, value
+          FROM variant_attributes
+          WHERE item_id IN ({placeholders})
+        """
+        for row in conn.execute(q_attr, tuple(ids)):
+            entry = attr_map.setdefault(row["item_id"], {})
+            entry[row["attr_name"]] = row["value"]
+
+    barcode_map: Dict[str, Set[str]] = {}
+    q_barcodes = f"""
+      SELECT item_id, barcode
+      FROM barcodes
+      WHERE item_id IN ({placeholders}) AND barcode IS NOT NULL
+    """
+    for row in conn.execute(q_barcodes, tuple(ids)):
+        item_id = row["item_id"]
+        bc = (row["barcode"] or '').strip()
+        if not bc:
+            continue
+        barcode_map.setdefault(item_id, set()).add(bc)
+
+    out = []
+    for r in conn.execute(q_items, tuple(ids)):
+        barcodes = sorted(barcode_map.get(r["name"], set()))
+        payload = {
+            "name": r["name"],
+            "item_code": r["item_code"],
+            "item_name": r["item_name"],
+            "brand": r["brand"],
+            "item_group": r["item_group"],
+            "custom_style_code": r["custom_style_code"],
+            "custom_simple_colour": r["custom_simple_colour"],
+            "vat_rate": float(r["vat_rate"]) if r["vat_rate"] is not None else None,
+            "barcode": barcodes[0] if barcodes else None,
+            "standard_rate": float(r["standard_rate"]) if r["standard_rate"] is not None else None,
+            "stock_uom": r["stock_uom"],
+            "image": _absolute_image_url(r["image"]),
+            "attributes": {} if light else attr_map.get(r["name"], {}),
+            "barcodes": barcodes,
+            "stock_qty": float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0,
+            "price_min": None,
+            "price_max": None,
+            "variant_stock": None,
+        }
+        out.append(payload)
+    return out
+
+
+def _db_recent_items_payload(conn: sqlite3.Connection, limit: int) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+    if _db_has_templates(conn):
+        rows = conn.execute("""
+            SELECT COALESCE(v.parent_id, v.item_id) AS template_id,
+                   MAX(s.created_utc) AS last_sold
+            FROM sale_lines l
+            JOIN sales s ON s.sale_id = l.sale_id
+            LEFT JOIN items v ON v.item_id = l.item_id
+            GROUP BY COALESCE(v.parent_id, v.item_id)
+            ORDER BY last_sold DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        ids = [r["template_id"] for r in rows if r and r["template_id"]]
+        payload = _db_template_payload_for_ids(conn, ids)
+    else:
+        rows = conn.execute("""
+            SELECT l.item_id AS item_id,
+                   MAX(s.created_utc) AS last_sold
+            FROM sale_lines l
+            JOIN sales s ON s.sale_id = l.sale_id
+            GROUP BY l.item_id
+            ORDER BY last_sold DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        ids = [r["item_id"] for r in rows if r and r["item_id"]]
+        payload = _db_variant_payload_for_ids(conn, ids)
+    if not payload:
+        return []
+    order = {item_id: idx for idx, item_id in enumerate(ids)}
+    payload.sort(key=lambda rec: order.get(rec.get("item_code") or rec.get("name"), 9999))
+    return payload
+
+
+def _db_brand_list(conn: sqlite3.Connection) -> List[str]:
+    if _db_has_templates(conn):
+        rows = conn.execute("SELECT DISTINCT COALESCE(brand,'') AS brand FROM items WHERE active=1 AND is_template=1").fetchall()
+    else:
+        rows = conn.execute("SELECT DISTINCT COALESCE(brand,'') AS brand FROM items WHERE active=1 AND is_template=0").fetchall()
+    brands = sorted({(row["brand"] or "").strip() or "Unbranded" for row in rows if row is not None})
+    return brands
+
+
+def _db_group_list(conn: sqlite3.Connection, brand: Optional[str]) -> List[str]:
+    if not _has_item_group(conn):
+        return []
+    params: List[Any] = []
+    clause = "WHERE active=1"
+    if _db_has_templates(conn):
+        clause += " AND is_template=1"
+    else:
+        clause += " AND is_template=0"
+    if brand:
+        clause += " AND COALESCE(brand,'')=?"
+        params.append(brand)
+    rows = conn.execute(
+        f"SELECT DISTINCT COALESCE(item_group,'') AS item_group FROM items {clause}",
+        tuple(params)
+    ).fetchall()
+    groups = sorted({(row["item_group"] or "").strip() for row in rows if row is not None and (row["item_group"] or "").strip()})
+    return groups
+
+
+def _db_find_item_ids(conn: sqlite3.Connection, brand: Optional[str], group: Optional[str], q: Optional[str], limit: int) -> List[str]:
+    params: List[Any] = []
+    clauses = ["active=1"]
+    if _db_has_templates(conn):
+        clauses.append("is_template=1")
+    else:
+        clauses.append("is_template=0")
+    if brand:
+        clauses.append("COALESCE(brand,'')=?")
+        params.append(brand)
+    if group and _has_item_group(conn):
+        clauses.append("COALESCE(item_group,'')=?")
+        params.append(group)
+    if q:
+        like = f"%{q}%"
+        clauses.append("(name LIKE ? OR item_id LIKE ? OR custom_style_code LIKE ? OR custom_simple_colour LIKE ?)")
+        params.extend([like, like, like, like])
+    where = " AND ".join(clauses)
+    sql = f"SELECT item_id FROM items WHERE {where} ORDER BY COALESCE(brand,''), name LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    return [row["item_id"] for row in rows if row and row["item_id"]]
+
+
+def _db_browse_items_payload(conn: sqlite3.Connection, brand: Optional[str], group: Optional[str], q: Optional[str], limit: int, light: bool = False) -> List[Dict[str, Any]]:
+    ids = _db_find_item_ids(conn, brand, group, q, limit)
+    if not ids:
+        return []
+    if _db_has_templates(conn):
+        return _db_template_payload_for_ids(conn, ids, light=light)
+    return _db_variant_payload_for_ids(conn, ids, light=light)
+
+
+def _normalize_brand_filter(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    clean = str(value).strip()
+    if not clean:
+        return None
+    if clean.lower() == "unbranded":
+        return ""
+    return clean
+
 def _db_has_cashiers(conn: sqlite3.Connection) -> bool:
     try:
         row = conn.execute("SELECT COUNT(*) AS c FROM cashiers WHERE active=1").fetchone()
@@ -903,6 +1391,15 @@ def _ensure_schema(conn: sqlite3.Connection):
     ).fetchone()
     if not row:
         ps.init_db(conn, SCHEMA_PATH)
+    # Search indexes for faster lookup
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_name ON items(name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_item_id ON items(item_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_style ON items(custom_style_code)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_colour ON items(custom_simple_colour)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_brand ON items(brand)")
+    except Exception:
+        pass
 
 def _has_erp_credentials() -> bool:
     return bool(ERPNEXT_URL and API_KEY and API_SECRET)
@@ -940,11 +1437,69 @@ def _ensure_db_bootstrap():
                 conn.close()
         _BOOTSTRAP_DONE = completed
 
+_FULL_SYNC_STATUS: Dict[str, Any] = {"status": "idle"}
+_FULL_SYNC_LOCK = threading.Lock()
+
+def _set_full_sync_status(**updates):
+    with _FULL_SYNC_LOCK:
+        _FULL_SYNC_STATUS.update(updates)
+
+def _get_full_sync_status():
+    with _FULL_SYNC_LOCK:
+        return dict(_FULL_SYNC_STATUS)
+
 def _bootstrap_sync_from_erp(conn: sqlite3.Connection, need_items: bool, need_cashiers: bool):
     if need_items:
         _initial_sync_items(conn)
     if need_cashiers:
         _initial_sync_cashiers(conn)
+
+
+def _sync_cashiers_from_erp(conn: Optional[sqlite3.Connection]) -> int:
+    """Refresh cashier list from ERPNext into local SQLite cache."""
+    if not conn:
+        return 0
+    if not ERPNEXT_URL or USE_MOCK:
+        return 0
+    try:
+        rows = _fetch_cashiers_from_erp()
+    except Exception as exc:
+        app.logger.warning("Failed to sync cashiers from ERPNext: %s", exc)
+        return 0
+    if not rows:
+        return 0
+    updated = 0
+    for rec in rows:
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO cashiers (code, name, active, meta) VALUES (?,?,?,?)",
+                (rec['code'], rec['name'], 1, _json.dumps(rec.get('meta') or {}))
+            )
+            updated += 1
+        except Exception:
+            continue
+    try:
+        conn.commit()
+    except Exception:
+        pass
+    return updated
+
+
+def _maybe_sync_cashiers(conn: Optional[sqlite3.Connection], force: bool = False) -> int:
+    global _LAST_CASHIER_SYNC
+    if not conn:
+        return 0
+    if not ERPNEXT_URL or USE_MOCK:
+        return 0
+    now = time.time()
+    if not force and (now - _LAST_CASHIER_SYNC) < CASHIER_SYNC_INTERVAL:
+        return 0
+    updated = _sync_cashiers_from_erp(conn)
+    if updated:
+        _LAST_CASHIER_SYNC = now
+    else:
+        _LAST_CASHIER_SYNC = now
+    return updated
 
 def _initial_sync_items(conn: sqlite3.Connection):
     if not ERPNEXT_URL:
@@ -1867,6 +2422,48 @@ def _absolute_image_url(path: Optional[str]) -> Optional[str]:
         return ERPNEXT_URL.rstrip('/') + normalized
     return normalized
 
+def _normalize_thumb_source_url(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    url = str(raw).strip()
+    if not url:
+        return None
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.startswith("/"):
+        if not ERPNEXT_URL:
+            return None
+        return ERPNEXT_URL.rstrip("/") + url
+    if url.startswith("http://") or url.startswith("https://"):
+        if ERPNEXT_URL:
+            try:
+                if urlsplit(url).netloc != urlsplit(ERPNEXT_URL).netloc:
+                    return None
+            except Exception:
+                return None
+        return url
+    return None
+
+def _thumb_cache_path(url: str, width: int, height: int) -> Path:
+    key = f"{url}|{width}x{height}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return THUMB_CACHE_DIR / f"{digest}.jpg"
+
+def _build_thumbnail_bytes(raw: bytes, width: int, height: int) -> bytes:
+    img = Image.open(BytesIO(raw))
+    img.load()
+    if img.mode in ("RGBA", "LA"):
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+    img.thumbnail((width, height), resample)
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=THUMB_JPEG_QUALITY, optimize=True)
+    return out.getvalue()
+
 def _canonical_attr_name(name: Optional[str]) -> Optional[str]:
     if name is None:
         return None
@@ -2002,6 +2599,105 @@ def get_items():
     return jsonify({'status': 'success', 'items': []})
 
 
+@app.route('/api/browse/recent')
+def api_browse_recent_items():
+    """Return recent sold items from local receipts for fast home browse."""
+    try:
+        limit_raw = request.args.get('limit')
+        limit = int(limit_raw) if limit_raw else BROWSE_RECENT_LIMIT
+    except Exception:
+        limit = BROWSE_RECENT_LIMIT
+    limit = max(1, min(limit, 200))
+    cache_key = f"browse:recent:{limit}"
+    cached = _browse_cache_get(cache_key)
+    if cached is not None:
+        return jsonify({'status': 'success', 'items': cached, 'cached': True})
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    try:
+        items = _db_recent_items_payload(conn, limit)
+    except Exception:
+        app.logger.exception('Failed to load recent browse items')
+        items = []
+    _browse_cache_set(cache_key, items)
+    return jsonify({'status': 'success', 'items': items})
+
+
+@app.route('/api/browse/brands')
+def api_browse_brands():
+    """Return distinct brand names for browse step."""
+    cache_key = "browse:brands"
+    cached = _browse_cache_get(cache_key)
+    if cached is not None:
+        return jsonify({'status': 'success', 'brands': cached, 'cached': True})
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    try:
+        brands = _db_brand_list(conn)
+    except Exception:
+        app.logger.exception('Failed to load browse brands')
+        brands = []
+    _browse_cache_set(cache_key, brands)
+    return jsonify({'status': 'success', 'brands': brands})
+
+
+@app.route('/api/browse/groups')
+def api_browse_groups():
+    """Return distinct item groups for a brand (if item_group is available)."""
+    raw_brand = request.args.get('brand')
+    brand = _normalize_brand_filter(raw_brand)
+    cache_key = f"browse:groups:{brand or ''}"
+    cached = _browse_cache_get(cache_key)
+    if cached is not None:
+        return jsonify({'status': 'success', 'groups': cached, 'cached': True})
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    try:
+        groups = _db_group_list(conn, brand)
+    except Exception:
+        app.logger.exception('Failed to load browse groups')
+        groups = []
+    _browse_cache_set(cache_key, groups)
+    return jsonify({'status': 'success', 'groups': groups})
+
+
+@app.route('/api/browse/items')
+def api_browse_items():
+    """Return browse items filtered by brand/group, optionally search query."""
+    raw_brand = request.args.get('brand')
+    brand = _normalize_brand_filter(raw_brand)
+    group = (request.args.get('group') or '').strip() or None
+    q = (request.args.get('q') or '').strip()
+    fields = (request.args.get('fields') or '').strip().lower()
+    light = fields == 'list'
+    try:
+        limit_raw = request.args.get('limit')
+        limit = int(limit_raw) if limit_raw else BROWSE_ITEMS_LIMIT
+    except Exception:
+        limit = BROWSE_ITEMS_LIMIT
+    limit = max(10, min(limit, 400))
+    cache_key = None
+    if not q:
+        cache_key = f"browse:items:{brand or ''}:{group or ''}:{limit}"
+        cached = _browse_cache_get(cache_key)
+        if cached is not None:
+            return jsonify({'status': 'success', 'items': cached, 'cached': True})
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    try:
+        items = _db_browse_items_payload(conn, brand, group, q, limit, light=light)
+    except Exception:
+        app.logger.exception('Failed to load browse items')
+        items = []
+    if cache_key is not None:
+        _browse_cache_set(cache_key, items)
+    return jsonify({'status': 'success', 'items': items})
+
+
 @app.route('/api/cashier/login', methods=['POST'])
 def api_cashier_login():
     """Login a cashier by code. Leading zeros are ignored."""
@@ -2020,6 +2716,10 @@ def api_cashier_login():
         if code.lstrip('0') == '19':
             return jsonify({'status': 'success', 'cashier': {'code': '19', 'name': 'Josh'}})
         return jsonify({'status': 'error', 'message': 'Database not available'}), 500
+    try:
+        _maybe_sync_cashiers(conn)
+    except Exception:
+        pass
     row = conn.execute(
         "SELECT code, name FROM cashiers WHERE active=1 AND (code = ? OR code = ltrim(?, '0'))",
         (code, code)
@@ -2299,6 +2999,7 @@ def _record_local_sale(invoice_name: str, data: dict) -> None:
             ps.record_sale_with_fx(conn, sale_payload, fx_metadata)
         else:
             ps.record_sale(conn, sale_payload)
+        _browse_cache_invalidate('browse:')
     except Exception:
         pass
 
@@ -2352,6 +3053,11 @@ def _ingest_new_local_invoices(conn: Optional[sqlite3.Connection]) -> int:
             app.logger.exception('Failed to record sale "%s" from %s', sale_id, inv_path)
             continue
 
+
+
+    if ingested:
+        _browse_cache_invalidate('browse:')
+    return ingested
 
 
 @app.route('/api/create-sale', methods=['POST'])
@@ -2813,6 +3519,7 @@ def api_db_sync_items():
                 pass
             # Run a few loops to fetch items, attributes, barcodes, bins and prices
             ps.sync_cycle(conn, warehouse=POS_WAREHOUSE, price_list=POS_PRICE_LIST, loops=3)
+            _browse_cache_invalidate('browse:')
             app.logger.info('ERPNext incremental sync completed')
         except Exception as exc:
             app.logger.exception('ERP sync failed: %s', exc)
@@ -2826,6 +3533,134 @@ def api_db_sync_items():
     thr = threading.Thread(target=_run_sync, daemon=True)
     thr.start()
     return jsonify({'status': 'success', 'message': 'Sync started'})
+
+@app.route('/api/db/full-sync-items', methods=['POST'])
+def api_db_full_sync_items():
+    if not ERPNEXT_URL:
+        return jsonify({'status':'error','message':'ERPNext not configured'}), 400
+    if not ps or not hasattr(ps, 'full_sync_from_erp'):
+        return jsonify({'status':'error','message':'pos_service not available or missing full sync implementation'}), 500
+    def _run_sync():
+        conn = None
+        try:
+            conn = ps.connect(POS_DB_PATH)
+        except Exception as e:
+            app.logger.exception('Failed to connect to DB inside full sync worker: %s', e)
+            _set_full_sync_status(status="error", message=f"DB connect failed: {e}")
+            return
+        try:
+            fast_mode = os.getenv("POS_FULL_SYNC_FAST", "0") == "1"
+            _set_full_sync_status(
+                status="running",
+                stage="starting",
+                totals={"items": 0, "attr_defs": 0, "barcodes": 0, "bins": 0, "prices": 0},
+                last_pulled=0,
+                last_update=_utcnow_z(),
+                fast_mode=fast_mode
+            )
+            def _progress(stage, pulled, total):
+                stage_key = stage
+                if stage == "attributes":
+                    stage_key = "attr_defs"
+                totals_snapshot = _get_full_sync_status().get("totals") or {}
+                totals_snapshot[stage_key] = total
+                _set_full_sync_status(
+                    status="running",
+                    stage=stage,
+                    last_pulled=pulled,
+                    totals=totals_snapshot,
+                    last_update=_utcnow_z()
+                )
+            totals = ps.full_sync_from_erp(conn, warehouse=POS_WAREHOUSE, price_list=POS_PRICE_LIST, progress_cb=_progress)
+            _browse_cache_invalidate('browse:')
+            app.logger.info(
+                'ERPNext full sync completed (items=%s, attrs=%s, barcodes=%s, bins=%s, prices=%s)',
+                totals.get('items'), totals.get('attr_defs'), totals.get('barcodes'), totals.get('bins'), totals.get('prices')
+            )
+            _set_full_sync_status(status="complete", stage="done", totals=totals, last_pulled=0, last_update=_utcnow_z())
+        except Exception as exc:
+            app.logger.exception('ERP full sync failed: %s', exc)
+            _set_full_sync_status(status="error", message=str(exc), last_update=_utcnow_z())
+        finally:
+            if conn:
+                conn.close()
+    thr = threading.Thread(target=_run_sync, daemon=True)
+    thr.start()
+    return jsonify({'status': 'success', 'message': 'Full sync started'})
+
+
+@app.route('/api/db/sync-cashiers', methods=['POST'])
+def api_db_sync_cashiers():
+    """Trigger a cashier sync from ERPNext into local SQLite."""
+    if not ERPNEXT_URL:
+        return jsonify({'status':'error','message':'ERPNext not configured'}), 400
+    if USE_MOCK:
+        return jsonify({'status':'error','message':'Mock mode enabled'}), 400
+    def _run_sync():
+        conn = None
+        try:
+            conn = _db_connect() or ps.connect(POS_DB_PATH)
+            if not conn:
+                return
+            updated = _maybe_sync_cashiers(conn, force=True)
+            app.logger.info('ERPNext cashier sync completed (updated=%s)', updated)
+        except Exception as exc:
+            app.logger.exception('Cashier sync failed: %s', exc)
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+    thr = threading.Thread(target=_run_sync, daemon=True)
+    thr.start()
+    return jsonify({'status': 'success', 'message': 'Cashier sync started'})
+
+@app.route('/api/db/full-sync-status', methods=['GET'])
+def api_db_full_sync_status():
+    return jsonify(_get_full_sync_status())
+
+@app.route('/api/thumb', methods=['GET'])
+def api_thumb():
+    raw_url = request.args.get('url')
+    normalized = _normalize_thumb_source_url(raw_url)
+    if not normalized:
+        return jsonify({'status': 'error', 'message': 'Invalid image URL'}), 400
+    try:
+        width = int(request.args.get('w', THUMB_DEFAULT_SIZE))
+    except ValueError:
+        width = THUMB_DEFAULT_SIZE
+    try:
+        height = int(request.args.get('h', THUMB_DEFAULT_SIZE))
+    except ValueError:
+        height = THUMB_DEFAULT_SIZE
+    width = max(16, min(width, THUMB_MAX_SIZE))
+    height = max(16, min(height, THUMB_MAX_SIZE))
+    THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _thumb_cache_path(normalized, width, height)
+    if cache_path.exists():
+        return send_file(cache_path, mimetype='image/jpeg')
+    try:
+        resp = requests.get(normalized, timeout=THUMB_TIMEOUT)
+        if resp.status_code != 200:
+            return jsonify({'status': 'error', 'message': f'Image fetch failed ({resp.status_code})'}), 502
+        data = resp.content
+        if not data:
+            return jsonify({'status': 'error', 'message': 'Image fetch returned empty'}), 502
+        if len(data) > THUMB_MAX_BYTES:
+            return jsonify({'status': 'error', 'message': 'Image too large'}), 413
+        thumb_bytes = _build_thumbnail_bytes(data, width, height)
+        tmp_path = cache_path.with_suffix('.tmp')
+        with open(tmp_path, 'wb') as f:
+            f.write(thumb_bytes)
+        try:
+            tmp_path.replace(cache_path)
+        except Exception:
+            cache_path = tmp_path
+        return send_file(cache_path, mimetype='image/jpeg')
+    except Exception as exc:
+        app.logger.warning('Thumbnail build failed: %s', exc)
+        return jsonify({'status': 'error', 'message': 'Thumbnail build failed'}), 500
 
 @app.route('/api/item_matrix')
 def item_matrix():

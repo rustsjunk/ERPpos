@@ -950,6 +950,21 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     transition: transform 0.15s ease;
 }
 .product-card:hover { transform: translateY(-2px); }
+.browse-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    align-items: center;
+    justify-content: center;
+    min-height: 90px;
+}
+.browse-card-title {
+    font-weight: 600;
+}
+.browse-card-meta {
+    font-size: 0.8rem;
+    color: #6c757d;
+}
 .product-img {
     width: 100%;
     aspect-ratio: 1 / 1; /* ensure square */

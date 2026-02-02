@@ -43,6 +43,24 @@ function installOverlayGuard(){
   }catch(e){ /* ignore */ }
 }
 let items = [];
+let homeItems = [];
+let searchItems = [];
+let browseBrands = [];
+let searchStage = 'brands';
+let selectedBrand = '';
+let browseLoading = false;
+const HOME_ITEMS_CACHE_KEY = 'pos_home_items_cache_v1';
+const HOME_ITEMS_CACHE_TTL_MS = 5 * 60 * 1000;
+const SEARCH_MIN_CHARS = 2;
+const SEARCH_DEBOUNCE_MS = 180;
+const SEARCH_CACHE_MAX = 50;
+let searchDebounceTimer = null;
+const searchCache = new Map();
+const BROWSE_CACHE_TTL_MS = 2 * 60 * 1000;
+const browseCache = {
+  brands: { data: [], ts: 0 },
+  items: new Map()
+};
 let cart = [];
 let customers = [];
 let currentCashier = null;
@@ -121,7 +139,8 @@ function isShowZeroStockEnabled(){
 }
 
 function getVisibleItems(){
-  return isShowZeroStockEnabled() ? items.slice() : items.filter(hasSellableStock);
+  const source = Array.isArray(homeItems) ? homeItems : items;
+  return isShowZeroStockEnabled() ? source.slice() : source.filter(hasSellableStock);
 }
 
 function setShowZeroStock(show){
@@ -132,9 +151,8 @@ function setShowZeroStock(show){
     zeroToggle.checked = !!show;
   }
   saveSettings();
-  renderItems(items);
-  refreshBrandFilterOptions();
-  try { renderSearchResults(); } catch(_){}
+  renderItems(homeItems);
+  try { renderSearchItems(); } catch(_){}
 }
 
 const DEFAULT_VOUCHER_FUN_LINE = 'Thanks for sharing the joy!';
@@ -178,7 +196,8 @@ function refreshBrandFilterOptions(){
   const select = document.getElementById('brandFilter');
   if(!select) return;
   const previous = select.value || '';
-  const brands = Array.from(new Set(getVisibleItems().map(it => (it.brand || 'Unbranded')))).sort();
+  const source = Array.isArray(searchItems) ? searchItems : [];
+  const brands = Array.from(new Set(source.map(it => (it.brand || 'Unbranded')))).sort();
   select.innerHTML = '<option value="">All Brands</option>' + brands.map(name => `<option value="${name}">${name}</option>`).join('');
   if(previous && brands.includes(previous)){
     select.value = previous;
@@ -1754,10 +1773,31 @@ async function pollSyncStatus(){
 
 async function loadItems(){
   try {
-    const response = await fetch('/api/items');
+    const now = Date.now();
+    const cachedRaw = localStorage.getItem(HOME_ITEMS_CACHE_KEY);
+    if(cachedRaw){
+      try{
+        const cached = JSON.parse(cachedRaw);
+        if(cached && Array.isArray(cached.items) && (now - Number(cached.ts || 0)) < HOME_ITEMS_CACHE_TTL_MS){
+          const cachedItems = cached.items.map(it => {
+            const entry = { ...it };
+            entry.item_code = entry.item_code || entry.name;
+            if (entry.barcode === undefined || entry.barcode === null || entry.barcode === '') {
+              entry.barcode = null;
+            } else {
+              entry.barcode = String(entry.barcode).trim();
+            }
+            entry.vat_rate = normalizeVatRate(entry.vat_rate);
+            return entry;
+          });
+          renderItems(cachedItems);
+        }
+      }catch(_){}
+    }
+    const response = await fetch(`/api/browse/recent?limit=${FEATURED_ITEM_LIMIT * 3}`);
     const data = await response.json();
     if (data.status === 'success') {
-      items = (data.items || []).map(it => {
+      const recent = (data.items || []).map(it => {
         const entry = { ...it };
         entry.item_code = entry.item_code || entry.name;
         if (entry.barcode === undefined || entry.barcode === null || entry.barcode === '') {
@@ -1768,7 +1808,10 @@ async function loadItems(){
         entry.vat_rate = normalizeVatRate(entry.vat_rate);
         return entry;
       });
-      renderItems(items);
+      renderItems(recent);
+      try{
+        localStorage.setItem(HOME_ITEMS_CACHE_KEY, JSON.stringify({ ts: Date.now(), items: recent }));
+      }catch(_){}
     }
   } catch (error) {
     console.error(error);
@@ -1777,10 +1820,11 @@ async function loadItems(){
 async function loadCustomers(){ try{ const r=await fetch('/api/customers'); const d=await r.json(); if(d.status==='success'){ customers=d.customers; const b=document.getElementById('customerSelect'); const t=document.getElementById('topCustomerSelect'); customers.forEach(c=>{ if(b){const o=document.createElement('option'); o.value=c.name;o.textContent=c.customer_name;b.appendChild(o);} if(t){const o2=document.createElement('option'); o2.value=c.name;o2.textContent=c.customer_name;t.appendChild(o2);} }); setDefaultCustomer(); } }catch(e){ console.error(e);} }
 
 function renderItems(list){
-  items = list || [];
+  homeItems = list || [];
+  items = homeItems;
   renderFeaturedPanel(false);
   renderRecentItems();
-  try { renderSearchResults(); } catch(_){}
+  try { renderSearchStage(); } catch(_){}
 }
 
 function formatItemPrice(it){
@@ -1862,9 +1906,10 @@ function renderFeaturedPanel(shuffle = false){
     const media=document.createElement('div');
     media.className='item-card-media';
     const imageUrl=findItemImageUrl(it);
-    if(imageUrl){
+    const thumb = imageUrl ? thumbUrl(imageUrl, 220, 220) : '';
+    if(thumb){
       const img=document.createElement('img');
-      img.src=imageUrl;
+      img.src=thumb;
       img.alt=it.item_name || it.name || it.item_code || 'Product image';
       img.loading='lazy';
       media.appendChild(img);
@@ -1912,7 +1957,7 @@ function selectFeaturedItems(sourceList, shuffle){
       used.add(match.item_code);
     }
   });
-  const pool=(Array.isArray(sourceList)?sourceList.slice():items.slice()).filter(it=>!used.has(it.item_code));
+  const pool=(Array.isArray(sourceList)?sourceList.slice():homeItems.slice()).filter(it=>!used.has(it.item_code));
   const ordered=shuffle?shuffleArray(pool):pool;
   for(const candidate of ordered){
     if(selection.length>=FEATURED_ITEM_LIMIT){
@@ -1955,7 +2000,7 @@ function renderRecentItems(){
     thumb.className='recent-sale-thumb';
     if(entry.image){
       const img=document.createElement('img');
-      img.src=entry.image;
+      img.src=thumbUrl(entry.image, 80, 80);
       img.alt=entry.name || entry.item_code || 'Recent item';
       img.loading='lazy';
       thumb.appendChild(img);
@@ -2015,6 +2060,13 @@ function findItemImageUrl(itemOrCode){
     return match.image || match.image_url || '';
   }
   return '';
+}
+
+function thumbUrl(url, width=160, height=160){
+  if(!url){
+    return '';
+  }
+  return `/api/thumb?url=${encodeURIComponent(url)}&w=${width}&h=${height}`;
 }
 
 function addToCart(item) {
@@ -2099,13 +2151,16 @@ function findItemByCode(value) {
     if (!candidate) return false;
     return String(candidate).trim().toLowerCase() === normalized;
   };
-  for (const item of items) {
-    if (matches(item.barcode)) return item;
-    if (matches(item.item_code)) return item;
-    if (matches(item.name)) return item;
-    if (Array.isArray(item.barcodes)) {
-      const found = item.barcodes.some(bar => matches(bar.barcode || bar));
-      if (found) return item;
+  const pools = [searchItems || [], homeItems || [], items || []];
+  for (const pool of pools) {
+    for (const item of pool) {
+      if (matches(item.barcode)) return item;
+      if (matches(item.item_code)) return item;
+      if (matches(item.name)) return item;
+      if (Array.isArray(item.barcodes)) {
+        const found = item.barcodes.some(bar => matches(bar.barcode || bar));
+        if (found) return item;
+      }
     }
   }
   return null;
@@ -2352,6 +2407,7 @@ function bindEvents(){
   const adminSeedBtn=document.getElementById('adminSeedBtn');
   const adminEnsureBtn=document.getElementById('adminEnsureBtn');
   const adminSyncBtn=document.getElementById('adminSyncBtn');
+  const adminFullSyncBtn=document.getElementById('adminFullSyncBtn');
   const adminStatusBtn=document.getElementById('adminStatusBtn');
   const adminStatusOut=document.getElementById('adminStatusOut');
   receiptPortSelectEl = receiptPortSelect;
@@ -2380,10 +2436,52 @@ function bindEvents(){
       return `${url}: ${r.status} ${r.statusText}\n${t}`;
     }catch(e){ return `${url}: failed ${e}`; }
   }
+  async function getJsonData(url){
+    const r = await fetch(url);
+    if(!r.ok){
+      const t = await r.text();
+      throw new Error(`${r.status} ${r.statusText}: ${t}`);
+    }
+    return r.json();
+  }
+  let fullSyncPoll = null;
+  function renderFullSyncStatus(data){
+    if(!data){ return; }
+    const totals = data.totals || {};
+    const lines = [
+      `Full sync status: ${data.status || 'unknown'}`,
+      `Stage: ${data.stage || 'n/a'}`,
+      `Last batch pulled: ${data.last_pulled || 0}`,
+      data.fast_mode ? 'Mode: fast (skipping variant/tax hydration)' : '',
+      `Totals: items=${totals.items || 0}, attrs=${totals.attr_defs || 0}, barcodes=${totals.barcodes || 0}, bins=${totals.bins || 0}, prices=${totals.prices || 0}`,
+      data.message ? `Message: ${data.message}` : ''
+    ].filter(Boolean);
+    showStatus(lines.join('\n'));
+  }
   if(adminInitDbBtn){ adminInitDbBtn.addEventListener('click', async()=>{ showStatus('Initializing database...'); const out = await postJson('/api/db/init'); showStatus(out); }); }
   if(adminSeedBtn){ adminSeedBtn.addEventListener('click', async()=>{ showStatus('Seeding demo data...'); const out = await postJson('/api/db/seed-demo'); showStatus(out); }); }
   if(adminEnsureBtn){ adminEnsureBtn.addEventListener('click', async()=>{ showStatus('Ensuring demo DB...'); const out = await postJson('/api/db/ensure-demo'); showStatus(out); }); }
   if(adminSyncBtn){ adminSyncBtn.addEventListener('click', async()=>{ showStatus('Syncing items...'); const out = await postJson('/api/db/sync-items'); showStatus(out); }); }
+  if(adminFullSyncBtn){ adminFullSyncBtn.addEventListener('click', async()=>{
+    showStatus('Running full sync (this can take a while)...');
+    const out = await postJson('/api/db/full-sync-items');
+    showStatus(out);
+    if(fullSyncPoll){ clearInterval(fullSyncPoll); fullSyncPoll = null; }
+    fullSyncPoll = setInterval(async()=>{
+      try{
+        const status = await getJsonData('/api/db/full-sync-status');
+        renderFullSyncStatus(status);
+        if(status && (status.status === 'complete' || status.status === 'error')){
+          clearInterval(fullSyncPoll);
+          fullSyncPoll = null;
+        }
+      }catch(e){
+        showStatus(`/api/db/full-sync-status: failed ${e}`);
+        clearInterval(fullSyncPoll);
+        fullSyncPoll = null;
+      }
+    }, 2000);
+  }); }
   if(adminStatusBtn){ adminStatusBtn.addEventListener('click', async()=>{ showStatus('Fetching DB status...'); const out = await getJson('/api/db/status'); showStatus(out); }); }
   if(reprintLastBtn){ reprintLastBtn.addEventListener('click',()=>{ if(lastReceiptInfo) showReceiptOverlay(lastReceiptInfo); else alert('No receipt available to reprint yet.'); }); }
   // search field opens overlay
@@ -2417,8 +2515,58 @@ function bindEvents(){
   const login=document.getElementById('loginOverlay'); const code=document.getElementById('cashierCodeInput'); const enter=document.getElementById('loginEnterBtn'); const err=document.getElementById('loginError');
   if(login&&code&&enter){ enter.addEventListener('click',attemptLogin); code.addEventListener('keydown',e=>{ if(e.key==='Enter') attemptLogin(); }); login.querySelectorAll('.key-btn').forEach(b=>b.addEventListener('click',()=>{ const k=b.getAttribute('data-key'); if(k==='C'){ code.value=''; err.style.display='none'; } else if(k==='B'){ code.value=code.value.slice(0,-1);} else { code.value+=k; } })); }
   // search overlay
-  const so=document.getElementById('searchOverlay'), sb=document.getElementById('searchInputBig'), bf=document.getElementById('brandFilter'), sc=document.getElementById('searchCloseBtn');
-  if(so){ if(sb) sb.addEventListener('input',renderSearchResults); if(bf) bf.addEventListener('change',renderSearchResults); if(sc) sc.addEventListener('click',hideSearchOverlay); document.addEventListener('keydown',e=>{ if(e.key==='Escape') hideSearchOverlay(); }); so.addEventListener('click',e=>{ if(e.target===so) hideSearchOverlay(); }); }
+  const so=document.getElementById('searchOverlay');
+  const sb=document.getElementById('searchInputBig');
+  const sc=document.getElementById('searchCloseBtn');
+  const backBtn=document.getElementById('searchBackBtn');
+  if(so){
+    if(sb){
+      sb.addEventListener('input', ()=>{
+        const q = (sb.value || '').trim();
+        if(searchDebounceTimer){
+          clearTimeout(searchDebounceTimer);
+          searchDebounceTimer = null;
+        }
+        if(q){
+          if(q.length < SEARCH_MIN_CHARS){
+            browseLoading = false;
+            searchItems = [];
+            renderSearchItems();
+            return;
+          }
+          browseLoading = true;
+          renderSearchItems();
+          searchDebounceTimer = setTimeout(()=>{
+            fetchBrowseItems({ brand: null, q, force: true })
+              .then(list=>{
+                searchItems = list;
+                browseLoading = false;
+                renderSearchItems();
+              })
+              .catch(()=>{
+                browseLoading = false;
+                renderSearchItems();
+              });
+          }, SEARCH_DEBOUNCE_MS);
+          return;
+        }
+        browseLoading = false;
+        renderSearchStage();
+      });
+    }
+    if(backBtn){
+      backBtn.addEventListener('click', ()=>{
+        if(sb) sb.value = '';
+        if(searchStage === 'items'){
+          selectedBrand = '';
+          setSearchStage('brands');
+        }
+      });
+    }
+    if(sc) sc.addEventListener('click',hideSearchOverlay);
+    document.addEventListener('keydown',e=>{ if(e.key==='Escape') hideSearchOverlay(); });
+    so.addEventListener('click',e=>{ if(e.target===so) hideSearchOverlay(); });
+  }
   // barcode scanner bar
   const barcodeInput = document.getElementById('barcodeInput');
   const barcodeButton = document.getElementById('barcodeAddBtn');
@@ -2868,20 +3016,127 @@ function applySettings(){
 }
 
 // Search overlay
-function showSearchOverlay(q=''){
-  const o=document.getElementById('searchOverlay'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter');
+function isBrowseCacheFresh(ts){
+  return ts && (Date.now() - ts) < BROWSE_CACHE_TTL_MS;
+}
+async function fetchBrowseBrands(force=false){
+  if(!force && browseCache.brands.data.length && isBrowseCacheFresh(browseCache.brands.ts)){
+    return browseCache.brands.data;
+  }
+  try{
+    const r = await fetch('/api/browse/brands');
+    const d = await r.json();
+    const list = (d && d.status==='success' && Array.isArray(d.brands)) ? d.brands : [];
+    browseCache.brands = { data: list, ts: Date.now() };
+    return list;
+  }catch(e){
+    err('browse brands failed', e);
+    return browseCache.brands.data || [];
+  }
+}
+async function fetchBrowseItems({ brand=null, q='', force=false } = {}){
+  const cacheKey = `${brand||''}`;
+  const qKey = (q || '').trim().toLowerCase();
+  if(qKey && !force && searchCache.has(qKey)){
+    return searchCache.get(qKey);
+  }
+  const cached = browseCache.items.get(cacheKey);
+  if(!q && !force && cached && isBrowseCacheFresh(cached.ts)){
+    return cached.data;
+  }
+  const params = new URLSearchParams();
+  if(brand) params.set('brand', brand);
+  if(q) params.set('q', q);
+  params.set('fields', 'list');
+  params.set('limit', '240');
+  try{
+    const r = await fetch(`/api/browse/items?${params.toString()}`);
+    const d = await r.json();
+    const list = (d && d.status==='success' && Array.isArray(d.items)) ? d.items : [];
+    if(!q){
+      browseCache.items.set(cacheKey, { data: list, ts: Date.now() });
+    }else{
+      searchCache.set(qKey, list);
+      if(searchCache.size > SEARCH_CACHE_MAX){
+        const firstKey = searchCache.keys().next().value;
+        if(firstKey) searchCache.delete(firstKey);
+      }
+    }
+    return list;
+  }catch(e){
+    err('browse items failed', e);
+    return cached ? cached.data : [];
+  }
+}
+function updateSearchStageUI(){
+  const label = document.getElementById('searchStageLabel');
+  const backBtn = document.getElementById('searchBackBtn');
+  const chips = document.getElementById('searchStageChips');
+  const input = document.getElementById('searchInputBig');
+  const zeroToggleWrap = document.getElementById('zeroStockToggle')?.closest('.form-check');
+  if(backBtn){
+    backBtn.style.display = (searchStage === 'brands') ? 'none' : 'inline-flex';
+  }
+  if(label){
+    if(searchStage === 'brands') label.textContent = 'Choose a brand';
+    else label.textContent = 'Browse products';
+  }
+  if(input){
+    if(searchStage === 'brands') input.placeholder = 'Search brands...';
+    else input.placeholder = 'Search products...';
+  }
+  if(chips){
+    chips.innerHTML = '';
+    if(selectedBrand){
+      const chip = document.createElement('span');
+      chip.className = 'badge bg-light text-dark border';
+      chip.textContent = selectedBrand;
+      chips.appendChild(chip);
+    }
+  }
+  if(zeroToggleWrap){
+    zeroToggleWrap.style.display = (searchStage === 'items') ? 'flex' : 'none';
+  }
+}
+async function setSearchStage(stage, opts={}){
+  searchStage = stage;
+  updateSearchStageUI();
+  if(stage === 'brands'){
+    browseBrands = await fetchBrowseBrands(!!opts.force);
+    renderBrowseBrands();
+    return;
+  }
+  browseLoading = true;
+  renderSearchItems();
+  searchItems = await fetchBrowseItems({
+    brand: selectedBrand || null,
+    q: opts.q || '',
+    force: !!opts.force
+  });
+  browseLoading = false;
+  renderSearchItems();
+}
+async function showSearchOverlay(q=''){
+  const o=document.getElementById('searchOverlay'), i=document.getElementById('searchInputBig');
   const zeroToggle=document.getElementById('zeroStockToggle');
-  if(!o||!i||!b) return;
+  if(!o||!i) return;
   o.style.display='flex';
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){}
-  refreshBrandFilterOptions();
   if(zeroToggle){
     zeroToggle.checked = isShowZeroStockEnabled();
   }
-  i.value=q;
-  renderSearchResults();
+  const query = (q || '').toString().trim();
+    if(query){
+      selectedBrand = '';
+      i.value = query;
+      await setSearchStage('items', { force: true, q: query });
+    } else {
+      selectedBrand = '';
+      i.value = '';
+      await setSearchStage('brands');
+    }
   setTimeout(()=>i.focus(),0);
 }
 function hideSearchOverlay(){ const o=document.getElementById('searchOverlay'); if(o) o.style.display='none'; }
@@ -2891,6 +3146,7 @@ function itemMatchesSearch(item, needle){
   const push=val=>{ if(val===undefined||val===null) return; const txt=String(val).trim(); if(txt) terms.push(txt.toLowerCase()); };
   push(item.item_name);
   push(item.brand);
+  push(item.item_group);
   push(item.item_code);
   push(item.name);
   push(item.barcode);
@@ -2928,15 +3184,53 @@ function itemMatchesSearch(item, needle){
   }
   return terms.some(t=>t.includes(needle));
 }
-function renderSearchResults(){
-  const g=document.getElementById('searchGrid'), i=document.getElementById('searchInputBig'), b=document.getElementById('brandFilter');
+function renderBrowseBrands(){
+  const g=document.getElementById('searchGrid');
+  const i=document.getElementById('searchInputBig');
   if(!g) return;
-  let list=isShowZeroStockEnabled() ? items.slice() : items.filter(hasSellableStock);
   const q=(i&&i.value||'').trim().toLowerCase();
-  const br=(b&&b.value)||'';
-  if(q) list=list.filter(x=>itemMatchesSearch(x,q));
-  if(br) list=list.filter(x=>(x.brand||'Unbranded')===br);
+  const list=(browseBrands||[]).filter(name => !q || name.toLowerCase().includes(q));
   g.innerHTML='';
+  if(!list.length){
+    const msg=document.createElement('div');
+    msg.className='col-12';
+    msg.innerHTML=`<div class="alert alert-secondary mb-0 small">No brands found.</div>`;
+    g.appendChild(msg);
+    return;
+  }
+  list.forEach(name=>{
+    const c=document.createElement('div');
+    c.className='col';
+    c.innerHTML=`<div class="product-card browse-card"><div class="browse-card-title">${name}</div><div class="browse-card-meta">Tap to view groups</div></div>`;
+    c.addEventListener('click', ()=>{
+      selectedBrand = name;
+      setSearchStage('items');
+    });
+    g.appendChild(c);
+  });
+}
+function renderSearchItems(){
+  const g=document.getElementById('searchGrid');
+  const i=document.getElementById('searchInputBig');
+  if(!g) return;
+  let list=isShowZeroStockEnabled() ? (searchItems||[]).slice() : (searchItems||[]).filter(hasSellableStock);
+  const q=(i&&i.value||'').trim().toLowerCase();
+  if(q) list=list.filter(x=>itemMatchesSearch(x,q));
+  g.innerHTML='';
+  if(q && q.length < SEARCH_MIN_CHARS){
+    const msg=document.createElement('div');
+    msg.className='col-12';
+    msg.innerHTML=`<div class="alert alert-secondary mb-0 small">Type at least ${SEARCH_MIN_CHARS} characters to search.</div>`;
+    g.appendChild(msg);
+    return;
+  }
+  if(browseLoading){
+    const msg=document.createElement('div');
+    msg.className='col-12';
+    msg.innerHTML=`<div class="alert alert-secondary mb-0 small">Loading products…</div>`;
+    g.appendChild(msg);
+    return;
+  }
   if(!list.length){
     const msg=document.createElement('div');
     msg.className='col-12';
@@ -2947,13 +3241,22 @@ function renderSearchResults(){
   list.forEach(it=>{
     const c=document.createElement('div');
     c.className='col';
-    const imgStyle=it.image?`style="background-image:url('${it.image}')"`:'';
+    const thumb = it.image ? thumbUrl(it.image, 180, 180) : '';
+    const imgStyle=thumb?`style="background-image:url('${thumb}')"`:'';
     const priceHtml=formatItemPrice(it);
     c.innerHTML=`<div class="product-card" onclick='selectProduct("${it.name}")'><div class="product-img" ${imgStyle}></div><div class="fw-semibold">${it.item_name}</div><div class="text-muted small">${it.brand||'Unbranded'}</div><div class="mt-1">${priceHtml}</div></div>`;
     g.appendChild(c);
   });
 }
-function selectProduct(name){ const it=items.find(x=>x.name===name); if(it) openProduct(it); }
+function renderSearchStage(){
+  updateSearchStageUI();
+  if(searchStage === 'brands'){ renderBrowseBrands(); return; }
+  renderSearchItems();
+}
+function selectProduct(name){
+  const it = (searchItems||[]).find(x=>x.name===name) || (homeItems||[]).find(x=>x.name===name) || items.find(x=>x.name===name);
+  if(it) openProduct(it);
+}
 
 // Product detail overlay
 let currentProduct=null;
@@ -3239,7 +3542,7 @@ function renderCheckoutCart() {
     row.className = 'checkout-item' + (isRefund ? ' refund' : '');
     const img = document.createElement('div');
     img.className = 'img';
-    if (item.image) img.style.backgroundImage = `url('${item.image}')`;
+    if (item.image) img.style.backgroundImage = `url('${thumbUrl(item.image, 80, 80)}')`;
     const details = document.createElement('div');
     const name = document.createElement('div');
     name.className = 'name';
@@ -3530,9 +3833,9 @@ async function completeSaleFromOverlay() {
     });
     const data = await response.json();
   if (data.status === 'success') {
-    try {
-      if (!settings) settings = {};
-      if (settings.net_cash == null) settings.net_cash = 0;
+      try {
+        if (!settings) settings = {};
+        if (settings.net_cash == null) settings.net_cash = 0;
       if (settings.net_card == null) settings.net_card = 0;
       if (settings.net_voucher == null) settings.net_voucher = 0;
       if (settings.net_cash_change == null) settings.net_cash_change = 0;
@@ -3546,8 +3849,9 @@ async function completeSaleFromOverlay() {
         settings.net_cash_change += changeVal;
       }
       saveSettings();
-    } catch(_){}
-    // Update Z-read aggregates for today
+      } catch(_){}
+      try { loadItems(); } catch(_){}
+      // Update Z-read aggregates for today
     try{
       const saleCtx = {
         net: total,
@@ -5178,7 +5482,7 @@ function renderInvoiceDetail(inv){
         const img = document.createElement('div');
         img.className='img';
         img.style.width='48px'; img.style.height='48px'; img.style.borderRadius='8px'; img.style.background='#f1f3f5';
-        if(it.image){ img.style.backgroundImage = `url(${it.image})`; img.style.backgroundSize='cover'; img.style.backgroundPosition='center'; }
+        if(it.image){ img.style.backgroundImage = `url(${thumbUrl(it.image, 64, 64)})`; img.style.backgroundSize='cover'; img.style.backgroundPosition='center'; }
         const name = document.createElement('div');
         const attrs = it.attributes || {};
         const colour = pickAttribute(attrs, ['Colour','Color','colour','color']);

@@ -31,6 +31,7 @@ ERP_VOUCHER_EVENT_ENDPOINT = os.environ.get("ERP_VOUCHER_EVENT_ENDPOINT", "/api/
 
 # Track docs we repeatedly fail to fetch so we can fall back without noisy retries
 UNFETCHABLE_ITEM_DOCS: Set[str] = set()
+_FULL_SYNC_FAST = False
 UNFETCHABLE_ATTRIBUTE_DOCS: Set[str] = set()
 
 def iso_now() -> str:
@@ -73,6 +74,8 @@ def _ensure_item_extras(conn: sqlite3.Connection):
         return
     existing = {row["name"] for row in rows}
     alters = []
+    if "item_group" not in existing:
+        alters.append("ALTER TABLE items ADD COLUMN item_group TEXT")
     if "custom_style_code" not in existing:
         alters.append("ALTER TABLE items ADD COLUMN custom_style_code TEXT")
     if "custom_simple_colour" not in existing:
@@ -148,12 +151,13 @@ def _ensure_voucher_balance_view(conn: sqlite3.Connection):
 # ---------- UPSERT HELPERS ----------
 def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]):
     sql = """
-    INSERT INTO items (item_id, parent_id, name, brand, custom_style_code, custom_simple_colour, vat_rate, attributes, price, image_url, is_template, active, modified_utc)
-    VALUES (:item_id, :parent_id, :name, :brand, :custom_style_code, :custom_simple_colour, :vat_rate, :attributes, :price, :image_url, :is_template, :active, :modified_utc)
+    INSERT INTO items (item_id, parent_id, name, brand, item_group, custom_style_code, custom_simple_colour, vat_rate, attributes, price, image_url, is_template, active, modified_utc)
+    VALUES (:item_id, :parent_id, :name, :brand, :item_group, :custom_style_code, :custom_simple_colour, :vat_rate, :attributes, :price, :image_url, :is_template, :active, :modified_utc)
     ON CONFLICT(item_id) DO UPDATE SET
       parent_id=excluded.parent_id,
       name=excluded.name,
       brand=excluded.brand,
+      item_group=excluded.item_group,
       custom_style_code=excluded.custom_style_code,
       custom_simple_colour=excluded.custom_simple_colour,
       vat_rate=COALESCE(excluded.vat_rate, items.vat_rate),
@@ -237,18 +241,19 @@ def ensure_item_for_sale_line(conn: sqlite3.Connection, line: Dict[str, Any]):
     attributes = _serialize_item_attributes(line.get("attributes"))
     now = iso_now()
     conn.execute("""
-        INSERT INTO items (item_id, parent_id, name, brand, custom_style_code, custom_simple_colour, vat_rate, attributes, price, image_url, is_template, active, modified_utc)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO items (item_id, parent_id, name, brand, item_group, custom_style_code, custom_simple_colour, vat_rate, attributes, price, image_url, is_template, active, modified_utc)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(item_id) DO UPDATE SET
             name=COALESCE(NULLIF(excluded.name,''), items.name),
             brand=COALESCE(excluded.brand, items.brand),
+            item_group=COALESCE(excluded.item_group, items.item_group),
             custom_style_code=COALESCE(excluded.custom_style_code, items.custom_style_code),
             custom_simple_colour=COALESCE(excluded.custom_simple_colour, items.custom_simple_colour),
             vat_rate=COALESCE(excluded.vat_rate, items.vat_rate),
             attributes=COALESCE(NULLIF(excluded.attributes,''), items.attributes),
             modified_utc=excluded.modified_utc,
             active=1
-    """, (item_id, None, name, brand, None, None, None, attributes, None, None, 0, 1, now))
+    """, (item_id, None, name, brand, None, None, None, None, attributes, None, None, 0, 1, now))
 
 def upsert_barcode(conn: sqlite3.Connection, barcode: str, item_id: str):
     sql = """
@@ -1269,7 +1274,7 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE
     if last_mod:
         filters = [["modified",">=",last_mod]]
     fields = [
-        "name","item_code","item_name","brand","custom_style_code","custom_simple_colour",
+        "name","item_code","item_name","brand","item_group","custom_style_code","custom_simple_colour",
         "has_variants","variant_of","disabled","image","standard_rate","stock_uom","modified","barcodes"
     ]
     params = {"fields": json.dumps(fields), "filters": json.dumps(filters), "limit_page_length": limit, "order_by": "modified asc, name asc"}
@@ -1295,7 +1300,7 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE
 
     for d in data:
         parent = d.get("variant_of")
-        if "variant_of" not in d:
+        if "variant_of" not in d and not _FULL_SYNC_FAST:
             doc = _fetch_item_doc_cached(d.get("name"))
             if doc:
                 parent = doc.get("variant_of") or parent
@@ -1309,13 +1314,14 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE
         except Exception:
             price = None
         itm = {
-            "item_id": d["name"],
-            "parent_id": parent,
-            "name": d.get("item_name") or d["name"],
-            "brand": d.get("brand"),
-            "custom_style_code": d.get("custom_style_code"),
-            "custom_simple_colour": d.get("custom_simple_colour"),
-            "vat_rate": None,
+          "item_id": d["name"],
+          "parent_id": parent,
+          "name": d.get("item_name") or d["name"],
+          "brand": d.get("brand"),
+          "item_group": d.get("item_group"),
+          "custom_style_code": d.get("custom_style_code"),
+          "custom_simple_colour": d.get("custom_simple_colour"),
+          "vat_rate": None,
             "attributes": None,
             "price": price,
             "image_url": d.get("image"),
@@ -1329,9 +1335,9 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE
         if parent:
             variants_to_hydrate.append((d["name"], parent))
         _ingest_child_barcodes(conn, d.get("barcodes"), d["name"])
-    if variants_to_hydrate:
+    if variants_to_hydrate and not _FULL_SYNC_FAST:
         _hydrate_variant_attributes(conn, variants_to_hydrate, prefetched_docs=prefetched_item_docs)
-    if item_rows:
+    if item_rows and not _FULL_SYNC_FAST:
         _hydrate_item_tax_rates(conn, item_rows)
     _cursor_set(conn, "Item", data[-1]["modified"], data[-1]["name"])
     conn.commit()
@@ -1800,6 +1806,104 @@ def sync_cycle(conn: sqlite3.Connection, warehouse: str = "Shop", price_list: Op
         print(f"Pulled: Items={n1}, AttrDefs={n_attr_defs}, Barcodes={n2}, Bins={n3}, Prices={n4}")
         if (n1 + n_attr_defs + n2 + n3 + n4) == 0:
             break
+
+def _clear_sync_cursors(conn: sqlite3.Connection, keys: List[str]) -> None:
+    if not keys:
+        return
+    placeholders = ",".join("?" for _ in keys)
+    conn.execute(f"DELETE FROM sync_cursors WHERE doctype IN ({placeholders})", keys)
+    conn.commit()
+
+def full_sync_from_erp(
+    conn: sqlite3.Connection,
+    warehouse: str = "Shop",
+    price_list: Optional[str] = None,
+    item_limit: int = ITEM_PULL_PAGE_LIMIT,
+    attr_limit: int = 200,
+    barcode_limit: int = 500,
+    bin_limit: int = 500,
+    price_limit: int = 500,
+    max_loops: int = 10000,
+    progress_cb: Optional[Any] = None,
+) -> Dict[str, int]:
+    """Reset cursors and perform a full pull until no more ERPNext rows remain."""
+    global _BARCODE_PULL_FORBIDDEN, _BIN_PULL_FORBIDDEN, _FULL_SYNC_FAST
+    fast_mode = os.getenv("POS_FULL_SYNC_FAST", "0") == "1"
+    _BARCODE_PULL_FORBIDDEN = False
+    _BIN_PULL_FORBIDDEN = False
+    _FULL_SYNC_FAST = fast_mode
+    UNFETCHABLE_ITEM_DOCS.clear()
+    cursor_keys = ["Item", "Item Attribute", "Item Barcode", "Item Barcode (Item Doc)"]
+    if warehouse:
+        cursor_keys.append(f"Bin:{warehouse}")
+    if price_list:
+        cursor_keys.append(f"Item Price:{price_list}")
+    _clear_sync_cursors(conn, cursor_keys)
+
+    totals = {"items": 0, "attr_defs": 0, "barcodes": 0, "bins": 0, "prices": 0}
+    def _progress(stage: str, pulled: int, total: int) -> None:
+        if progress_cb:
+            progress_cb(stage, pulled, total)
+        print(f"Full sync {stage}: pulled {pulled}, total {total}")
+    try:
+        loops = 0
+        while True:
+            loops += 1
+            if loops > max_loops:
+                break
+            pulled = pull_items_incremental(conn, limit=item_limit)
+            totals["items"] += pulled
+            _progress("items", pulled, totals["items"])
+            if pulled < item_limit:
+                break
+
+        loops = 0
+        while True:
+            loops += 1
+            if loops > max_loops:
+                break
+            pulled = pull_item_attributes(conn, limit=attr_limit)
+            totals["attr_defs"] += pulled
+            _progress("attributes", pulled, totals["attr_defs"])
+            if pulled < attr_limit:
+                break
+
+        loops = 0
+        while True:
+            loops += 1
+            if loops > max_loops:
+                break
+            pulled = pull_item_barcodes_incremental(conn, limit=barcode_limit)
+            totals["barcodes"] += pulled
+            _progress("barcodes", pulled, totals["barcodes"])
+            if pulled < barcode_limit:
+                break
+
+        loops = 0
+        while True:
+            loops += 1
+            if loops > max_loops:
+                break
+            pulled = pull_bins_incremental(conn, warehouse=warehouse, limit=bin_limit)
+            totals["bins"] += pulled
+            _progress("bins", pulled, totals["bins"])
+            if pulled < bin_limit:
+                break
+
+        if price_list:
+            loops = 0
+            while True:
+                loops += 1
+                if loops > max_loops:
+                    break
+                pulled = pull_item_prices_incremental(conn, price_list=price_list, limit=price_limit)
+                totals["prices"] += pulled
+                _progress("prices", pulled, totals["prices"])
+                if pulled < price_limit:
+                    break
+        return totals
+    finally:
+        _FULL_SYNC_FAST = False
 
 
 def main():

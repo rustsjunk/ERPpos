@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS items (
   parent_id      TEXT REFERENCES items(item_id),  -- NULL for templates
   name           TEXT NOT NULL,
   brand          TEXT,
+  item_group     TEXT,
   custom_style_code   TEXT,
   custom_simple_colour TEXT,
   vat_rate       NUMERIC,
