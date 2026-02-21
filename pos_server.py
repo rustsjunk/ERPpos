@@ -1359,6 +1359,66 @@ def _db_find_item_ids(conn: sqlite3.Connection, brand: Optional[str], group: Opt
     return [row["item_id"] for row in rows if row and row["item_id"]]
 
 
+def _db_variant_table_payload(conn: sqlite3.Connection, brand: Optional[str], group: Optional[str], q: Optional[str], limit: int) -> List[Dict[str, Any]]:
+    params: List[Any] = []
+    clauses = ["i.active=1", "i.is_template=0"]
+    if brand:
+        clauses.append("COALESCE(i.brand,'')=?")
+        params.append(brand)
+    if group and _has_item_group(conn):
+        clauses.append("COALESCE(i.item_group,'')=?")
+        params.append(group)
+    if q:
+        like = f"%{q}%"
+        clauses.append("(i.name LIKE ? OR i.item_id LIKE ? OR i.custom_style_code LIKE ? OR i.custom_simple_colour LIKE ?)")
+        params.extend([like, like, like, like])
+    where = " AND ".join(clauses)
+    sql = f"""
+    SELECT i.item_id AS name,
+           i.item_id AS item_code,
+           i.name AS item_name,
+           i.brand AS brand,
+           i.item_group AS item_group,
+           i.parent_id AS template_id,
+           i.custom_style_code AS custom_style_code,
+           i.custom_simple_colour AS custom_simple_colour,
+           i.vat_rate AS vat_rate,
+           (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
+           COALESCE((SELECT qty FROM stock s WHERE s.item_id = i.item_id AND s.warehouse='{POS_WAREHOUSE}'), 0) AS stock_qty,
+           (SELECT value FROM variant_attributes va WHERE va.item_id = i.item_id
+                AND lower(va.attr_name) IN ('color','colour','colors') LIMIT 1) AS color,
+            (SELECT value FROM variant_attributes va WHERE va.item_id = i.item_id
+                AND (lower(va.attr_name) LIKE '%size%') LIMIT 1) AS size,
+           (SELECT value FROM variant_attributes va WHERE va.item_id = i.item_id
+                AND lower(va.attr_name) IN ('width','fit') LIMIT 1) AS width
+    FROM items i
+    WHERE {where}
+    ORDER BY COALESCE(i.brand,''), i.name
+    LIMIT ?
+    """
+    params.append(limit)
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append({
+            "name": r["name"],
+            "item_code": r["item_code"],
+            "item_name": r["item_name"],
+            "brand": r["brand"],
+            "item_group": r["item_group"],
+            "template_id": r["template_id"],
+            "custom_style_code": r["custom_style_code"],
+            "custom_simple_colour": r["custom_simple_colour"],
+            "vat_rate": float(r["vat_rate"]) if r["vat_rate"] is not None else None,
+            "standard_rate": float(r["standard_rate"]) if r["standard_rate"] is not None else None,
+            "stock_qty": float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0,
+            "color": r["color"],
+            "size": r["size"],
+            "width": r["width"],
+        })
+    return out
+
+
 def _db_browse_items_payload(conn: sqlite3.Connection, brand: Optional[str], group: Optional[str], q: Optional[str], limit: int, light: bool = False) -> List[Dict[str, Any]]:
     ids = _db_find_item_ids(conn, brand, group, q, limit)
     if not ids:
@@ -2672,6 +2732,7 @@ def api_browse_items():
     group = (request.args.get('group') or '').strip() or None
     q = (request.args.get('q') or '').strip()
     fields = (request.args.get('fields') or '').strip().lower()
+    mode = (request.args.get('mode') or '').strip().lower()
     light = fields == 'list'
     try:
         limit_raw = request.args.get('limit')
@@ -2681,7 +2742,7 @@ def api_browse_items():
     limit = max(10, min(limit, 400))
     cache_key = None
     if not q:
-        cache_key = f"browse:items:{brand or ''}:{group or ''}:{limit}"
+        cache_key = f"browse:items:{brand or ''}:{group or ''}:{mode or ''}:{fields or ''}:{limit}"
         cached = _browse_cache_get(cache_key)
         if cached is not None:
             return jsonify({'status': 'success', 'items': cached, 'cached': True})
@@ -2689,7 +2750,10 @@ def api_browse_items():
     if not conn:
         return jsonify({'status': 'error', 'message': 'Database not available'}), 500
     try:
-        items = _db_browse_items_payload(conn, brand, group, q, limit, light=light)
+        if mode == 'variants' and fields in ('table', 'list'):
+            items = _db_variant_table_payload(conn, brand, group, q, limit)
+        else:
+            items = _db_browse_items_payload(conn, brand, group, q, limit, light=light)
     except Exception:
         app.logger.exception('Failed to load browse items')
         items = []
@@ -3671,7 +3735,19 @@ def item_matrix():
     conn = _db_connect()
     if not conn:
         return jsonify({'status': 'error', 'message': 'Database not available'}), 500
-    tpl = conn.execute("SELECT item_id, name, brand FROM items WHERE item_id=? AND is_template=1", (template_id,)).fetchone()
+    tpl = conn.execute(
+        """
+        SELECT i.item_id,
+               i.name,
+               i.brand,
+               i.vat_rate,
+               (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
+               (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image_url
+        FROM items i
+        WHERE i.item_id=? AND i.is_template=1
+        """,
+        (template_id,)
+    ).fetchone()
     if not tpl:
         return jsonify({'status': 'error', 'message': 'Template not found'}), 404
     qv = f"""
@@ -3747,7 +3823,15 @@ def item_matrix():
         'price_max': price_max,
         'style_codes': style_codes,
     }
-    return jsonify({'status': 'success', 'data': data})
+    template_payload = {
+        'item_id': tpl['item_id'],
+        'item_name': tpl['name'],
+        'brand': tpl['brand'],
+        'vat_rate': float(tpl['vat_rate']) if tpl['vat_rate'] is not None else None,
+        'standard_rate': float(tpl['standard_rate']) if tpl['standard_rate'] is not None else None,
+        'image': _absolute_image_url(tpl['image_url']),
+    }
+    return jsonify({'status': 'success', 'data': data, 'template': template_payload})
 
 
 @app.route('/api/lookup-barcode')

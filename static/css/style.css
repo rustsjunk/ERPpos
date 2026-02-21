@@ -914,6 +914,61 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 .search-modal #searchGrid {
     overflow: auto;
 }
+.search-modal #searchGrid.search-grid-table {
+    display: block;
+}
+.search-modal #searchGrid.search-grid-table > .table-responsive {
+    width: 100%;
+    overflow-x: auto;
+}
+.search-table th:last-child,
+.search-table td:last-child {
+    position: sticky;
+    right: 0;
+    background: #ffffff;
+}
+body.dark-mode .search-table th:last-child,
+body.dark-mode .search-table td:last-child {
+    background: #1e1e1e;
+}
+.search-table .search-row { cursor: pointer; }
+.search-table td, .search-table th { vertical-align: middle; }
+.search-table { width: 100%; table-layout: auto; min-width: 1040px; }
+.search-table th, .search-table td {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.search-table th:nth-child(1),
+.search-table td:nth-child(1) { min-width: 130px; }
+.search-table th:nth-child(2),
+.search-table td:nth-child(2) { min-width: 200px; }
+.search-table th:nth-child(3),
+.search-table td:nth-child(3) { min-width: 130px; }
+.search-table th:nth-child(4),
+.search-table td:nth-child(4) { min-width: 180px; }
+.search-table th:nth-child(5),
+.search-table td:nth-child(5) { min-width: 120px; }
+.search-table th:nth-child(6),
+.search-table td:nth-child(6) { min-width: 140px; }
+.search-table th:nth-child(7),
+.search-table td:nth-child(7) { min-width: 100px; }
+.search-table .scroll-cell { position: relative; }
+.search-table .scroll-text {
+    display: inline-block;
+    max-width: 100%;
+    white-space: nowrap;
+}
+.search-table .scroll-text.scrolling {
+    animation: scroll-cell-text 8s linear infinite;
+    padding-right: 24px;
+}
+@keyframes scroll-cell-text {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-100%); }
+}
+.search-row.active { background: #eef4ff; }
+body.dark-mode .search-row.active { background: #1b2a3d; }
 /* Topbar customer selector: make it look custom, not native */
 .app-topbar .customer-select {
     -webkit-appearance: none;
