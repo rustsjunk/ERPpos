@@ -169,7 +169,9 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_utc);
 CREATE INDEX IF NOT EXISTS idx_sales_erpstatus ON sales(queue_status, created_utc);
 CREATE INDEX IF NOT EXISTS idx_lines_item ON sale_lines(item_id);
+CREATE INDEX IF NOT EXISTS idx_sale_lines_sale_id ON sale_lines(sale_id);
 CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method);
+CREATE INDEX IF NOT EXISTS idx_items_browse ON items(is_template, active, brand, name);
 
 -- Gift vouchers with ledger
 CREATE TABLE IF NOT EXISTS vouchers (

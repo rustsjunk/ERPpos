@@ -1342,9 +1342,14 @@ def _db_find_item_ids(conn: sqlite3.Connection, brand: Optional[str], group: Opt
         clauses.append("is_template=1")
     else:
         clauses.append("is_template=0")
-    if brand:
-        clauses.append("COALESCE(brand,'')=?")
-        params.append(brand)
+    if brand is not None:
+        if brand:
+            # Specific brand — direct equality uses the composite browse index
+            clauses.append("brand=?")
+            params.append(brand)
+        else:
+            # "Unbranded" — match NULL or empty string
+            clauses.append("(brand IS NULL OR brand='')")
     if group and _has_item_group(conn):
         clauses.append("COALESCE(item_group,'')=?")
         params.append(group)
@@ -1353,7 +1358,7 @@ def _db_find_item_ids(conn: sqlite3.Connection, brand: Optional[str], group: Opt
         clauses.append("(name LIKE ? OR item_id LIKE ? OR custom_style_code LIKE ? OR custom_simple_colour LIKE ?)")
         params.extend([like, like, like, like])
     where = " AND ".join(clauses)
-    sql = f"SELECT item_id FROM items WHERE {where} ORDER BY COALESCE(brand,''), name LIMIT ?"
+    sql = f"SELECT item_id FROM items WHERE {where} ORDER BY brand, name LIMIT ?"
     params.append(limit)
     rows = conn.execute(sql, tuple(params)).fetchall()
     return [row["item_id"] for row in rows if row and row["item_id"]]
@@ -1458,6 +1463,10 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_style ON items(custom_style_code)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_colour ON items(custom_simple_colour)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_brand ON items(brand)")
+        # Composite index for brand-filtered browse (covers is_template, active, brand, name in one scan)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_browse ON items(is_template, active, brand, name)")
+        # Index for the sale_lines→sales JOIN used by the recent-items query
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sale_lines_sale_id ON sale_lines(sale_id)")
     except Exception:
         pass
 
@@ -2570,6 +2579,19 @@ def _error_message_from_response(resp: requests.Response) -> str:
         return resp.text
 
 
+def _require_admin_token():
+    """Check POS_ADMIN_TOKEN for destructive endpoints. Returns a Response on failure, None on success."""
+    token_env = os.getenv('POS_ADMIN_TOKEN', '').strip()
+    if not token_env:
+        return jsonify({'status': 'error', 'message': 'Admin token not configured. Set POS_ADMIN_TOKEN in .env to use this endpoint.'}), 403
+    provided = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    if not provided:
+        provided = (request.json or {}).get('admin_token', '') if request.is_json else ''
+    if provided != token_env:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+    return None
+
+
 # Disable caching for all responses during development to avoid stale assets
 @app.after_request
 def add_no_cache_headers(response):
@@ -2579,6 +2601,15 @@ def add_no_cache_headers(response):
     if 'Expires' in response.headers:
         del response.headers['Expires']
     response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'self'; "
+        "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+        "style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self';"
+    )
     return response
 
 
@@ -2776,9 +2807,6 @@ def api_cashier_login():
         return jsonify({'status': 'error', 'message': 'Missing code'}), 400
     conn = _db_connect()
     if not conn:
-        # fallback: allow Josh 19 even if DB not ready
-        if code.lstrip('0') == '19':
-            return jsonify({'status': 'success', 'cashier': {'code': '19', 'name': 'Josh'}})
         return jsonify({'status': 'error', 'message': 'Database not available'}), 500
     try:
         _maybe_sync_cashiers(conn)
@@ -3485,6 +3513,8 @@ def api_scan_acks():
 
 @app.route('/api/db/init', methods=['POST'])
 def api_db_init():
+    auth_err = _require_admin_token()
+    if auth_err: return auth_err
     if not ps:
         return jsonify({'status':'error','message':'pos_service not available'}), 500
     try:
@@ -3500,6 +3530,8 @@ def api_db_init():
 
 @app.route('/api/db/seed-demo', methods=['POST'])
 def api_db_seed_demo():
+    auth_err = _require_admin_token()
+    if auth_err: return auth_err
     if not ps:
         return jsonify({'status':'error','message':'pos_service not available'}), 500
     try:
@@ -3517,6 +3549,8 @@ def api_db_seed_demo():
 
 @app.route('/api/db/ensure-demo', methods=['POST'])
 def api_db_ensure_demo():
+    auth_err = _require_admin_token()
+    if auth_err: return auth_err
     if not ps:
         return jsonify({'status':'error','message':'pos_service not available'}), 500
     try:
@@ -4372,6 +4406,34 @@ def api_update_currency_rates():
 
 _CURRENCY_BOOTSTRAP_DONE = False
 
+def _warm_browse_cache():
+    """Pre-populate recent-items and brands caches in the background at startup."""
+    import time as _time
+    _time.sleep(3)  # let the server finish booting
+    try:
+        conn = _db_connect()
+        if not conn:
+            return
+        try:
+            # Warm recent items (the slowest cold query)
+            cache_key = f"browse:recent:{BROWSE_RECENT_LIMIT}"
+            if _browse_cache_get(cache_key) is None:
+                items = _db_recent_items_payload(conn, BROWSE_RECENT_LIMIT)
+                _browse_cache_set(cache_key, items)
+                app.logger.info('Browse cache warmed: %d recent items', len(items))
+            # Warm brand list
+            if _browse_cache_get("browse:brands") is None:
+                brands = _db_brand_list(conn)
+                _browse_cache_set("browse:brands", brands)
+                app.logger.info('Browse cache warmed: %d brands', len(brands))
+        except Exception:
+            app.logger.debug('Browse cache warm-up failed', exc_info=True)
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
 def start_background_services():
     """Start background helper threads once per process."""
     global _BACKGROUND_SERVICES_STARTED
@@ -4386,6 +4448,7 @@ def start_background_services():
         app.logger.warning('POS queue storage initialization failed', exc_info=True)
     _ensure_currency_updater()
     _ensure_idle_worker()
+    threading.Thread(target=_warm_browse_cache, name='browse-cache-warmer', daemon=True).start()
     _BACKGROUND_SERVICES_STARTED = True
 
 

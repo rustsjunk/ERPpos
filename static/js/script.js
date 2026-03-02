@@ -71,6 +71,7 @@ let currentCashier = null;
 let currentCashierSession = null;
 let sessionPingTimer = null;
 let sessionPingIntervalMs = 60 * 1000;
+let _lastSyncCounts = { queued: 0, failed: 0, invoicesPending: 0 };
 const FEATURED_ITEM_LIMIT = 12;
 const RECENT_SALES_LIMIT = 3;
 const giftVoucherItemCode = (document.documentElement && document.documentElement.dataset
@@ -202,7 +203,17 @@ function refreshBrandFilterOptions(){
   const previous = select.value || '';
   const source = Array.isArray(searchItems) ? searchItems : [];
   const brands = Array.from(new Set(source.map(it => (it.brand || 'Unbranded')))).sort();
-  select.innerHTML = '<option value="">All Brands</option>' + brands.map(name => `<option value="${name}">${name}</option>`).join('');
+  select.innerHTML = '';
+  const defaultOpt = document.createElement('option');
+  defaultOpt.value = '';
+  defaultOpt.textContent = 'All Brands';
+  select.appendChild(defaultOpt);
+  brands.forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+  });
   if(previous && brands.includes(previous)){
     select.value = previous;
   }
@@ -1664,7 +1675,8 @@ function startCashierSessionPing(){
   if(!currentCashierSession) return;
   stopCashierSessionPing();
   const tick = ()=>{ pingCashierSession().catch(()=>{}); };
-  tick();
+  // Delay first ping slightly so the server has time to commit the new session
+  setTimeout(tick, 1500);
   sessionPingTimer = setInterval(tick, sessionPingIntervalMs);
 }
 
@@ -1763,6 +1775,7 @@ async function pollSyncStatus(){
     const failed = Number(counts.failed||0);
     const invoicesPending = Number(d.invoices_pending||0);
     const pendingTotal = queued + invoicesPending;
+    _lastSyncCounts = { queued, failed, invoicesPending };
     const notif = document.getElementById('notifIcon')
     if(notif){
       const base = '\u{1F514}'; // bell icon
@@ -2326,6 +2339,20 @@ function bindEvents(){
   if(returnLoadBtn){ returnLoadBtn.addEventListener('click', ()=>loadReturnAsRefund()); }
   const shuffleFeaturedBtn=document.getElementById('shuffleFeaturedBtn');
   if(shuffleFeaturedBtn){ shuffleFeaturedBtn.addEventListener('click', ()=>renderFeaturedPanel(true)); }
+  const notifIcon = document.getElementById('notifIcon');
+  if(notifIcon){ notifIcon.addEventListener('click', ()=>{
+    const { queued, failed, invoicesPending } = _lastSyncCounts;
+    const pending = queued + invoicesPending;
+    const lines = ['ERP Sync Status'];
+    if(pending === 0 && failed === 0){
+      lines.push('All sales synced.');
+    } else {
+      if(queued > 0)  lines.push(`Queued: ${queued} sale(s) waiting to sync`);
+      if(invoicesPending > 0) lines.push(`Invoices pending: ${invoicesPending}`);
+      if(failed > 0)  lines.push(`Failed: ${failed} sale(s) — check ERP connection`);
+    }
+    alert(lines.join('\n'));
+  }); }
   if(settingsBtn&&menuOverlay){ settingsBtn.addEventListener('click',()=>{ showMenu(); }); }
   if(menuClose&&menuOverlay){ menuClose.addEventListener('click',()=>{ menuOverlay.style.display='none'; }); }
   if(openSettingsBtn){ openSettingsBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView){ settingsView.style.display='block'; populateSettingsForm(); } }); }
@@ -3289,7 +3316,17 @@ function renderBrowseBrands(){
   list.forEach(name=>{
     const c=document.createElement('div');
     c.className='col';
-    c.innerHTML=`<div class="product-card browse-card"><div class="browse-card-title">${name}</div><div class="browse-card-meta">Tap to view groups</div></div>`;
+    const card=document.createElement('div');
+    card.className='product-card browse-card';
+    const title=document.createElement('div');
+    title.className='browse-card-title';
+    title.textContent=name;
+    const meta=document.createElement('div');
+    meta.className='browse-card-meta';
+    meta.textContent='Tap to view groups';
+    card.appendChild(title);
+    card.appendChild(meta);
+    c.appendChild(card);
     c.addEventListener('click', ()=>{
       selectedBrand = name;
       setSearchStage('items');
@@ -3346,9 +3383,26 @@ function renderSearchItems(){
     const c=document.createElement('div');
     c.className='col';
     const thumb = it.image ? thumbUrl(it.image, 180, 180) : '';
-    const imgStyle=thumb?`style="background-image:url('${thumb}')"`:'';
-    const priceHtml=formatItemPrice(it);
-    c.innerHTML=`<div class="product-card" onclick='selectProduct("${it.name}")'><div class="product-img" ${imgStyle}></div><div class="fw-semibold">${it.item_name}</div><div class="text-muted small">${it.brand||'Unbranded'}</div><div class="mt-1">${priceHtml}</div></div>`;
+    const card=document.createElement('div');
+    card.className='product-card';
+    card.addEventListener('click', ()=>selectProduct(it.name));
+    const img=document.createElement('div');
+    img.className='product-img';
+    if(thumb) img.style.backgroundImage=`url('${thumb}')`;
+    const nameEl=document.createElement('div');
+    nameEl.className='fw-semibold';
+    nameEl.textContent=it.item_name||'';
+    const brandEl=document.createElement('div');
+    brandEl.className='text-muted small';
+    brandEl.textContent=it.brand||'Unbranded';
+    const priceEl=document.createElement('div');
+    priceEl.className='mt-1';
+    priceEl.textContent=formatItemPrice(it);
+    card.appendChild(img);
+    card.appendChild(nameEl);
+    card.appendChild(brandEl);
+    card.appendChild(priceEl);
+    c.appendChild(card);
     g.appendChild(c);
   });
 }
@@ -4680,8 +4734,8 @@ async function printFloatReceipt(info) {
     const payload = decorateWithReceiptLayout(lines.join('\n'), info);
     const ok = await sendTextToReceiptAgent(payload, { line_feeds: 5 });
     if(!ok) throw new Error('Receipt agent not ready');
-  }catch(err){
-    err('float print failed', err);
+  }catch(e){
+    err('float print failed', e);
     alert('Failed to print float receipt.');
   }
 }
