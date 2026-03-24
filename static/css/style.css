@@ -56,6 +56,9 @@
 .product-panel {
     margin-top: 0.5rem;
 }
+.recent-items-card.recent-empty { height: auto !important; min-height: 0 !important; }
+.recent-items-card.recent-empty .card-body { min-height: 0 !important; gap: 0.25rem; }
+.recent-items-card.recent-empty .recent-sales-list { min-height: 0 !important; }
 .recent-items-card .card-body {
     display: flex;
     flex-direction: column;
@@ -106,6 +109,8 @@
 #cartCard { position: sticky; top: 20px; max-height: calc(100vh - 40px); display: flex; flex-direction: column; }
 #cartCard .card-body { display: flex; flex-direction: column; min-height: 0; }
 #cartItems { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.cart-empty-hint { color: #9ca3af; font-size: 0.85rem; text-align: center; padding: 1.5rem 1rem; margin: 0; }
+.img-placeholder { font-size: 2rem; display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; position: absolute; inset: 0; }
 #cartActions.cart-actions { position: sticky; bottom: 0; background: #ffffff; padding-top: 8px; }
 #cartItems.limited { max-height: 50vh; }
 .cart-item {
@@ -432,25 +437,47 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     -webkit-backdrop-filter: blur(10px);
     backdrop-filter: blur(10px);
     display: none;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
     z-index: 2000;
+    overflow-y: auto;          /* overlay scrolls, not the page body */
+    overflow-x: hidden;
+    padding: 10px 8px;         /* breathing room from viewport edges */
+}
+/* EUR overlay — standalone flex-column, does NOT rely on search-overlay's
+   align-items.  The ID selector wins over .search-overlay so we can safely
+   override display, flex-direction and padding here. */
+#eurConverterOverlay {
+    flex-direction: column;   /* when JS sets display:flex, this makes it a column */
+    align-items: stretch;     /* modal fills full width of overlay */
+    justify-content: flex-start;
+    padding: 0;               /* no outer padding — inner modal has its own */
+    overflow: hidden;         /* prevent scroll-position accumulation between opens */
 }
 .eur-overlay-modal {
-    width: min(900px, 95vw);
-    max-height: 84vh;
-    overflow-y: auto;
-    padding: 18px clamp(12px, 3vw, 24px);
+    width: min(900px, 100vw);
+    height: 100vh;
+    max-height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    padding: 14px clamp(12px, 3vw, 24px);
+    margin: 0 auto;           /* horizontal centering inside the column overlay */
 }
+.eur-overlay-modal > .d-flex { flex-shrink: 0; }   /* header row fixed height */
 .eur-overlay-grid {
+    flex: 1 1 auto;
+    min-height: 0;
     display: grid;
-    grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr);
+    grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
     gap: 14px;
     align-items: flex-start;
+    overflow: hidden;
 }
 @media (max-width: 992px) {
     .eur-overlay-grid {
         grid-template-columns: 1fr;
+        overflow-y: auto;
     }
 }
 .eur-overlay-left,
@@ -458,9 +485,10 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     display: flex;
     flex-direction: column;
     gap: 10px;
+    min-height: 0;
 }
 .eur-overlay-right {
-    max-height: calc(84vh - 120px);
+    height: 100%;
     overflow-y: auto;
     padding-right: 4px;
 }
@@ -600,9 +628,9 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 .eur-diff-card {
     border: 1px dashed rgba(0,0,0,0.08);
     border-radius: 10px;
-    padding: 10px 12px;
+    padding: 6px 10px;
     margin-bottom: 8px;
-    min-height: 64px;
+    min-height: 44px;
     background: #fefefe;
 }
 .eur-diff-status {
@@ -629,7 +657,7 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     border-radius: 12px;
     padding: clamp(12px, 3vw, 16px);
     width: clamp(320px, 92vw, 1100px);
-    max-height: 88vh;
+    max-height: calc(100vh - 20px);
     overflow-y: auto;
     box-shadow: 0 10px 30px rgba(0,0,0,0.2);
     display: flex;
@@ -637,8 +665,11 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 }
 .checkout-modal {
     width: clamp(320px, 95vw, 1200px);
-    max-height: 88vh;
-    overflow-y: auto;
+    max-height: calc(100vh - 20px);   /* fill viewport with 10px padding each side */
+    height: calc(100vh - 20px);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 /* Receipt modal tweaks */
 .receipt-modal { width: clamp(280px, 95vw, 600px); }
@@ -769,16 +800,34 @@ body.dark-mode .text-muted,
 body.dark-mode .form-text { color: #adb5bd !important; }
 body.dark-mode a { color: #9ec5fe; }
 body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2a2a2a; }
-/* Ensure right column stretches to modal height */
-.checkout-modal .row { min-height: 0; }
-.checkout-modal .col-lg-5 { display: flex; flex-direction: column; }
-.checkout-modal .tender-panel { 
-    flex: 1; 
-    display: flex; 
-    flex-direction: column; 
-    font-size: clamp(0.9rem, 2vw, 1rem);
+/* Checkout modal flex layout — no-scroll, internal scrolling only */
+.checkout-modal > .d-flex { flex-shrink: 0; }       /* header row never shrinks */
+.checkout-modal > .row {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+}
+.checkout-modal .col-lg-7 {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+/* Cart items area is the only scrollable part */
+#checkoutCart { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* Applied payments list: cap height so it doesn't crowd cart */
+.applied-payments-list { max-height: clamp(80px, 15vh, 180px); overflow-y: auto; }
+/* Tender type + applied payments: always visible, no scroll */
+.checkout-modal .col-lg-7 > .mt-3 { flex-shrink: 0; overflow: hidden; }
+.checkout-modal .col-lg-5 { display: flex; flex-direction: column; overflow: hidden; }
+.checkout-modal .tender-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
+    font-size: clamp(0.9rem, 2vw, 1rem);
 }
 
 /* Responsive layout for 4:3 aspect ratio */
@@ -801,7 +850,7 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 }
 .checkout-cart .checkout-item {
     display: grid;
-    grid-template-columns: 64px 1fr auto;
+    grid-template-columns: 64px 1fr auto auto;
     gap: 10px;
     align-items: center;
     padding: 8px 0;
@@ -815,6 +864,14 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 .checkout-item .price { font-weight: 600; text-align: right; }
 .checkout-item.refund .name { color: #c92a2a; }
 .checkout-item.refund .price { color: #c92a2a; }
+.checkout-refund-btn {
+    font-size: 0.72rem; font-weight: 600; padding: 3px 8px; border-radius: 12px;
+    border: 1px solid #dee2e6; background: #f8f9fa; color: #6c757d; cursor: pointer;
+    white-space: nowrap; transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.checkout-refund-btn:hover { background: #fff3cd; border-color: #ffc107; color: #664d03; }
+.checkout-refund-btn.active { background: #c92a2a; border-color: #c92a2a; color: #fff; }
+.checkout-refund-btn.active:hover { background: #a61e1e; }
 .tender-btn { background: #f1f3f5; border: 1px solid #dee2e6; }
 .tender-btn.active { background: #0d6efd; color: #fff; border-color: #0d6efd; }
 .tender-grid {
@@ -912,7 +969,13 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     border-color: #ffa8a8;
 }
 .search-modal #searchGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(clamp(130px, 18vw, 200px), 1fr));
+    gap: 12px;
     overflow: auto;
+}
+.search-modal #searchGrid .search-grid-full {
+    grid-column: 1 / -1;
 }
 .search-modal #searchGrid.search-grid-table {
     display: block;
@@ -1131,16 +1194,6 @@ body.dark-mode .search-row.active { background: #1b2a3d; }
     }
 }
 
-/* Search grid responsive sizing */
-.search-modal #searchGrid {
-    overflow: auto;
-}
-
-@media (max-aspect-ratio: 16 / 12) {
-    .search-modal #searchGrid {
-        grid-template-columns: repeat(auto-fill, minmax(clamp(100px, 20vw, 180px), 1fr)) !important;
-    }
-}
 .action-footer {
     position: fixed;
     left: 0;
@@ -1190,6 +1243,38 @@ body.dark-mode .search-row.active { background: #1b2a3d; }
     min-height: clamp(32px, 5vh, 40px);
     font-size: clamp(0.8rem, 1.5vw, 0.9rem);
     padding: 0 clamp(10px, 2vw, 14px);
+  }
+
+  /* Topbar: right section scrolls horizontally so all buttons remain accessible */
+  .app-topbar .container-fluid > .d-flex:last-child {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap;
+    gap: 8px !important;
+    scrollbar-width: none;
+    min-width: 0;
+    max-width: calc(100vw - 68px);
+    padding-right: 0.5rem;
+  }
+  .app-topbar .container-fluid > .d-flex:last-child::-webkit-scrollbar { display: none; }
+
+  /* Narrow the customer select to free up space */
+  .app-topbar .customer-select {
+    max-width: 120px !important;
+    min-width: 80px !important;
+  }
+
+  /* Shorten "Return by Receipt" label — show just the icon character */
+  #returnFromReceiptBtn.return-cta {
+    font-size: 0;
+    width: 36px;
+    padding: 0;
+    text-align: center;
+  }
+  #returnFromReceiptBtn.return-cta::before {
+    content: '↩';
+    font-size: 1.1rem;
+    display: inline-block;
   }
 }
 
@@ -1274,4 +1359,100 @@ body.dark-mode .snowflake {
         transform: translateX(-50%);
     }
 }
+
+/* ── Layaway ─────────────────────────────────────────────────────────────── */
+
+/* Footer Layaway Store button badge */
+.layaway-store-btn { position: relative; }
+.layaway-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #dc3545;
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  line-height: 1;
+  vertical-align: middle;
+  margin-left: 3px;
+}
+
+/* Layaway modals (customer name + payment) */
+.lay-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lay-modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 28px 32px;
+  width: min(440px, calc(100vw - 32px));
+  box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+}
+body.dark-mode .lay-modal { background: #1e1e2e; color: #e0e0e0; }
+.lay-modal-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.lay-modal-icon { font-size: 1.5rem; }
+.lay-modal-title { font-size: 1.1rem; font-weight: 700; }
+.lay-modal-hint { font-size: 0.85rem; color: #6c757d; margin-bottom: 16px; }
+.lay-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
+
+/* Put on Layaway button in checkout */
+#putOnLayawayBtn { font-size: 0.9rem; }
+
+/* Layaway store overlay */
+.layaway-store-modal { max-width: 680px; width: 100%; }
+.layaway-store-list { max-height: calc(80vh - 120px); overflow-y: auto; }
+.layaway-store-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(0,0,0,0.07);
+  cursor: pointer;
+  border-radius: 6px;
+  transition: background 0.12s;
+}
+.layaway-store-row:hover { background: #f8f9fa; }
+.layaway-store-row.lay-expired { background: #fff5f5; }
+body.dark-mode .layaway-store-row:hover { background: #2a2a3e; }
+body.dark-mode .layaway-store-row.lay-expired { background: #2e1a1a; }
+.lay-row-id { font-family: monospace; font-weight: 700; font-size: 0.9rem; white-space: nowrap; }
+.lay-row-info { min-width: 0; }
+.lay-row-items { font-size: 0.82rem; }
+.lay-row-expiry { font-size: 0.75rem; }
+.lay-row-amounts { text-align: right; white-space: nowrap; }
+.lay-row-total { font-size: 0.75rem; }
+.lay-row-balance { font-size: 0.88rem; }
+.lay-row-status { font-size: 0.7rem; white-space: nowrap; }
+
+/* Layaway detail overlay */
+.layaway-detail-modal { max-width: 620px; width: 100%; }
+.lay-detail-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  padding: 12px;
+}
+body.dark-mode .lay-detail-summary { background: #252535; }
+.lay-detail-stat { text-align: center; }
+.lay-stat-label { font-size: 0.72rem; text-transform: uppercase; color: #6c757d; font-weight: 600; margin-bottom: 2px; }
+.lay-stat-val { font-size: 1.05rem; font-weight: 700; }
+.lay-items-table { font-size: 0.83rem; }
+.lay-pay-history { list-style: none; padding: 0; margin: 0; font-size: 0.82rem; }
+.lay-pay-history li { padding: 4px 0; border-bottom: 1px solid rgba(0,0,0,0.06); display: flex; gap: 8px; align-items: center; }
+.lay-pay-date { color: #6c757d; white-space: nowrap; }
+.lay-pay-amount { margin-left: auto; font-weight: 600; }
+.lay-detail-actions { border-top: 1px solid rgba(0,0,0,0.1); padding-top: 14px; }
 

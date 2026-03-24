@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 # POS scaffold: SQLite + JSON queue + ERPNext sync + NDJSON backups
-import os, sys, json, uuid, sqlite3, time, argparse, datetime as dt, ssl
+import os, sys, json, uuid, sqlite3, time, argparse, datetime as dt, ssl, threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Set, Tuple
 import urllib.request
@@ -1793,6 +1793,110 @@ def pull_item_barcodes_incremental(conn: sqlite3.Connection, limit: int = 500):
     conn.commit()
     return len(data)
 
+def pull_deleted_items(conn: sqlite3.Connection, limit: int = 500) -> int:
+    """Incremental: fetch Deleted Document records for Item and mark local rows inactive.
+
+    Uses a cursor on the Deleted Document doctype's creation timestamp so only
+    newly-deleted items are checked on each sync cycle. Fast — one API call per
+    batch of deletions, returns nothing when no items have been deleted since
+    last run.
+
+    Returns count of local items deactivated.
+    """
+    last_mod, last_name = _cursor_get(conn, "DeletedDocument:Item")
+    filters: List[Any] = [["deleted_doctype", "=", "Item"]]
+    if last_mod:
+        filters.append(["creation", ">=", last_mod])
+    params = {
+        "fields": json.dumps(["name", "deleted_name", "creation"]),
+        "filters": json.dumps(filters),
+        "limit_page_length": limit,
+        "order_by": "creation asc, name asc",
+    }
+    try:
+        data = _erp_get("/api/resource/Deleted Document", params).get("data", [])
+    except Exception as exc:
+        print(f"[sync] pull_deleted_items skipped (Deleted Document unavailable): {exc}", file=sys.stderr)
+        return 0
+    if not data:
+        return 0
+    marked = 0
+    for row in data:
+        deleted_name = (row.get("deleted_name") or "").strip()
+        if not deleted_name:
+            continue
+        deletion_ts = row.get("creation") or ""
+        # Guard: if the local item's modified_utc is newer than the deletion
+        # timestamp, the same item_id was re-created in ERPNext after being
+        # deleted (e.g. re-import with the same code). Skip — the local row
+        # already represents the new item.
+        local = conn.execute(
+            "SELECT modified_utc FROM items WHERE item_id=?", (deleted_name,)
+        ).fetchone()
+        if local and local["modified_utc"] and local["modified_utc"] >= deletion_ts:
+            continue
+        result = conn.execute(
+            "UPDATE items SET active=0 WHERE item_id=? AND active=1",
+            (deleted_name,)
+        )
+        if result.rowcount:
+            marked += 1
+    conn.commit()
+    _cursor_set(conn, "DeletedDocument:Item", data[-1]["creation"], data[-1]["name"])
+    if marked:
+        print(f"[sync] pull_deleted_items: deactivated {marked} item(s)")
+    return marked
+
+
+def reconcile_items_against_erp(conn: sqlite3.Connection, page_size: int = 1000) -> int:
+    """Name-only reconciliation: fetch every Item name from ERPNext and deactivate
+    any local active items that no longer exist there.
+
+    Much lighter than a full sync — only the 'name' field is fetched per page
+    (~10 API calls for 10 000 items vs. 50+ for a full sync). Intended to run
+    once at the end of full_sync_from_erp as a safety net for items that were
+    hard-deleted without leaving a Deleted Document record.
+
+    Returns count of items deactivated. Aborts entirely if ERPNext returns an
+    empty set to prevent mass-deactivation on a network failure.
+    """
+    erp_names: Set[str] = set()
+    offset = 0
+    while True:
+        params = {
+            "fields": json.dumps(["name"]),
+            "limit_page_length": page_size,
+            "limit_start": offset,
+        }
+        try:
+            data = _erp_get("/api/resource/Item", params).get("data", [])
+        except Exception as exc:
+            print(f"[sync] reconcile_items_against_erp aborted at offset {offset}: {exc}", file=sys.stderr)
+            return 0  # partial reconciliation would wrongly deactivate items
+        for row in data:
+            n = (row.get("name") or "").strip()
+            if n:
+                erp_names.add(n)
+        if len(data) < page_size:
+            break
+        offset += page_size
+
+    if not erp_names:
+        print("[sync] reconcile_items_against_erp: ERP returned 0 items — aborting to avoid mass deactivation", file=sys.stderr)
+        return 0
+
+    local_rows = conn.execute("SELECT item_id FROM items WHERE active=1").fetchall()
+    to_deactivate = [r["item_id"] for r in local_rows if r["item_id"] not in erp_names]
+    if not to_deactivate:
+        return 0
+
+    for item_id in to_deactivate:
+        conn.execute("UPDATE items SET active=0 WHERE item_id=?", (item_id,))
+    conn.commit()
+    print(f"[sync] reconcile_items_against_erp: deactivated {len(to_deactivate)} item(s) not found in ERPNext")
+    return len(to_deactivate)
+
+
 def sync_cycle(conn: sqlite3.Connection, warehouse: str = "Shop", price_list: Optional[str] = None, loops: int = 1):
     """Run a bounded number of incremental pulls (useful from a cron/loop)."""
     for _ in range(loops):
@@ -1803,7 +1907,8 @@ def sync_cycle(conn: sqlite3.Connection, warehouse: str = "Shop", price_list: Op
         n4 = 0
         if price_list:
             n4 = pull_item_prices_incremental(conn, price_list=price_list)
-        print(f"Pulled: Items={n1}, AttrDefs={n_attr_defs}, Barcodes={n2}, Bins={n3}, Prices={n4}")
+        n_deleted = pull_deleted_items(conn)
+        print(f"Pulled: Items={n1}, AttrDefs={n_attr_defs}, Barcodes={n2}, Bins={n3}, Prices={n4}, Deleted={n_deleted}")
         if (n1 + n_attr_defs + n2 + n3 + n4) == 0:
             break
 
@@ -1901,6 +2006,12 @@ def full_sync_from_erp(
                 _progress("prices", pulled, totals["prices"])
                 if pulled < price_limit:
                     break
+
+        # After all upserts: reconcile local items against the full ERPNext item list
+        # to deactivate anything that was hard-deleted since the last full sync.
+        n_reconciled = reconcile_items_against_erp(conn)
+        totals["reconciled"] = n_reconciled
+        _progress("reconcile", n_reconciled, n_reconciled)
         return totals
     finally:
         _FULL_SYNC_FAST = False
@@ -2290,5 +2401,352 @@ def record_sale_with_fx(conn: sqlite3.Connection, sale: Dict[str, Any], fx_metad
             conn.commit()
         except Exception as e:
             print(f"Failed to record FX metadata for sale {sale_id}: {e}", file=sys.stderr)
-    
+
     return sale_id
+
+
+# ── Layaway ERPNext helpers ────────────────────────────────────────────────────
+
+# ERPDash is a separate Flask server from Frappe/ERPNext.
+# Set LAYAWAY_ERP_URL to your ERPDash base URL (e.g., https://erpdash.example.com).
+# Falls back to ERP_BASE if not set (works when ERPDash and ERPNext share a domain).
+# Set LAYAWAY_ERP_KEY in env to override; defaults to POS_RECEIPT_KEY.
+LAYAWAY_ERP_URL = os.environ.get("LAYAWAY_ERP_URL", "")
+LAYAWAY_ERP_KEY = os.environ.get("LAYAWAY_ERP_KEY") or os.environ.get("POS_RECEIPT_KEY", "")
+
+
+def _lay_base() -> str:
+    """Return the base URL for ERPDash layaway requests."""
+    return (LAYAWAY_ERP_URL or ERP_BASE or "").rstrip("/")
+
+
+def _lay_headers() -> Dict[str, str]:
+    h = {"Content-Type": "application/json", "Accept": "application/json"}
+    if LAYAWAY_ERP_KEY:
+        h["X-POS-KEY"] = LAYAWAY_ERP_KEY
+    return h
+
+
+def _lay_request(path: str, payload: Optional[Dict[str, Any]] = None, method: str = "POST") -> Dict[str, Any]:
+    base = _lay_base()
+    if not base:
+        return {"ok": True, "dry_run": True}
+    url = base + path
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=_lay_headers())
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"ERPDash layaway HTTP {exc.code}: {body[:400]}") from exc
+
+
+def erp_layaway_create(layaway_id: str, customer_tag: str, items: List[Dict[str, Any]], total: float) -> Dict[str, Any]:
+    return _lay_request("/api/layaway/create", {
+        "layaway_ref": layaway_id,
+        "customer_name": customer_tag,   # ERPDash expects customer_name
+        "items": items,
+        "grand_total": total,
+    })
+
+
+def erp_layaway_deposit(layaway_id: str, amount: float, method: str, reference_no: Optional[str] = None) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "amount": amount,
+        "mode_of_payment": method,       # ERPDash expects mode_of_payment
+    }
+    if reference_no:
+        body["reference_no"] = reference_no
+    return _lay_request(f"/api/layaway/{layaway_id}/deposit", body)
+
+
+def erp_layaway_complete(layaway_id: str) -> Dict[str, Any]:
+    return _lay_request(f"/api/layaway/{layaway_id}/complete", {})
+
+
+def erp_layaway_cancel(layaway_id: str) -> Dict[str, Any]:
+    return _lay_request(f"/api/layaway/{layaway_id}/cancel", {})
+
+
+def erp_layaway_amend(layaway_id: str, items: List[Dict[str, Any]], grand_total: float) -> Dict[str, Any]:
+    return _lay_request(f"/api/layaway/{layaway_id}/amend", {
+        "items": items,
+        "grand_total": grand_total,
+    })
+
+
+def erp_layaway_snapshot() -> Dict[str, Any]:
+    """Pull full layaway snapshot from ERPDash (GET /api/layaway/snapshot).
+    Returns dict with 'layaways' list or raises RuntimeError."""
+    return _lay_request("/api/layaway/snapshot", method="GET")
+
+
+_LAYAWAY_MAX_ATTEMPTS = 5
+_layaway_push_lock = threading.Lock()
+# Set to True when _schedule_layaway_sync() is called while a sync is already running.
+# The running sync will do a follow-up pass after it finishes so nothing is lost.
+_layaway_rerun_needed = False
+
+
+def _classify_layaway_error(kind: str, error_msg: str):
+    """
+    Classify an ERPDash error as terminal or retryable.
+
+    Returns a tuple: (is_terminal: bool, action: str)
+    action is one of: 'drop', 'mark_completed', 'mark_cancelled', 'cancel_all_ref'
+    'drop'           — delete outbox entry, no local status change
+    'mark_completed' — delete outbox entry, set layaway status='completed'
+    'mark_cancelled' — delete outbox entry, set layaway status='cancelled', drop ALL entries for ref
+    """
+    msg = error_msg.lower()
+
+    if kind == "layaway_create":
+        # 409 "already exists" — previous attempt succeeded, SO is in ERP
+        if "already exists" in msg or "409" in msg:
+            return True, "drop"
+
+    if kind == "layaway_payment":
+        # 409 "Fully Billed" — SO has a full invoice, layaway is complete on ERP side
+        if "fully billed" in msg:
+            return True, "mark_completed"
+        # 409 "already fully paid via advances" — the PE was actually submitted in ERPNext
+        # but the HTTP response was lost (e.g. 504 gateway timeout on the submit call).
+        # The money is already recorded; drop this retry to avoid a duplicate PE.
+        if "fully paid via advances" in msg:
+            return True, "drop"
+        # 400 "exceeds outstanding balance" — amount was already capped on POS side so this
+        # means ERPNext's record genuinely has less outstanding (e.g. a prior PE that the POS
+        # didn't know about). Drop to avoid infinite retries on a mis-matched amount.
+        if "exceeds outstanding balance" in msg:
+            return True, "drop"
+        # 409 "not submitted" / "not in submitted state" — SO was cancelled
+        if "not submitted" in msg or "not in submitted state" in msg:
+            return True, "mark_cancelled"
+
+    if kind == "layaway_complete":
+        # 409 "no items" or "Fully Billed" — already billed, treat as complete
+        if "no items" in msg or "fully billed" in msg or "409" in msg:
+            return True, "mark_completed"
+        # 409 "not submitted" — SO cancelled before we could complete it
+        if "not submitted" in msg or "not in submitted state" in msg:
+            return True, "mark_cancelled"
+
+    if kind == "layaway_cancel":
+        # 409 "not in submitted state" / "already cancelled" — SO already gone
+        if "not submitted" in msg or "not in submitted state" in msg or "already cancel" in msg:
+            return True, "mark_cancelled"
+
+    if kind == "layaway_amend":
+        # 409 "not submitted" — SO cancelled, nothing to amend
+        if "not submitted" in msg or "not in submitted state" in msg:
+            return True, "mark_cancelled"
+
+    return False, "retry"
+
+
+def push_layaway_outbox(conn: sqlite3.Connection, limit: int = 20) -> None:
+    """
+    Process queued layaway operations with strict per-ref sequencing.
+
+    Rules enforced:
+    - Only one concurrent push at a time (module-level lock).
+    - Per ref: create → deposits (one at a time) → complete.
+      A later step is deferred if an earlier step for the same ref is still pending.
+    - 503 responses are retried immediately up to 3 times with a 2-second pause.
+    - When any entry for a ref fails, all later entries for that ref are skipped this pass.
+    - If _schedule_layaway_sync() was called while this sync was running (concurrent skip),
+      _layaway_rerun_needed is set and we do a follow-up pass after the current one finishes
+      so no queued entries are stranded waiting for the idle loop.
+    """
+    global _layaway_rerun_needed
+    base = _lay_base()
+    print(f"[layaway-sync] push_layaway_outbox called. Target base URL: {base!r}", flush=True)
+    if not base:
+        print("[layaway-sync] No target URL configured — skipping", flush=True)
+        return
+
+    if not _layaway_push_lock.acquire(blocking=False):
+        print("[layaway-sync] Concurrent sync detected — will rerun after current sync finishes", flush=True)
+        _layaway_rerun_needed = True
+        return
+    try:
+        _do_push_layaway_outbox(conn, limit)
+        # If new entries were queued while we were running, process them now
+        # rather than waiting for the idle loop (which only runs between cashier sessions).
+        while _layaway_rerun_needed:
+            _layaway_rerun_needed = False
+            print("[layaway-sync] Rerun triggered — processing entries queued during previous pass", flush=True)
+            _do_push_layaway_outbox(conn, limit)
+    finally:
+        _layaway_push_lock.release()
+
+
+def _do_push_layaway_outbox(conn: sqlite3.Connection, limit: int) -> None:
+    rows = conn.execute("""
+        SELECT id, kind, ref_id, payload_json, attempts FROM outbox
+        WHERE kind LIKE 'layaway_%'
+        ORDER BY id ASC LIMIT ?
+    """, (limit,)).fetchall()
+
+    print(f"[layaway-sync] {len(rows)} pending outbox entries", flush=True)
+    if not rows:
+        return
+
+    # Track which refs are blocked this pass (a failed entry blocks all later entries for that ref)
+    blocked_refs: set = set()
+
+    # Build pending index: ref -> sorted list of (id, kind) still in the fetched set
+    # Used to enforce sequencing: don't fire complete if deposits are still pending, etc.
+    pending: Dict[str, List[tuple]] = {}
+    for r in rows:
+        pending.setdefault(r["ref_id"], []).append((r["id"], r["kind"]))
+
+    # Ordering weight: lower = must come first
+    _order = {"layaway_create": 0, "layaway_payment": 1, "layaway_complete": 2,
+              "layaway_cancel": 2, "layaway_amend": 1}
+
+    for r in rows:
+        oid, kind, ref, payload_raw, attempts = r["id"], r["kind"], r["ref_id"], r["payload_json"], r["attempts"]
+        payload = json.loads(payload_raw)
+
+        # Skip if an earlier entry for this ref already failed this pass
+        if ref in blocked_refs:
+            print(f"[layaway-sync] DEFER (blocked): {kind} {ref} id={oid}", flush=True)
+            continue
+
+        # Sequential constraint: don't fire this entry if a lower-order entry for the same ref
+        # is still pending (not yet processed in this pass)
+        my_order = _order.get(kind, 99)
+        earlier_pending = [
+            (pid, pkind) for pid, pkind in pending.get(ref, [])
+            if pid < oid and _order.get(pkind, 99) < my_order
+        ]
+        if earlier_pending:
+            print(f"[layaway-sync] DEFER (sequencing): {kind} {ref} id={oid} — waiting for {[p[1] for p in earlier_pending]}", flush=True)
+            continue
+
+        print(f"[layaway-sync] Processing outbox id={oid} kind={kind} ref={ref} attempts={attempts}", flush=True)
+
+        # Drop entries past the retry cap
+        if attempts >= _LAYAWAY_MAX_ATTEMPTS:
+            print(f"[layaway-sync] SKIP: {kind} {ref} — exceeded {_LAYAWAY_MAX_ATTEMPTS} attempts", file=sys.stderr, flush=True)
+            conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
+            conn.commit()
+            pending[ref] = [(pid, pk) for pid, pk in pending.get(ref, []) if pid != oid]
+            continue
+
+        # --- Execute with 503 immediate-retry logic ---
+        last_exc: Optional[Exception] = None
+        success = False
+
+        for attempt_n in range(3):
+            try:
+                if kind == "layaway_create":
+                    resp = erp_layaway_create(
+                        payload["layaway_id"],
+                        payload["customer_tag"],
+                        payload["items"],
+                        payload["total"],
+                    )
+                    so_name = resp.get("so_name") or resp.get("data", {}).get("so_name")
+                    erp_customer = resp.get("customer") or resp.get("data", {}).get("customer")
+                    conn.execute(
+                        "UPDATE layaways SET erp_so_name=COALESCE(?,erp_so_name), erp_customer=COALESCE(?,erp_customer), sync_status='synced' WHERE layaway_id=?",
+                        (so_name, erp_customer, ref)
+                    )
+                elif kind == "layaway_payment":
+                    ref_no = payload.get("reference_no") or payload.get("payment_id")
+                    resp = erp_layaway_deposit(ref, payload["amount"], payload["method"], reference_no=ref_no)
+                    pe_name = resp.get("payment_entry") or resp.get("data", {}).get("payment_entry")
+                    conn.execute(
+                        "UPDATE layaway_payments SET erp_pe_name=COALESCE(?,erp_pe_name), sync_status='synced' WHERE payment_id=?",
+                        (pe_name, payload["payment_id"])
+                    )
+                    # If a layaway_complete is pending for this ref in the current batch,
+                    # pause briefly so ERPNext has time to update advance_paid on the SO
+                    # before the Sales Invoice is created. Without this, allocate_advances_automatically
+                    # may miss the just-submitted PE, leaving the invoice with non-zero outstanding.
+                    has_pending_complete = any(
+                        pk == "layaway_complete"
+                        for pid, pk in pending.get(ref, [])
+                        if pid != oid
+                    )
+                    if has_pending_complete:
+                        _complete_delay = int(os.environ.get("LAYAWAY_COMPLETE_DELAY", "4"))
+                        print(f"[layaway-sync] Waiting {_complete_delay}s before layaway_complete for {ref} "
+                              "to allow ERPNext to update advance_paid ...", flush=True)
+                        time.sleep(_complete_delay)
+                elif kind == "layaway_complete":
+                    erp_layaway_complete(ref)
+                    conn.execute("UPDATE layaways SET sync_status='synced' WHERE layaway_id=?", (ref,))
+                elif kind == "layaway_cancel":
+                    erp_layaway_cancel(ref)
+                    conn.execute("UPDATE layaways SET sync_status='synced' WHERE layaway_id=?", (ref,))
+                elif kind == "layaway_amend":
+                    erp_layaway_amend(ref, payload["items"], payload["total"])
+                    conn.execute("UPDATE layaways SET sync_status='synced' WHERE layaway_id=?", (ref,))
+                else:
+                    print(f"[layaway-sync] Unknown kind {kind!r} id={oid} — dropping", flush=True)
+                    conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
+                    conn.commit()
+                    pending[ref] = [(pid, pk) for pid, pk in pending.get(ref, []) if pid != oid]
+                    success = True
+                    break
+
+                conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
+                conn.commit()
+                print(f"[layaway-sync] OK: {kind} {ref}", flush=True)
+                pending[ref] = [(pid, pk) for pid, pk in pending.get(ref, []) if pid != oid]
+                success = True
+                break
+
+            except Exception as exc:
+                err_str = str(exc)
+                is_503 = "503" in err_str
+                if is_503 and attempt_n < 2:
+                    print(f"[layaway-sync] 503 on {kind} {ref}, retry {attempt_n + 1}/3 in 2s ...", flush=True)
+                    time.sleep(2)
+                    last_exc = exc
+                    continue
+                last_exc = exc
+                break
+
+        if success:
+            continue
+
+        # Handle failure
+        err_str = str(last_exc)
+        is_terminal, action = _classify_layaway_error(kind, err_str)
+
+        if is_terminal:
+            print(f"[layaway-sync] TERMINAL: {kind} {ref} — {err_str} → action={action}", file=sys.stderr, flush=True)
+            conn.execute("DELETE FROM outbox WHERE id=?", (oid,))
+            if action == "mark_completed":
+                conn.execute(
+                    "UPDATE layaways SET status='completed', sync_status='synced' WHERE layaway_id=? AND status NOT IN ('completed','cancelled')",
+                    (ref,)
+                )
+            elif action == "mark_cancelled":
+                conn.execute("DELETE FROM outbox WHERE kind LIKE 'layaway_%' AND ref_id=?", (ref,))
+                conn.execute(
+                    "UPDATE layaways SET status='cancelled', sync_status='synced' WHERE layaway_id=? AND status != 'cancelled'",
+                    (ref,)
+                )
+                pending[ref] = []  # All entries for this ref are gone
+                blocked_refs.add(ref)
+            conn.commit()
+            pending[ref] = [(pid, pk) for pid, pk in pending.get(ref, []) if pid != oid]
+        else:
+            conn.execute("UPDATE outbox SET attempts=attempts+1, last_error=? WHERE id=?", (err_str, oid))
+            conn.commit()
+            print(f"[layaway-sync] FAILED: {kind} {ref} — {err_str}", file=sys.stderr, flush=True)
+            # Block all subsequent entries for this ref this pass
+            blocked_refs.add(ref)

@@ -1,0 +1,239 @@
+/* =========================================================
+   Training Wheels — guided cashier onboarding styles
+   Levels:
+     1  Pulsing highlight on next button only
+     2  Level 1 + floating inline hints beside buttons
+     3  Level 2 + guide panel below topbar with full guidance
+   ========================================================= */
+
+/* -------------------------------------------------------
+   Shared: pulsing highlight on the "next action" element
+------------------------------------------------------- */
+.training-highlight {
+  box-shadow: 0 0 0 3px #ffc107, 0 0 14px 6px rgba(255, 193, 7, 0.5) !important;
+  border-radius: 6px;
+  animation: tw-pulse 1.6s ease-in-out infinite;
+  position: relative;
+}
+
+@keyframes tw-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px #ffc107, 0 0 14px 6px rgba(255, 193, 7, 0.5); }
+  50%       { box-shadow: 0 0 0 5px #ffc107, 0 0 24px 10px rgba(255, 193, 7, 0.7); }
+}
+
+/* -------------------------------------------------------
+   Level 2: floating hint pills (positioned by JS)
+------------------------------------------------------- */
+.tw-hint {
+  position: fixed;
+  z-index: 2060;
+  background: #212529;
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.3;
+  padding: 4px 9px;
+  border-radius: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  opacity: 0;
+  transition: opacity 0.18s;
+}
+.tw-hint.tw-visible { opacity: 1; }
+
+/* Arrow variants — tiny triangle pointing toward the target */
+.tw-hint::after {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+/* hint is to the RIGHT of the target → arrow points left */
+.tw-hint.tw-right::after {
+  left: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-right: 5px solid #212529;
+}
+/* hint is to the LEFT of the target → arrow points right */
+.tw-hint.tw-left::after {
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 5px solid #212529;
+}
+/* hint is ABOVE the target → arrow points down */
+.tw-hint.tw-above::after {
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 5px solid #212529;
+}
+/* hint is BELOW the target → arrow points up */
+.tw-hint.tw-below::after {
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 5px solid #212529;
+}
+
+/* -------------------------------------------------------
+   Level 3: Guide panel — appears below the topbar
+   Position (top) is set dynamically by JS.
+------------------------------------------------------- */
+.training-guide-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 108px;   /* sits above action-footer (~92px) with a gap */
+  width: min(360px, calc(100vw - 32px));
+  background: linear-gradient(135deg, #0d6efd 0%, #0a58ca 100%);
+  color: #fff;
+  z-index: 2050;    /* above .search-overlay (2000) */
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  border-radius: 12px;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.2s ease;
+  opacity: 0;
+  pointer-events: none;
+}
+.training-guide-panel.tw-visible {
+  max-height: 420px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tgp-inner {
+  padding: 10px 16px 12px;
+}
+
+.tgp-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.tgp-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.tgp-title {
+  font-weight: 700;
+  font-size: 0.9rem;
+  flex: 1;
+  line-height: 1.3;
+}
+.tgp-step {
+  font-size: 0.68rem;
+  opacity: 0.7;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tgp-close {
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 1.2rem;
+  cursor: pointer;
+  opacity: 0.7;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: opacity 0.15s;
+}
+.tgp-close:hover { opacity: 1; }
+
+.tgp-body {
+  font-size: 0.82rem;
+  line-height: 1.6;
+  opacity: 0.95;
+  margin-bottom: 8px;
+}
+.tgp-body ol {
+  margin: 0;
+  padding-left: 20px;
+}
+.tgp-body li { margin-bottom: 2px; }
+.tgp-body strong { font-weight: 700; color: #fff; }
+.tgp-body em { font-style: italic; opacity: 0.9; }
+
+.tgp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tgp-btn {
+  padding: 5px 12px;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.15s, transform 0.1s;
+  line-height: 1.3;
+}
+.tgp-btn:active { transform: scale(0.97); }
+
+.tgp-btn-primary   { background: #fff;        color: #0d6efd; }
+.tgp-btn-primary:hover { background: #e8f0fe; }
+.tgp-btn-outline   { background: rgba(255,255,255,0.15); color: #fff; border: 1px solid rgba(255,255,255,0.5); }
+.tgp-btn-outline:hover { background: rgba(255,255,255,0.25); }
+.tgp-btn-warning   { background: #ffc107; color: #000; }
+.tgp-btn-warning:hover { background: #ffca2c; }
+
+/* -------------------------------------------------------
+   Topbar badge
+------------------------------------------------------- */
+.training-mode-badge {
+  background: #ffc107;
+  color: #000;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  margin-left: 4px;
+  cursor: default;
+  user-select: none;
+}
+
+/* -------------------------------------------------------
+   Secondary overlays must always sit above checkout overlay
+   (all are .search-overlay z-index:2000; DOM order usually
+   handles this but explicit values make it bulletproof)
+------------------------------------------------------- */
+#voucherOverlay        { z-index: 2008 !important; }
+#eurConverterOverlay   { z-index: 2006 !important; }
+#discountOverlay       { z-index: 2004 !important; }
+#layawayStoreOverlay   { z-index: 2010 !important; }
+#layawayDetailOverlay  { z-index: 2012 !important; }
+#layawayCustomerModal  { z-index: 3000 !important; }
+#layawayPaymentModal   { z-index: 3000 !important; }
+
+/* -------------------------------------------------------
+   Dark mode overrides
+------------------------------------------------------- */
+body.dark-mode .tw-hint {
+  background: #e9ecef;
+  color: #000;
+}
+body.dark-mode .tw-hint.tw-right::after  { border-right-color: #e9ecef; }
+body.dark-mode .tw-hint.tw-left::after   { border-left-color: #e9ecef; }
+body.dark-mode .tw-hint.tw-above::after  { border-top-color: #e9ecef; }
+body.dark-mode .tw-hint.tw-below::after  { border-bottom-color: #e9ecef; }

@@ -262,3 +262,46 @@ CREATE TABLE IF NOT EXISTS sync_cursors (
   last_modified TEXT,              -- server-side ISO timestamp
   last_name     TEXT               -- tiebreaker (docname) to handle equal modified times
 );
+
+-- ── Layaway ──────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS layaways (
+  layaway_id    TEXT PRIMARY KEY,                        -- LAY-XXXXXX
+  customer_tag  TEXT NOT NULL,                           -- display name (back-office only)
+  erp_customer  TEXT,                                    -- ERPNext customer name once created
+  erp_so_name   TEXT,                                    -- ERPNext Sales Order once synced
+  items         TEXT NOT NULL,                           -- JSON: [{item_code,item_name,qty,rate,original_rate}]
+  total         REAL NOT NULL,                           -- agreed total (recalculates when items removed)
+  paid          REAL NOT NULL DEFAULT 0,
+  status        TEXT NOT NULL DEFAULT 'active',          -- active|completed|cancelled|expired
+  created_at    TEXT NOT NULL,
+  expires_at    TEXT NOT NULL,
+  created_by    TEXT,                                    -- cashier code
+  notes         TEXT,
+  sync_status   TEXT NOT NULL DEFAULT 'pending'          -- pending|synced|failed
+);
+
+CREATE TABLE IF NOT EXISTS layaway_payments (
+  payment_id    TEXT PRIMARY KEY,
+  layaway_id    TEXT NOT NULL REFERENCES layaways(layaway_id),
+  paid_at       TEXT NOT NULL,
+  amount        REAL NOT NULL,
+  method        TEXT NOT NULL,                           -- Cash|Card|Voucher
+  cashier_code  TEXT NOT NULL,
+  erp_pe_name   TEXT,                                    -- ERPNext Payment Entry once synced
+  sync_status   TEXT NOT NULL DEFAULT 'pending'
+);
+
+CREATE TABLE IF NOT EXISTS layaway_audit (
+  audit_id      TEXT PRIMARY KEY,
+  layaway_id    TEXT NOT NULL,
+  action        TEXT NOT NULL,   -- created|payment|item_removed|item_collected|extended|cancelled|completed
+  detail        TEXT,            -- JSON snapshot
+  cashier_code  TEXT,
+  actioned_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_layaways_status   ON layaways(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_layaways_cashier  ON layaways(created_by);
+CREATE INDEX IF NOT EXISTS idx_lay_payments_lay  ON layaway_payments(layaway_id);
+CREATE INDEX IF NOT EXISTS idx_lay_audit_lay     ON layaway_audit(layaway_id);

@@ -98,6 +98,7 @@ except ValueError:
 SKIP_BARCODE_SYNC = os.getenv('POS_SKIP_BARCODE_SYNC', '0') == '1'
 POS_PRICE_LIST = os.getenv('POS_PRICE_LIST') or None
 POS_GIFT_VOUCHER_ITEM = os.getenv('POS_GIFT_VOUCHER_ITEM', 'GIFT-VOUCHER')
+POS_PLASTIC_BAG_ITEM = os.getenv('POS_PLASTIC_BAG_ITEM', 'PLASTIC-BAG')
 CASHIER_DOCTYPE = os.getenv('POS_CASHIER_DOCTYPE', 'Cashier')
 CASHIER_CODE_FIELD = os.getenv('POS_CASHIER_CODE_FIELD', 'code')
 CASHIER_NAME_FIELD = os.getenv('POS_CASHIER_NAME_FIELD', 'cashier_name')
@@ -193,6 +194,21 @@ if not RECEIPT_AGENT_URL and RECEIPT_AGENT_HOST and RECEIPT_AGENT_PORT:
 # Force POS to stay in local queue-only mode even when ERP creds exist.
 POS_QUEUE_ONLY = os.getenv('POS_QUEUE_ONLY', '0') == '1'
 
+# Layaway expiry windows (days)
+try:
+    LAYAWAY_ZERO_PAYMENT_DAYS = int(os.getenv('LAYAWAY_ZERO_PAYMENT_DAYS', '7'))
+except ValueError:
+    LAYAWAY_ZERO_PAYMENT_DAYS = 7
+try:
+    LAYAWAY_PAID_DAYS = int(os.getenv('LAYAWAY_PAID_DAYS', '90'))
+except ValueError:
+    LAYAWAY_PAID_DAYS = 90
+# How long to keep completed/cancelled layaways locally before pruning (default 60 days)
+try:
+    LAYAWAY_RETENTION_DAYS = int(os.getenv('LAYAWAY_RETENTION_DAYS', '60'))
+except ValueError:
+    LAYAWAY_RETENTION_DAYS = 60
+
 # Till posting queue configuration
 POS_RECEIPT_KEY = _env_string('POS_RECEIPT_KEY', 'SUPERSECRET123')
 
@@ -207,8 +223,21 @@ def _derive_voucher_forward_url(base_url: Optional[str]) -> Optional[str]:
         return None
     return urlunsplit((parsed.scheme, parsed.netloc, '/api/vouchers/issue', '', ''))
 
-TILL_POST_URL = _env_string('TILL_POST_URL')
-POS_VOUCHER_FORWARD_URL = _env_string('POS_VOUCHER_FORWARD_URL') or _derive_voucher_forward_url(TILL_POST_URL)
+# ERPDASH_URL is the base URL of the ERPDash server (e.g. http://frontend:5000).
+# All ERPDash endpoints are built from it. Set individual overrides to pin specific URLs.
+# If not set, fall back to deriving from TILL_POST_URL (strips the path, keeps scheme+host).
+ERPDASH_URL = (_env_string('ERPDASH_URL') or '').rstrip('/')
+if not ERPDASH_URL:
+    _till_env = _env_string('TILL_POST_URL') or ''
+    if _till_env:
+        try:
+            _p = urlsplit(_till_env)
+            if _p.scheme and _p.netloc:
+                ERPDASH_URL = urlunsplit((_p.scheme, _p.netloc, '', '', ''))
+        except Exception:
+            pass
+TILL_POST_URL = _env_string('TILL_POST_URL') or (ERPDASH_URL + '/api/pos/sales' if ERPDASH_URL else None)
+POS_VOUCHER_FORWARD_URL = _env_string('POS_VOUCHER_FORWARD_URL') or (ERPDASH_URL + '/api/vouchers/issue' if ERPDASH_URL else _derive_voucher_forward_url(TILL_POST_URL))
 POS_VOUCHER_FORWARD_KEY = _env_string('POS_VOUCHER_FORWARD_KEY', POS_RECEIPT_KEY)
 try:
     POS_VOUCHER_FORWARD_TIMEOUT = float(os.getenv('POS_VOUCHER_FORWARD_TIMEOUT', '5'))
@@ -614,10 +643,16 @@ _IDLE_TASK_THREAD: Optional[threading.Thread] = None
 _IDLE_TASK_LOCK = threading.Lock()
 
 # Optional SQLite service helpers
+LAYAWAY_ERP_KEY = os.getenv('LAYAWAY_ERP_KEY', '') or os.getenv('POS_RECEIPT_KEY', '')
+
 try:
     import pos_service as ps
     if ERPNEXT_URL:
         setattr(ps, 'ERP_BASE', ERPNEXT_URL)
+    if ERPDASH_URL:
+        setattr(ps, 'LAYAWAY_ERP_URL', ERPDASH_URL)
+    if LAYAWAY_ERP_KEY:
+        setattr(ps, 'LAYAWAY_ERP_KEY', LAYAWAY_ERP_KEY)
     if API_KEY:
         setattr(ps, 'ERP_API_KEY', API_KEY)
     if API_SECRET:
@@ -736,6 +771,24 @@ def _run_idle_maintenance_tasks():
         if not conn:
             return
         summary: List[str] = []
+        # When POS_QUEUE_ONLY=1, sale/voucher outbox entries are written but never consumed.
+        # Trim them so they don't accumulate indefinitely.
+        if POS_QUEUE_ONLY:
+            try:
+                cur = conn.execute(
+                    "DELETE FROM outbox WHERE kind IN ('sale', 'voucher_event')"
+                )
+                if cur.rowcount:
+                    conn.commit()
+                    summary.append(f"pruned {cur.rowcount} unused outbox entries")
+            except Exception as exc:
+                app.logger.warning("Idle outbox prune failed: %s", exc)
+        try:
+            pruned = _prune_old_layaways(conn)
+            if pruned:
+                summary.append(f"pruned {pruned} old layaway(s)")
+        except Exception as exc:
+            app.logger.warning("Idle layaway prune failed: %s", exc)
         try:
             ingested = _ingest_new_local_invoices(conn)
             if ingested:
@@ -761,6 +814,13 @@ def _run_idle_maintenance_tasks():
                 summary.append("pushed outbox")
             except Exception as exc:
                 app.logger.warning("Idle outbox push failed: %s", exc)
+        # Layaway outbox runs independently of mock mode and POS_QUEUE_ONLY — uses X-POS-KEY via ERPDASH_URL
+        if ERPDASH_URL or ERPNEXT_URL:
+            try:
+                app.logger.info("[layaway-sync] Idle loop triggering layaway outbox push (target=%s)", ERPDASH_URL or ERPNEXT_URL)
+                ps.push_layaway_outbox(conn)
+            except Exception as exc:
+                app.logger.warning("[layaway-sync] Idle layaway outbox push failed: %s", exc)
         if not USE_MOCK and ERP_PULL_SALES_ENABLED and _has_erp_credentials():
             try:
                 pulled, matched, inserted = _reconcile_erp_sales_invoices(conn)
@@ -996,6 +1056,26 @@ def _db_items_payload(conn: sqlite3.Connection):
     return _db_variant_items_payload(conn)
 
 
+def _layaway_reserved_qty(conn: sqlite3.Connection) -> Dict[str, float]:
+    """Return {item_code: total_reserved_qty} across all active layaways."""
+    try:
+        rows = conn.execute(
+            "SELECT items FROM layaways WHERE status='active' AND items IS NOT NULL"
+        ).fetchall()
+    except Exception:
+        return {}
+    reserved: Dict[str, float] = {}
+    for row in rows:
+        try:
+            for it in _json.loads(row[0]):
+                code = (it.get('item_code') or it.get('item_id') or '').strip()
+                if code:
+                    reserved[code] = reserved.get(code, 0.0) + float(it.get('qty') or 1)
+        except Exception:
+            continue
+    return reserved
+
+
 def _db_variant_items_payload(conn: sqlite3.Connection):
     """Return active non-template items for search/browse when templates aren't present."""
     q_items = f"""
@@ -1037,9 +1117,11 @@ def _db_variant_items_payload(conn: sqlite3.Connection):
             continue
         barcode_map.setdefault(item_id, set()).add(bc)
 
+    reserved = _layaway_reserved_qty(conn)
     out = []
     for r in conn.execute(q_items):
         barcodes = sorted(barcode_map.get(r["name"], set()))
+        raw_stock = float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0
         payload = {
             "name": r["name"],
             "item_code": r["item_code"],
@@ -1055,7 +1137,7 @@ def _db_variant_items_payload(conn: sqlite3.Connection):
             "image": _absolute_image_url(r["image"]),
             "attributes": attr_map.get(r["name"], {}),
             "barcodes": barcodes,
-            "stock_qty": float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0,
+            "stock_qty": max(0.0, raw_stock - reserved.get(r["item_code"], 0.0)),
             "price_min": None,
             "price_max": None,
             "variant_stock": None,
@@ -1155,6 +1237,15 @@ def _db_template_payload_for_ids(conn: sqlite3.Connection, ids: List[str], light
             continue
         barcode_map.setdefault(tpl, set()).add(bc)
 
+    # Build reserved qty per template by summing variants
+    item_reserved = _layaway_reserved_qty(conn)
+    tpl_reserved: Dict[str, float] = {}
+    if item_reserved:
+        q_vtpl = f"SELECT item_id, parent_id FROM items WHERE parent_id IN ({placeholders}) AND is_template=0"
+        for row in conn.execute(q_vtpl, tuple(ids)):
+            if row["parent_id"] and row["item_id"] in item_reserved:
+                tpl_reserved[row["parent_id"]] = tpl_reserved.get(row["parent_id"], 0.0) + item_reserved[row["item_id"]]
+
     out = []
     for r in conn.execute(q_tpl, tuple(ids)):
         attrs = {}
@@ -1194,7 +1285,7 @@ def _db_template_payload_for_ids(conn: sqlite3.Connection, ids: List[str], light
             "barcodes": barcodes,
             "price_min": float(min_var) if min_var is not None else None,
             "price_max": float(max_var) if max_var is not None else None,
-            "variant_stock": float(r["variant_stock"]) if r["variant_stock"] is not None else 0.0,
+            "variant_stock": max(0.0, (float(r["variant_stock"]) if r["variant_stock"] is not None else 0.0) - tpl_reserved.get(r["name"], 0.0)),
         }
         out.append(payload)
     return out
@@ -1244,9 +1335,11 @@ def _db_variant_payload_for_ids(conn: sqlite3.Connection, ids: List[str], light:
             continue
         barcode_map.setdefault(item_id, set()).add(bc)
 
+    reserved = _layaway_reserved_qty(conn)
     out = []
     for r in conn.execute(q_items, tuple(ids)):
         barcodes = sorted(barcode_map.get(r["name"], set()))
+        raw_stock = float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0
         payload = {
             "name": r["name"],
             "item_code": r["item_code"],
@@ -1262,7 +1355,7 @@ def _db_variant_payload_for_ids(conn: sqlite3.Connection, ids: List[str], light:
             "image": _absolute_image_url(r["image"]),
             "attributes": {} if light else attr_map.get(r["name"], {}),
             "barcodes": barcodes,
-            "stock_qty": float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0,
+            "stock_qty": max(0.0, raw_stock - reserved.get(r["item_code"], 0.0)),
             "price_min": None,
             "price_max": None,
             "variant_stock": None,
@@ -1403,8 +1496,10 @@ def _db_variant_table_payload(conn: sqlite3.Connection, brand: Optional[str], gr
     """
     params.append(limit)
     rows = conn.execute(sql, tuple(params)).fetchall()
+    reserved = _layaway_reserved_qty(conn)
     out: List[Dict[str, Any]] = []
     for r in rows:
+        raw_stock = float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0
         out.append({
             "name": r["name"],
             "item_code": r["item_code"],
@@ -1416,7 +1511,7 @@ def _db_variant_table_payload(conn: sqlite3.Connection, brand: Optional[str], gr
             "custom_simple_colour": r["custom_simple_colour"],
             "vat_rate": float(r["vat_rate"]) if r["vat_rate"] is not None else None,
             "standard_rate": float(r["standard_rate"]) if r["standard_rate"] is not None else None,
-            "stock_qty": float(r["stock_qty"]) if r["stock_qty"] is not None else 0.0,
+            "stock_qty": max(0.0, raw_stock - reserved.get(r["item_code"], 0.0)),
             "color": r["color"],
             "size": r["size"],
             "width": r["width"],
@@ -2620,7 +2715,8 @@ def index():
         'pos.html',
         receipt_agent_url=RECEIPT_AGENT_URL or '',
         receipt_default_port=RECEIPT_DEFAULT_PORT,
-        gift_voucher_item=POS_GIFT_VOUCHER_ITEM
+        gift_voucher_item=POS_GIFT_VOUCHER_ITEM,
+        plastic_bag_item=POS_PLASTIC_BAG_ITEM
     )
 
 
@@ -3511,6 +3607,241 @@ def api_scan_acks():
     return jsonify({'status': 'success', 'updated': updated})
 
 
+@app.route('/api/admin/invoice-queue', methods=['GET'])
+def api_invoice_queue_stats():
+    """Return counts of invoices in the till-agent directories and the POS key status."""
+    inv_base = Path('invoices')
+    def count_json(path: Path) -> int:
+        try:
+            return sum(1 for f in path.glob('*.json')) if path.is_dir() else 0
+        except Exception:
+            return 0
+
+    stats = {
+        'pending':  count_json(inv_base),
+        'failed':   count_json(inv_base / 'post_failed'),
+        'sent':     count_json(inv_base / 'posted_remote'),
+        'queue_pending':  count_json(POS_QUEUE_DIR / 'pending'),
+        'queue_failed':   count_json(POS_QUEUE_DIR / 'failed'),
+        'queue_confirmed': count_json(POS_QUEUE_DIR / 'confirmed'),
+    }
+    key = (POS_RECEIPT_KEY or '').strip()
+    stats['pos_key_set'] = bool(key)
+    stats['pos_key_is_default'] = (key == 'SUPERSECRET123')
+    stats['pos_key_preview'] = (key[:4] + '…' + key[-4:]) if len(key) >= 10 else ('*' * len(key) if key else '')
+    return jsonify({'status': 'success', 'stats': stats})
+
+
+@app.route('/api/admin/invoice-queue/retry-failed', methods=['POST'])
+def api_invoice_queue_retry():
+    """Move invoices from post_failed/ back to invoices/ so the till agent retries them."""
+    inv_base = Path('invoices')
+    failed_dir = inv_base / 'post_failed'
+    moved = 0
+    errors = []
+    if failed_dir.is_dir():
+        for f in list(failed_dir.glob('*.json')):
+            try:
+                dest = inv_base / f.name
+                if dest.exists():
+                    dest = inv_base / f'{f.stem}_{int(time.time())}.json'
+                f.rename(dest)
+                moved += 1
+            except Exception as exc:
+                errors.append(str(exc))
+    return jsonify({'status': 'success', 'moved': moved, 'errors': errors})
+
+
+@app.route('/api/admin/trapped-sales', methods=['GET'])
+def api_trapped_sales():
+    """Return all non-posted sales with lines, payments, last error, and a local item diagnosis."""
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 500
+
+    rows = conn.execute("""
+        SELECT s.sale_id, s.created_utc, s.cashier, s.customer_id, s.total, s.queue_status,
+               (SELECT ob.last_error FROM outbox ob WHERE ob.ref_id = s.sale_id
+                ORDER BY ob.id DESC LIMIT 1) AS last_error
+        FROM sales s
+        WHERE s.queue_status != 'posted'
+        ORDER BY s.created_utc ASC
+    """).fetchall()
+
+    sales = []
+    for r in rows:
+        sale = dict(r)
+
+        # Lines with local-DB item existence check
+        line_rows = conn.execute(
+            "SELECT item_id, item_name, qty, rate, line_total, attributes FROM sale_lines WHERE sale_id=? ORDER BY line_no",
+            (r['sale_id'],)
+        ).fetchall()
+        lines = []
+        for ln in line_rows:
+            exists = conn.execute("SELECT 1 FROM items WHERE item_id=?", (ln['item_id'],)).fetchone()
+            lines.append({
+                'item_id': ln['item_id'],
+                'item_name': ln['item_name'],
+                'qty': ln['qty'],
+                'rate': ln['rate'],
+                'line_total': ln['line_total'],
+                'attributes': ln['attributes'],
+                'in_local_db': bool(exists),
+            })
+        sale['lines'] = lines
+
+        # Payments
+        pay_rows = conn.execute(
+            "SELECT method, amount_gbp FROM payments WHERE sale_id=? ORDER BY seq",
+            (r['sale_id'],)
+        ).fetchall()
+        sale['payments'] = [dict(p) for p in pay_rows]
+
+        # Quick diagnosis summary
+        missing = [ln['item_id'] for ln in lines if not ln['in_local_db']]
+        if missing:
+            sale['diagnosis'] = f"Item(s) not in local DB: {', '.join(missing)}"
+        elif sale['last_error']:
+            sale['diagnosis'] = None  # let last_error speak for itself
+        else:
+            sale['diagnosis'] = None
+
+        sales.append(sale)
+
+    return jsonify({'status': 'success', 'sales': sales})
+
+
+@app.route('/api/admin/trapped-sales/retry', methods=['POST'])
+def api_trapped_sales_retry():
+    """Attempt to push a single trapped sale to ERPNext right now.
+    Body: { "sale_id": "..." }
+    Returns the live result or error from ERPNext and updates outbox.last_error.
+    """
+    if not ps:
+        return jsonify({'status': 'error', 'message': 'pos_service not available'}), 500
+    body = request.get_json(silent=True) or {}
+    sale_id = (body.get('sale_id') or '').strip()
+    if not sale_id:
+        return jsonify({'status': 'error', 'message': 'sale_id required'}), 400
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 500
+
+    sale_row = conn.execute(
+        "SELECT queue_status, payload_json FROM sales WHERE sale_id=?", (sale_id,)
+    ).fetchone()
+    if not sale_row:
+        return jsonify({'status': 'error', 'message': 'Sale not found'}), 404
+    if sale_row['queue_status'] == 'posted':
+        return jsonify({'status': 'error', 'message': 'Sale already posted'}), 400
+
+    try:
+        payload = json.loads(sale_row['payload_json'])
+    except Exception:
+        return jsonify({'status': 'error', 'message': 'Failed to parse sale payload'}), 500
+
+    # Ensure there is an outbox entry so last_error is persisted
+    ob_row = conn.execute(
+        "SELECT id FROM outbox WHERE ref_id=? AND kind='sale' ORDER BY id DESC LIMIT 1", (sale_id,)
+    ).fetchone()
+    if not ob_row:
+        conn.execute(
+            "INSERT INTO outbox (kind, ref_id, created_utc, payload_json) VALUES ('sale',?,?,?)",
+            (sale_id, sale_row['payload_json'] and json.loads(sale_row['payload_json']).get('created_utc', ''), sale_row['payload_json'])
+        )
+        conn.commit()
+        ob_row = conn.execute(
+            "SELECT id FROM outbox WHERE ref_id=? AND kind='sale' ORDER BY id DESC LIMIT 1", (sale_id,)
+        ).fetchone()
+    ob_id = ob_row['id'] if ob_row else None
+
+    conn.execute("UPDATE sales SET queue_status='posting' WHERE sale_id=?", (sale_id,))
+    conn.commit()
+    try:
+        resp = ps.post_sale_to_erpnext(payload)
+        docname = resp.get('name') or resp.get('docname') or 'OK'
+        conn.execute(
+            "UPDATE sales SET queue_status='posted', erp_docname=COALESCE(?,erp_docname,'OK') WHERE sale_id=?",
+            (docname, sale_id)
+        )
+        if ob_id:
+            conn.execute("DELETE FROM outbox WHERE id=?", (ob_id,))
+        conn.commit()
+        return jsonify({'status': 'success', 'posted': True, 'erp_docname': docname})
+    except Exception as exc:
+        err = str(exc)
+        conn.execute("UPDATE sales SET queue_status='failed' WHERE sale_id=?", (sale_id,))
+        if ob_id:
+            conn.execute(
+                "UPDATE outbox SET attempts=attempts+1, last_error=? WHERE id=?", (err, ob_id)
+            )
+        conn.commit()
+        return jsonify({'status': 'success', 'posted': False, 'error': err})
+
+
+@app.route('/api/admin/trapped-sales/delete', methods=['POST'])
+def api_trapped_sales_delete():
+    """Delete one or more non-posted sales by sale_id — removes all traces:
+      pos.db: sales (+ cascade sale_lines, payments, sales_fx) + outbox
+      pos_sales_queue.sqlite3: pos_sales_queue row
+      filesystem: invoices/{id}.json, invoices/{id}.json.ok,
+                  invoices/queue/*/id.json
+    Body: { "sale_ids": ["uuid1", ...] }
+    """
+    body = request.get_json(silent=True) or {}
+    sale_ids = body.get('sale_ids') or []
+    if not sale_ids or not isinstance(sale_ids, list):
+        return jsonify({'status': 'error', 'message': 'sale_ids must be a non-empty list'}), 400
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 500
+    queue_conn = _queue_db_connect()
+    deleted = 0
+    skipped = []
+    for sid in sale_ids:
+        if not isinstance(sid, str):
+            continue
+        row = conn.execute("SELECT queue_status FROM sales WHERE sale_id=?", (sid,)).fetchone()
+        if not row:
+            skipped.append(sid)
+            continue
+        if row['queue_status'] == 'posted':
+            skipped.append(sid)  # refuse to delete already-posted sales
+            continue
+        # 1. outbox + main sales row (sale_lines, payments, sales_fx cascade)
+        conn.execute("DELETE FROM outbox WHERE ref_id=?", (sid,))
+        conn.execute("DELETE FROM sales WHERE sale_id=?", (sid,))
+        # 2. pos_sales_queue.sqlite3 — look up invoice_name first for file cleanup
+        invoice_name = sid
+        if queue_conn:
+            try:
+                qrow = queue_conn.execute(
+                    "SELECT invoice_name FROM pos_sales_queue WHERE sale_id=? OR invoice_name=?",
+                    (sid, sid)
+                ).fetchone()
+                if qrow:
+                    invoice_name = qrow['invoice_name'] or sid
+                queue_conn.execute(
+                    "DELETE FROM pos_sales_queue WHERE sale_id=? OR invoice_name=?",
+                    (sid, sid)
+                )
+                queue_conn.commit()
+            except Exception:
+                pass
+        # 3. Invoice file + sidecar in invoices/
+        for candidate in {sid, invoice_name}:
+            _safe_unlink(Path('invoices') / f"{candidate}.json")
+            _safe_unlink(Path('invoices') / f"{candidate}.json.ok")
+        # 4. Queue state files in invoices/queue/*/
+        for state_dir in _POS_QUEUE_DIR_STATES.values():
+            for candidate in {sid, invoice_name}:
+                _safe_unlink(state_dir / f"{candidate}.json")
+        deleted += 1
+    conn.commit()
+    return jsonify({'status': 'success', 'deleted': deleted, 'skipped': skipped})
+
+
 @app.route('/api/db/init', methods=['POST'])
 def api_db_init():
     auth_err = _require_admin_token()
@@ -3801,6 +4132,7 @@ def item_matrix():
     price_min = None
     price_max = None
     rows = conn.execute(qv, (template_id,)).fetchall()
+    reserved = _layaway_reserved_qty(conn)
     attr_map = {}
     if rows:
         ids = tuple(r["item_id"] for r in rows)
@@ -3828,11 +4160,12 @@ def item_matrix():
         style_code = (r["custom_style_code"] or '').strip() if r["custom_style_code"] else ''
         if style_code:
             style_codes.setdefault(color, style_code)
+        avail_qty = max(0.0, float(r['qty']) - reserved.get(r['item_id'], 0.0))
         variants[key] = {
             'item_id': r['item_id'],
             'item_name': r['name'],
             'rate': float(r['rate']) if r['rate'] is not None else None,
-            'qty': float(r['qty']),
+            'qty': avail_qty,
             'vat_rate': float(r['vat_rate']) if r['vat_rate'] is not None else None,
             'image': variant_image
         }
@@ -4439,6 +4772,12 @@ def start_background_services():
     global _BACKGROUND_SERVICES_STARTED
     if _BACKGROUND_SERVICES_STARTED:
         return
+    # Log resolved endpoint config so it's visible in server output
+    app.logger.info("[config] ERPDASH_URL=%r", ERPDASH_URL)
+    app.logger.info("[config] TILL_POST_URL=%r", TILL_POST_URL)
+    app.logger.info("[config] POS_VOUCHER_FORWARD_URL=%r", POS_VOUCHER_FORWARD_URL)
+    app.logger.info("[config] ERPNEXT_URL=%r  USE_MOCK=%s  POS_QUEUE_ONLY=%s", ERPNEXT_URL, USE_MOCK, POS_QUEUE_ONLY)
+    app.logger.info("[config] LAYAWAY_ERP_KEY set=%s", bool(LAYAWAY_ERP_KEY))
     try:
         _ensure_queue_dirs()
         conn = _queue_db_connect()
@@ -4690,3 +5029,754 @@ def api_invoice_detail(inv_id: str):
     except Exception:
         pass
     return jsonify({'status':'error','message':'Invoice not found'}), 404
+
+
+# ── Layaway routes ─────────────────────────────────────────────────────────────
+
+import random
+import string
+
+
+def _gen_layaway_id() -> str:
+    chars = string.ascii_uppercase + string.digits
+    return 'LAY-' + ''.join(random.choices(chars, k=6))
+
+
+def _schedule_layaway_sync() -> None:
+    """Push the layaway outbox in a background thread immediately after a write."""
+    if not ps:
+        app.logger.warning("[layaway-sync] pos_service not loaded — cannot sync")
+        return
+    lay_url = ERPDASH_URL or ERPNEXT_URL
+    if not lay_url:
+        app.logger.warning("[layaway-sync] No ERPDASH_URL or ERPNEXT_URL configured — skipping sync")
+        return
+    # Note: POS_QUEUE_ONLY only suppresses the sales SQLite outbox — layaway sync is independent
+    app.logger.info("[layaway-sync] Scheduling background push to %s", lay_url)
+    def _do():
+        try:
+            c = _db_connect() or ps.connect(POS_DB_PATH)
+            if c:
+                ps.push_layaway_outbox(c)
+                c.close()
+        except Exception as exc:
+            app.logger.warning("[layaway-sync] Background sync failed: %s", exc)
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _lay_row_to_dict(row) -> dict:
+    d = dict(row)
+    try:
+        d['items'] = _json.loads(d.get('items') or '[]')
+    except Exception:
+        d['items'] = []
+    return d
+
+
+def _lay_ensure_tables(conn: sqlite3.Connection) -> None:
+    """Create layaway tables if they don't exist yet (handles upgraded databases)."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS layaways (
+          layaway_id    TEXT PRIMARY KEY,
+          customer_tag  TEXT NOT NULL,
+          erp_customer  TEXT,
+          erp_so_name   TEXT,
+          items         TEXT NOT NULL,
+          total         REAL NOT NULL,
+          paid          REAL NOT NULL DEFAULT 0,
+          status        TEXT NOT NULL DEFAULT 'active',
+          created_at    TEXT NOT NULL,
+          expires_at    TEXT NOT NULL,
+          created_by    TEXT,
+          notes         TEXT,
+          sync_status   TEXT NOT NULL DEFAULT 'pending'
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS layaway_payments (
+          payment_id    TEXT PRIMARY KEY,
+          layaway_id    TEXT NOT NULL REFERENCES layaways(layaway_id),
+          paid_at       TEXT NOT NULL,
+          amount        REAL NOT NULL,
+          method        TEXT NOT NULL,
+          cashier_code  TEXT NOT NULL,
+          erp_pe_name   TEXT,
+          sync_status   TEXT NOT NULL DEFAULT 'pending'
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS layaway_audit (
+          audit_id      TEXT PRIMARY KEY,
+          layaway_id    TEXT NOT NULL,
+          action        TEXT NOT NULL,
+          detail        TEXT,
+          cashier_code  TEXT,
+          actioned_at   TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+
+
+def _lay_audit(conn: sqlite3.Connection, layaway_id: str, action: str, detail: Any, cashier_code: str) -> None:
+    try:
+        conn.execute(
+            "INSERT INTO layaway_audit (audit_id, layaway_id, action, detail, cashier_code, actioned_at) VALUES (?,?,?,?,?,?)",
+            (str(uuid4()), layaway_id, action, _json.dumps(detail, separators=(',', ':')) if detail else None, cashier_code, _utcnow_z())
+        )
+    except Exception:
+        pass
+
+
+def _lay_expiry(paid_amount: float) -> str:
+    days = LAYAWAY_ZERO_PAYMENT_DAYS if paid_amount == 0 else LAYAWAY_PAID_DAYS
+    expires = datetime.utcnow() + __import__('datetime').timedelta(days=days)
+    return expires.replace(microsecond=0).isoformat() + 'Z'
+
+
+def _prune_old_layaways(conn: sqlite3.Connection) -> int:
+    """Delete completed/cancelled layaways older than LAYAWAY_RETENTION_DAYS.
+    Cascades to layaway_payments and layaway_audit via DELETE.
+    Returns number of layaways removed.
+    """
+    import datetime as _dt
+    cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=LAYAWAY_RETENTION_DAYS)).isoformat() + 'Z'
+    old_ids = [r[0] for r in conn.execute("""
+        SELECT layaway_id FROM layaways
+        WHERE status IN ('completed', 'cancelled') AND created_at < ?
+    """, (cutoff,)).fetchall()]
+    if not old_ids:
+        return 0
+    placeholders = ','.join('?' * len(old_ids))
+    conn.execute(f"DELETE FROM layaway_audit    WHERE layaway_id IN ({placeholders})", old_ids)
+    conn.execute(f"DELETE FROM layaway_payments WHERE layaway_id IN ({placeholders})", old_ids)
+    conn.execute(f"DELETE FROM outbox WHERE kind LIKE 'layaway_%' AND ref_id IN ({placeholders})", old_ids)
+    conn.execute(f"DELETE FROM layaways WHERE layaway_id IN ({placeholders})", old_ids)
+    conn.commit()
+    return len(old_ids)
+
+
+@app.route('/api/layaways', methods=['GET'])
+def api_layaways_list():
+    """List all layaways. Optional ?status=active|completed|cancelled|expired"""
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        status_filter = (request.args.get('status') or '').strip()
+        now = _utcnow_z()
+        if status_filter == 'expired':
+            # 'expired' is not a stored status — it means active layaways past their expiry date
+            rows = conn.execute(
+                "SELECT * FROM layaways WHERE status='active' AND expires_at <= ? ORDER BY expires_at ASC",
+                (now,)
+            ).fetchall()
+        elif status_filter:
+            rows = conn.execute(
+                "SELECT * FROM layaways WHERE status=? ORDER BY created_at DESC", (status_filter,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM layaways ORDER BY created_at DESC"
+            ).fetchall()
+        layaways = [_lay_row_to_dict(r) for r in rows]
+        # Attach payment list to each
+        for lay in layaways:
+            pays = conn.execute(
+                "SELECT * FROM layaway_payments WHERE layaway_id=? ORDER BY paid_at ASC",
+                (lay['layaway_id'],)
+            ).fetchall()
+            lay['payments'] = [dict(p) for p in pays]
+        return jsonify({'status': 'success', 'layaways': layaways})
+    except Exception as exc:
+        app.logger.exception('layaways list error')
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/badge')
+def api_layaways_badge():
+    """Return count of active layaways that have passed their expiry date."""
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'count': 0})
+    try:
+        _lay_ensure_tables(conn)
+        now = _utcnow_z()
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM layaways WHERE status='active' AND expires_at <= ?", (now,)
+        ).fetchone()
+        return jsonify({'count': int(row['c'] if row else 0)})
+    except Exception:
+        return jsonify({'count': 0})
+
+
+@app.route('/api/layaways/<ref>', methods=['GET'])
+def api_layaway_get(ref: str):
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Not found'}), 404
+        lay = _lay_row_to_dict(row)
+        pays = conn.execute(
+            "SELECT * FROM layaway_payments WHERE layaway_id=? ORDER BY paid_at ASC", (ref,)
+        ).fetchall()
+        lay['payments'] = [dict(p) for p in pays]
+        audit = conn.execute(
+            "SELECT * FROM layaway_audit WHERE layaway_id=? ORDER BY actioned_at ASC", (ref,)
+        ).fetchall()
+        lay['audit'] = [dict(a) for a in audit]
+        return jsonify({'status': 'success', 'layaway': lay})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways', methods=['POST'])
+def api_layaway_create():
+    """Create a new layaway.
+    Body: { customer_tag, items:[{item_code,item_name,qty,rate}], payment:{amount,method}?, cashier_code, notes? }
+    """
+    try:
+        body = request.json or {}
+    except Exception:
+        body = {}
+
+    customer_tag = (body.get('customer_tag') or '').strip()
+    if not customer_tag:
+        return jsonify({'status': 'error', 'message': 'customer_tag is required'}), 400
+
+    raw_items = body.get('items') or []
+    if not raw_items:
+        return jsonify({'status': 'error', 'message': 'items is required'}), 400
+
+    cashier_code = (body.get('cashier_code') or '').strip()
+    notes = (body.get('notes') or '').strip() or None
+
+    # Normalise items — lock rates at creation
+    items = []
+    total = 0.0
+    for it in raw_items:
+        rate = float(it.get('rate') or it.get('price') or 0)
+        qty = float(it.get('qty') or 1)
+        items.append({
+            'item_code': it.get('item_code') or it.get('item_id') or '',
+            'item_name': it.get('item_name') or it.get('name') or '',
+            'qty': qty,
+            'rate': rate,
+            'original_rate': rate,
+        })
+        total += qty * rate
+
+    # Optional initial payment — cap at cart total so ERPNext never sees an over-allocation
+    pay_body = body.get('payment') or {}
+    pay_tendered = float(pay_body.get('amount') or 0)
+    pay_amount = min(pay_tendered, total) if pay_tendered > 0 else 0.0
+    pay_change = round(pay_tendered - pay_amount, 2)
+    pay_method = (pay_body.get('method') or 'Cash').strip()
+    pay_reference_no = (pay_body.get('reference_no') or '').strip() or None
+
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+
+        # Generate unique ID
+        for _ in range(10):
+            layaway_id = _gen_layaway_id()
+            existing = conn.execute("SELECT 1 FROM layaways WHERE layaway_id=?", (layaway_id,)).fetchone()
+            if not existing:
+                break
+
+        now = _utcnow_z()
+        expires_at = _lay_expiry(pay_amount)
+        # If the initial deposit already covers the full total, create as completed
+        auto_completed = pay_amount >= total and total > 0
+        init_status = 'completed' if auto_completed else 'active'
+
+        conn.execute("""
+            INSERT INTO layaways (layaway_id, customer_tag, items, total, paid, status, created_at, expires_at, created_by, notes, sync_status)
+            VALUES (?,?,?,?,?,?,?,?,?,?,'pending')
+        """, (
+            layaway_id, customer_tag,
+            _json.dumps(items, separators=(',', ':')),
+            total, pay_amount,
+            init_status, now, expires_at,
+            cashier_code or None, notes
+        ))
+
+        payment_id = None
+        if pay_amount > 0:
+            payment_id = 'LPAY-' + uuid4().hex[:10].upper()
+            conn.execute("""
+                INSERT INTO layaway_payments (payment_id, layaway_id, paid_at, amount, method, cashier_code)
+                VALUES (?,?,?,?,?,?)
+            """, (payment_id, layaway_id, now, pay_amount, pay_method, cashier_code or ''))
+
+        _lay_audit(conn, layaway_id, 'created', {'total': total, 'paid': pay_amount, 'items': len(items)}, cashier_code)
+
+        # Queue ERPNext SO creation
+        conn.execute("""
+            INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+            VALUES ('layaway_create', ?, ?, ?)
+        """, (layaway_id, now, _json.dumps({
+            'layaway_id': layaway_id,
+            'customer_tag': customer_tag,
+            'items': items,
+            'total': total,
+        }, separators=(',', ':'))))
+
+        # If initial payment, also queue a deposit (will run after create)
+        if pay_amount > 0 and payment_id:
+            init_dep: dict = {'payment_id': payment_id, 'amount': pay_amount, 'method': pay_method}
+            if pay_reference_no:
+                init_dep['reference_no'] = pay_reference_no
+            conn.execute("""
+                INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+                VALUES ('layaway_payment', ?, ?, ?)
+            """, (layaway_id, now, _json.dumps(init_dep, separators=(',', ':'))))
+
+        # If fully paid at creation, queue the Sales Invoice immediately (after deposit)
+        if auto_completed:
+            _lay_audit(conn, layaway_id, 'completed', {'auto': True, 'at_creation': True}, cashier_code)
+            conn.execute("""
+                INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+                VALUES ('layaway_complete', ?, ?, '{}')
+            """, (layaway_id, now))
+
+        conn.commit()
+        _schedule_layaway_sync()
+
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (layaway_id,)).fetchone()
+        lay = _lay_row_to_dict(row)
+        if payment_id:
+            pay_row = conn.execute("SELECT * FROM layaway_payments WHERE payment_id=?", (payment_id,)).fetchone()
+            lay['payments'] = [dict(pay_row)] if pay_row else []
+        else:
+            lay['payments'] = []
+
+        return jsonify({'status': 'success', 'layaway': lay, 'change': pay_change, 'auto_completed': auto_completed})
+    except Exception as exc:
+        app.logger.exception('layaway create error')
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/<ref>/payment', methods=['POST'])
+def api_layaway_payment(ref: str):
+    """Record an installment payment against a layaway.
+    Body: { amount, method, cashier_code }
+    """
+    try:
+        body = request.json or {}
+    except Exception:
+        body = {}
+
+    amount = float(body.get('amount') or 0)
+    if amount <= 0:
+        return jsonify({'status': 'error', 'message': 'amount must be > 0'}), 400
+    method = (body.get('method') or 'Cash').strip()
+    reference_no = (body.get('reference_no') or '').strip() or None
+    cashier_code = (body.get('cashier_code') or '').strip()
+
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Layaway not found'}), 404
+        if row['status'] != 'active':
+            return jsonify({'status': 'error', 'message': f'Layaway is {row["status"]}'}), 400
+
+        now = _utcnow_z()
+        total = float(row['total'])
+        already_paid = float(row['paid'])
+        balance = round(total - already_paid, 2)
+
+        # Cap at outstanding balance — excess is change for the cashier to return
+        tendered = amount
+        amount = round(min(tendered, balance), 2)
+        change = round(tendered - amount, 2)
+
+        if amount <= 0:
+            return jsonify({'status': 'error', 'message': 'Layaway is already fully paid'}), 400
+
+        new_paid = round(already_paid + amount, 2)
+        auto_completed = new_paid >= total
+
+        payment_id = 'LPAY-' + uuid4().hex[:10].upper()
+        conn.execute("""
+            INSERT INTO layaway_payments (payment_id, layaway_id, paid_at, amount, method, cashier_code)
+            VALUES (?,?,?,?,?,?)
+        """, (payment_id, ref, now, amount, method, cashier_code))
+
+        # Update paid amount; auto-complete if now fully paid
+        was_zero = already_paid == 0
+        new_expires = _lay_expiry(1) if was_zero else row['expires_at']
+        new_status = 'completed' if auto_completed else 'active'
+        conn.execute(
+            "UPDATE layaways SET paid=?, expires_at=?, status=?, sync_status='pending' WHERE layaway_id=?",
+            (new_paid, new_expires, new_status, ref)
+        )
+
+        _lay_audit(conn, ref, 'payment', {'amount': amount, 'tendered': tendered, 'change': change, 'method': method, 'paid_total': new_paid}, cashier_code)
+
+        # Queue ERPNext deposit
+        dep_payload: dict = {'payment_id': payment_id, 'amount': amount, 'method': method}
+        if reference_no:
+            dep_payload['reference_no'] = reference_no
+        conn.execute("""
+            INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+            VALUES ('layaway_payment', ?, ?, ?)
+        """, (ref, now, _json.dumps(dep_payload, separators=(',', ':'))))
+
+        # If fully paid, also queue the completion (Sales Invoice)
+        if auto_completed:
+            _lay_audit(conn, ref, 'completed', {'auto': True}, cashier_code)
+            conn.execute("""
+                INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+                VALUES ('layaway_complete', ?, ?, '{}')
+            """, (ref, now))
+
+        conn.commit()
+        _schedule_layaway_sync()
+
+        lay = _lay_row_to_dict(conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone())
+        pays = conn.execute(
+            "SELECT * FROM layaway_payments WHERE layaway_id=? ORDER BY paid_at ASC", (ref,)
+        ).fetchall()
+        lay['payments'] = [dict(p) for p in pays]
+        return jsonify({
+            'status': 'success',
+            'layaway': lay,
+            'change': change,
+            'amount_applied': amount,
+            'auto_completed': auto_completed,
+        })
+    except Exception as exc:
+        app.logger.exception('layaway payment error')
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/<ref>/complete', methods=['POST'])
+def api_layaway_complete(ref: str):
+    """Mark layaway as completed (balance should be 0). Queues Sales Invoice creation."""
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        body = request.json or {}
+        cashier_code = (body.get('cashier_code') or '').strip()
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Not found'}), 404
+        if row['status'] != 'active':
+            return jsonify({'status': 'error', 'message': f'Layaway is {row["status"]}'}), 400
+
+        now = _utcnow_z()
+        conn.execute("UPDATE layaways SET status='completed', sync_status='pending' WHERE layaway_id=?", (ref,))
+        _lay_audit(conn, ref, 'completed', None, cashier_code)
+        conn.execute("""
+            INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+            VALUES ('layaway_complete', ?, ?, '{}')
+        """, (ref, now))
+        conn.commit()
+        _schedule_layaway_sync()
+        return jsonify({'status': 'success'})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/<ref>/cancel', methods=['POST'])
+def api_layaway_cancel(ref: str):
+    """Cancel a layaway. Requires refund to have been processed if paid > 0.
+    Body: { cashier_code, refund_confirmed: true }
+    """
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        body = request.json or {}
+        cashier_code = (body.get('cashier_code') or '').strip()
+        refund_confirmed = bool(body.get('refund_confirmed'))
+
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Not found'}), 404
+        if row['status'] != 'active':
+            return jsonify({'status': 'error', 'message': f'Layaway is {row["status"]}'}), 400
+        if float(row['paid']) > 0 and not refund_confirmed:
+            return jsonify({'status': 'error', 'message': 'refund_required', 'paid': float(row['paid'])}), 400
+
+        now = _utcnow_z()
+        conn.execute("UPDATE layaways SET status='cancelled', sync_status='pending' WHERE layaway_id=?", (ref,))
+        _lay_audit(conn, ref, 'cancelled', {'paid': float(row['paid'])}, cashier_code)
+        conn.execute("""
+            INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+            VALUES ('layaway_cancel', ?, ?, '{}')
+        """, (ref, now))
+        conn.commit()
+        _schedule_layaway_sync()
+        return jsonify({'status': 'success'})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/<ref>/extend', methods=['POST'])
+def api_layaway_extend(ref: str):
+    """Extend the expiry date on a layaway.
+    Body: { expires_at (ISO), cashier_code }
+    """
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        body = request.json or {}
+        cashier_code = (body.get('cashier_code') or '').strip()
+        new_expires = (body.get('expires_at') or '').strip()
+        if not new_expires:
+            return jsonify({'status': 'error', 'message': 'expires_at required'}), 400
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Not found'}), 404
+        if row['status'] != 'active':
+            return jsonify({'status': 'error', 'message': f'Layaway is {row["status"]}'}), 400
+        old_expires = row['expires_at']
+        conn.execute("UPDATE layaways SET expires_at=? WHERE layaway_id=?", (new_expires, ref))
+        _lay_audit(conn, ref, 'extended', {'from': old_expires, 'to': new_expires}, cashier_code)
+        conn.commit()
+        return jsonify({'status': 'success', 'expires_at': new_expires})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/<ref>/items', methods=['PUT'])
+def api_layaway_update_items(ref: str):
+    """Remove/update items on an active layaway (total recalculates at agreed prices).
+    Body: { items:[{item_code,item_name,qty,rate,original_rate}], cashier_code }
+    """
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        body = request.json or {}
+        cashier_code = (body.get('cashier_code') or '').strip()
+        new_items = body.get('items') or []
+        if not new_items:
+            return jsonify({'status': 'error', 'message': 'items required'}), 400
+
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Not found'}), 404
+        if row['status'] != 'active':
+            return jsonify({'status': 'error', 'message': f'Layaway is {row["status"]}'}), 400
+
+        old_total = float(row['total'])
+        # Use original_rate for total calculation
+        new_total = sum(float(it.get('original_rate', it.get('rate', 0))) * float(it.get('qty', 1)) for it in new_items)
+        now = _utcnow_z()
+
+        conn.execute(
+            "UPDATE layaways SET items=?, total=?, sync_status='pending' WHERE layaway_id=?",
+            (_json.dumps(new_items, separators=(',', ':')), new_total, ref)
+        )
+        _lay_audit(conn, ref, 'item_removed', {'old_total': old_total, 'new_total': new_total, 'items_count': len(new_items)}, cashier_code)
+
+        # Queue SO amendment
+        conn.execute("""
+            INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
+            VALUES ('layaway_amend', ?, ?, ?)
+        """, (ref, now, _json.dumps({'items': new_items, 'total': new_total}, separators=(',', ':'))))
+
+        conn.commit()
+        _schedule_layaway_sync()
+        lay = _lay_row_to_dict(conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone())
+        return jsonify({'status': 'success', 'layaway': lay})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/sync', methods=['POST'])
+def api_layaway_sync():
+    """Manually drain the layaway outbox. Returns pending count before and after."""
+    if not ps:
+        return jsonify({'status': 'error', 'message': 'pos_service not loaded'}), 503
+    conn = _db_connect() or ps.connect(POS_DB_PATH)
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        before = conn.execute("SELECT COUNT(*) FROM outbox WHERE kind LIKE 'layaway_%'").fetchone()[0]
+        ps.push_layaway_outbox(conn)
+        after = conn.execute("SELECT COUNT(*) FROM outbox WHERE kind LIKE 'layaway_%'").fetchone()[0]
+        return jsonify({'status': 'ok', 'pending_before': before, 'pending_after': after, 'processed': before - after})
+    except Exception as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/layaways/pull-from-erp', methods=['POST'])
+def api_layaway_pull_from_erp():
+    """Pull all layaways from ERPDash and reconcile into local SQLite.
+    Inserts missing layaways, updates paid_total/status on existing ones.
+    Returns: { added, updated, unchanged, errors }
+    """
+    if not ps:
+        return jsonify({'status': 'error', 'message': 'pos_service not loaded'}), 503
+    conn = _db_connect() or ps.connect(POS_DB_PATH)
+    if not conn:
+        return jsonify({'status': 'error', 'message': 'DB unavailable'}), 503
+    try:
+        try:
+            snapshot = ps.erp_layaway_snapshot()
+        except RuntimeError as exc:
+            return jsonify({'status': 'error', 'message': f'ERPDash unreachable: {exc}'}), 502
+
+        if snapshot.get('dry_run'):
+            return jsonify({'status': 'error', 'message': 'ERPDash URL not configured'}), 400
+
+        layaways = snapshot.get('layaways') or []
+        added = updated = unchanged = errors = 0
+        now = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
+        default_expires = (datetime.utcnow() + __import__('datetime').timedelta(days=90)).strftime('%Y-%m-%d')
+
+        for lay in layaways:
+            ref = lay.get('layaway_ref')
+            if not ref:
+                errors += 1
+                continue
+            try:
+                existing = conn.execute(
+                    "SELECT layaway_id, paid_total, status FROM layaways WHERE layaway_id = ?", (ref,)
+                ).fetchone()
+
+                if existing is None:
+                    # Insert new layaway recovered from ERPNext
+                    items_json = _json.dumps(lay.get('items') or [])
+                    conn.execute(
+                        """INSERT INTO layaways
+                            (layaway_id, customer_tag, erp_so_name, items, total, paid_total,
+                             status, created_at, expires_at, created_by, sync_status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')""",
+                        (
+                            ref,
+                            lay.get('customer_name') or ref,
+                            lay.get('so_name') or '',
+                            items_json,
+                            float(lay.get('grand_total') or 0),
+                            float(lay.get('paid_total') or 0),
+                            lay.get('local_status') or 'active',
+                            lay.get('transaction_date') or now,
+                            default_expires,
+                            'erp-pull',
+                        ),
+                    )
+                    # Insert payment records
+                    for p in (lay.get('payments') or []):
+                        pay_id = p.get('pe_name') or str(uuid4())
+                        conn.execute(
+                            """INSERT OR IGNORE INTO layaway_payments
+                                (payment_id, layaway_id, paid_at, amount, method, cashier_code, erp_pe_name, sync_status)
+                               VALUES (?, ?, ?, ?, ?, 'erp-pull', ?, 'synced')""",
+                            (
+                                pay_id,
+                                ref,
+                                p.get('posting_date') or now,
+                                float(p.get('amount') or 0),
+                                p.get('method') or 'Cash',
+                                p.get('pe_name') or '',
+                            ),
+                        )
+                    conn.commit()
+                    added += 1
+                else:
+                    # Update if paid_total or status differ
+                    remote_paid = float(lay.get('paid_total') or 0)
+                    remote_status = lay.get('local_status') or 'active'
+                    local_paid = float(existing['paid_total'] or 0)
+                    local_status = existing['status']
+                    # Only update status if ERPNext says completed and local isn't already completed/cancelled
+                    status_update = (
+                        remote_status == 'completed'
+                        and local_status not in ('completed', 'cancelled')
+                    )
+                    paid_update = abs(remote_paid - local_paid) > 0.005
+                    if paid_update or status_update:
+                        new_status = remote_status if status_update else local_status
+                        conn.execute(
+                            "UPDATE layaways SET paid_total = ?, status = ?, erp_so_name = COALESCE(NULLIF(erp_so_name,''), ?) WHERE layaway_id = ?",
+                            (remote_paid, new_status, lay.get('so_name') or '', ref),
+                        )
+                        # Insert any payment records not yet locally present
+                        for p in (lay.get('payments') or []):
+                            pe_name = p.get('pe_name')
+                            if not pe_name:
+                                continue
+                            dup = conn.execute(
+                                "SELECT 1 FROM layaway_payments WHERE erp_pe_name = ? AND layaway_id = ?",
+                                (pe_name, ref),
+                            ).fetchone()
+                            if not dup:
+                                conn.execute(
+                                    """INSERT OR IGNORE INTO layaway_payments
+                                        (payment_id, layaway_id, paid_at, amount, method, cashier_code, erp_pe_name, sync_status)
+                                       VALUES (?, ?, ?, ?, ?, 'erp-pull', ?, 'synced')""",
+                                    (
+                                        str(uuid4()),
+                                        ref,
+                                        p.get('posting_date') or now,
+                                        float(p.get('amount') or 0),
+                                        p.get('method') or 'Cash',
+                                        pe_name,
+                                    ),
+                                )
+                        conn.commit()
+                        updated += 1
+                    else:
+                        unchanged += 1
+            except Exception as exc:
+                app.logger.warning('pull-from-erp: error on %s: %s', ref, exc)
+                errors += 1
+
+        return jsonify({
+            'status': 'ok',
+            'total_from_erp': len(layaways),
+            'added': added,
+            'updated': updated,
+            'unchanged': unchanged,
+            'errors': errors,
+        })
+    except Exception as exc:
+        app.logger.exception('pull-from-erp failed')
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/layaways/debug', methods=['GET'])
+def api_layaway_debug():
+    """Diagnostic: show layaway outbox state and configured URLs."""
+    lay_url = ERPDASH_URL or ERPNEXT_URL or ''
+    lay_key_set = bool(LAYAWAY_ERP_KEY)
+    conn = _db_connect() or (ps.connect(POS_DB_PATH) if ps else None)
+    pending = []
+    if conn:
+        rows = conn.execute(
+            "SELECT id, kind, ref_id, attempts, last_error FROM outbox WHERE kind LIKE 'layaway_%' ORDER BY id"
+        ).fetchall()
+        pending = [dict(r) for r in rows]
+        conn.close()
+    return jsonify({
+        'layaway_erp_url': lay_url,
+        'layaway_erp_key_set': lay_key_set,
+        'pos_queue_only': POS_QUEUE_ONLY,
+        'pending_outbox': pending,
+    })

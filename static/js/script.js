@@ -78,6 +78,10 @@ const giftVoucherItemCode = (document.documentElement && document.documentElemen
   && document.documentElement.dataset.giftVoucherItem)
   ? document.documentElement.dataset.giftVoucherItem
   : 'GIFT-VOUCHER';
+const plasticBagItemCode = (document.documentElement && document.documentElement.dataset
+  && document.documentElement.dataset.plasticBagItem)
+  ? document.documentElement.dataset.plasticBagItem
+  : '';
 let recentSalesHistory = [];
 
 // Checkout state
@@ -321,6 +325,14 @@ function resetEurTenderState() {
 function showEurOverlay() {
   const overlay = document.getElementById('eurConverterOverlay');
   if (!overlay) return;
+  // Hide training UI first — the guide panel and hint pills can interfere with
+  // fixed positioning inside the EUR overlay when training mode is active.
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    TrainingWheels.hideGuidePanel();
+    TrainingWheels.clearHints();
+    if(TrainingWheels.clearHighlights) TrainingWheels.clearHighlights();
+  }
+  overlay.scrollTop = 0;
   overlay.style.display = 'flex';
   overlay.style.visibility = 'visible';
   overlay.style.opacity = '1';
@@ -333,6 +345,13 @@ function hideEurOverlay() {
   overlay.style.visibility = 'hidden';
   overlay.style.opacity = '0';
   resetEurTenderState();
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+    const cartTotal = getCartTotal();
+    if(paid + 1e-9 >= cartTotal && paid > 0) TrainingWheels.setStep('payment_ready');
+    else if(paid > 0) TrainingWheels.setStep('payment_partial');
+    else TrainingWheels.setStep('checkout_open');
+  }
 }
 
 function isEurOverlayVisible() {
@@ -649,7 +668,9 @@ let settings = {
   show_zero_stock: false,
   till_open: false,
   till_opened_at: null,
-  till_closed_at: null
+  till_closed_at: null,
+  training_level: 0,
+  cashier_training_levels: {}
 };
 let lastReceiptInfo = null;
 const RECEIPT_PORT_STORAGE_KEY = 'receipt_serial_port';
@@ -1929,6 +1950,13 @@ function renderFeaturedPanel(shuffle = false){
       img.src=thumb;
       img.alt=it.item_name || it.name || it.item_code || 'Product image';
       img.loading='lazy';
+      img.onerror = () => {
+        img.remove();
+        const fb = document.createElement('span');
+        fb.className = 'img-placeholder';
+        fb.textContent = '📦';
+        media.appendChild(fb);
+      };
       media.appendChild(img);
     } else {
       const placeholder=document.createElement('span');
@@ -2003,13 +2031,16 @@ function renderRecentItems(){
     return;
   }
   container.innerHTML='';
+  const card = container.closest('.card');
   if(!recentSalesHistory.length){
     const placeholder=document.createElement('div');
-    placeholder.className='text-muted';
+    placeholder.className='text-muted small';
     placeholder.textContent='No recent sales yet.';
     container.appendChild(placeholder);
+    if(card) card.classList.add('recent-empty');
     return;
   }
+  if(card) card.classList.remove('recent-empty');
   recentSalesHistory.forEach(entry=>{
     const row=document.createElement('div');
     row.className='recent-sale';
@@ -2157,8 +2188,17 @@ function updateCartDisplay() {
     `;
     wrap.appendChild(element);
   });
+  if (cart.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'cart-empty-hint';
+    empty.textContent = 'Scan a barcode or tap a product to add items';
+    wrap.appendChild(empty);
+  }
   tot.textContent = money(sum);
   updateCheckoutButtonState(sum);
+  if(typeof TrainingWheels !== 'undefined'){
+    TrainingWheels.setStep(cart.length > 0 ? 'cart_ready' : 'idle');
+  }
 }
 
 function findItemByCode(value) {
@@ -2232,6 +2272,12 @@ async function processBarcodeScan(rawValue) {
     if (input) input.value = '';
     showBarcodeFeedback('', false);
     focusBarcodeInput();
+    return;
+  }
+  // LAY- barcode → open layaway directly
+  if (/^LAY-[A-Z0-9]{6}$/i.test(value)) {
+    if (input) input.value = '';
+    layawayOpenByRef(value.toUpperCase());
     return;
   }
   setBarcodeProcessingState(true);
@@ -2332,6 +2378,8 @@ function bindEvents(){
   const returnFindBtn=document.getElementById('returnFindBtn');
   const returnLoadBtn=document.getElementById('returnLoadBtn');
   if(returnBtn&&returnOverlay){ returnBtn.addEventListener('click',()=>openReturnOverlay()); }
+  const checkoutReturnBtn=document.getElementById('checkoutReturnBtn');
+  if(checkoutReturnBtn){ checkoutReturnBtn.addEventListener('click',()=>openReturnOverlay()); }
   if(returnCloseBtn){ returnCloseBtn.addEventListener('click', ()=>hideReturnOverlay()); }
   if(returnOverlay){ returnOverlay.addEventListener('click', e=>{ if(e.target===returnOverlay) hideReturnOverlay(); }); document.addEventListener('keydown', e=>{ if(e.key==='Escape') hideReturnOverlay(); }); }
   if(returnFindBtn){ returnFindBtn.addEventListener('click', ()=>findReturnSale()); }
@@ -2359,6 +2407,42 @@ function bindEvents(){
   if(settingsBackBtn){ settingsBackBtn.addEventListener('click',()=>{ if(settingsView) settingsView.style.display='none'; if(menuView) menuView.style.display='block'; }); }
   if(settingsSaveBtn){ settingsSaveBtn.addEventListener('click',()=>{ saveSettingsFromForm(); applySettings(); if(settingsView) settingsView.style.display='none'; if(menuView) menuView.style.display='block'; }); }
   if(openCashMenuBtn){ openCashMenuBtn.addEventListener('click', ()=>{ if(cashMenuOverlay){ cashMenuOverlay.style.display='flex'; cashMenuOverlay.style.visibility='visible'; cashMenuOverlay.style.opacity='1'; } }); }
+  const openDrawerBtn=document.getElementById('openDrawerBtn');
+  if(openDrawerBtn){ openDrawerBtn.addEventListener('click', async ()=>{
+    const ok = await pulseCashDrawer();
+    if(!ok) alert('Cash drawer could not be opened. Check the receipt agent is connected in Settings.');
+  }); }
+
+  // Petty cash
+  let _pettyCashType = 'in';
+  const pettyCashOverlay = document.getElementById('pettyCashOverlay');
+  const pettyCashTitle = document.getElementById('pettyCashTitle');
+  const pettyCashAmount = document.getElementById('pettyCashAmount');
+  const pettyCashReason = document.getElementById('pettyCashReason');
+  const pettyCashConfirm = document.getElementById('pettyCashConfirmBtn');
+  const pettyCashClose = document.getElementById('pettyCashCloseBtn');
+  function showPettyCash(type){
+    _pettyCashType = type;
+    if(pettyCashTitle) pettyCashTitle.textContent = type === 'in' ? 'Cash In' : 'Cash Out';
+    if(pettyCashConfirm){ pettyCashConfirm.className = type === 'in' ? 'btn btn-success w-100' : 'btn btn-danger w-100'; pettyCashConfirm.textContent = type === 'in' ? 'Confirm Cash In' : 'Confirm Cash Out'; }
+    if(pettyCashAmount) pettyCashAmount.value = '';
+    if(pettyCashReason) pettyCashReason.value = '';
+    if(pettyCashOverlay){ pettyCashOverlay.style.display='flex'; }
+    setTimeout(()=>{ if(pettyCashAmount) pettyCashAmount.focus(); }, 50);
+  }
+  const cashInBtn = document.getElementById('cashInBtn');
+  const cashOutBtn = document.getElementById('cashOutBtn');
+  if(cashInBtn){ cashInBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; showPettyCash('in'); }); }
+  if(cashOutBtn){ cashOutBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; showPettyCash('out'); }); }
+  if(pettyCashClose){ pettyCashClose.addEventListener('click', ()=>{ if(pettyCashOverlay) pettyCashOverlay.style.display='none'; }); }
+  if(pettyCashConfirm){ pettyCashConfirm.addEventListener('click', ()=>{
+    const amt = parseFloat(pettyCashAmount && pettyCashAmount.value) || 0;
+    const reason = (pettyCashReason && pettyCashReason.value.trim()) || '';
+    if(amt <= 0){ if(pettyCashAmount){ pettyCashAmount.style.outline='2px solid #dc2626'; pettyCashAmount.focus(); } return; }
+    if(pettyCashAmount) pettyCashAmount.style.outline='';
+    recordPettyCash(_pettyCashType, amt, reason);
+    if(pettyCashOverlay) pettyCashOverlay.style.display='none';
+  }); }
   if(cashMenuCloseBtn){ cashMenuCloseBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; }); }
   if(cashMenuOverlay){ cashMenuOverlay.addEventListener('click', e=>{ if(e.target===cashMenuOverlay) cashMenuOverlay.style.display='none'; }); }
   if(cashMenuOpenBtn){ cashMenuOpenBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; showOpeningOverlay(); }); }
@@ -2514,6 +2598,212 @@ function bindEvents(){
     }, 2000);
   }); }
   if(adminStatusBtn){ adminStatusBtn.addEventListener('click', async()=>{ showStatus('Fetching DB status...'); const out = await getJson('/api/db/status'); showStatus(out); }); }
+
+  // Invoice queue stats & retry
+  const invoiceQueueRefreshBtn = document.getElementById('invoiceQueueRefreshBtn');
+  const invoiceQueueRetryBtn   = document.getElementById('invoiceQueueRetryBtn');
+  const invoiceQueueStatsEl    = document.getElementById('invoiceQueueStats');
+  const posKeyInfoEl           = document.getElementById('posKeyInfo');
+  async function loadQueueStats() {
+    if(invoiceQueueStatsEl) invoiceQueueStatsEl.textContent = 'Loading…';
+    let d;
+    try { const r = await fetch('/api/admin/invoice-queue'); d = await r.json(); } catch(_){}
+    if(!d || d.status !== 'success'){ if(invoiceQueueStatsEl) invoiceQueueStatsEl.textContent = 'Failed to load stats.'; return; }
+    const s = d.stats;
+    if(invoiceQueueStatsEl){
+      invoiceQueueStatsEl.innerHTML =
+        `<strong>Till agent:</strong> pending: ${s.pending}, <span class="${s.failed>0?'text-danger fw-semibold':''}">failed: ${s.failed}</span>, sent: ${s.sent}<br>` +
+        `<strong>Server queue:</strong> pending: ${s.queue_pending}, failed: ${s.queue_failed}, confirmed: ${s.queue_confirmed}`;
+    }
+    if(posKeyInfoEl){
+      if(s.pos_key_is_default){
+        posKeyInfoEl.style.display = '';
+        posKeyInfoEl.className = 'alert alert-warning py-2 small mb-0';
+        posKeyInfoEl.textContent = `⚠ POS key is the default "SUPERSECRET123". Set POS_RECEIPT_KEY on both server and till agent to the same custom value.`;
+      } else if(s.pos_key_set){
+        posKeyInfoEl.style.display = '';
+        posKeyInfoEl.className = 'alert alert-success py-2 small mb-0';
+        posKeyInfoEl.textContent = `✓ POS key set (${s.pos_key_preview}). Ensure POS_RECEIPT_KEY in the till agent matches exactly.`;
+      } else {
+        posKeyInfoEl.style.display = '';
+        posKeyInfoEl.className = 'alert alert-danger py-2 small mb-0';
+        posKeyInfoEl.textContent = `✗ POS key is empty — set POS_RECEIPT_KEY env var to secure the ingest endpoint.`;
+      }
+    }
+  }
+  if(invoiceQueueRefreshBtn){ invoiceQueueRefreshBtn.addEventListener('click', loadQueueStats); }
+  if(invoiceQueueRetryBtn){ invoiceQueueRetryBtn.addEventListener('click', async ()=>{
+    invoiceQueueRetryBtn.disabled = true;
+    let d;
+    try { const r = await fetch('/api/admin/invoice-queue/retry-failed', {method:'POST'}); d = await r.json(); } catch(_){}
+    invoiceQueueRetryBtn.disabled = false;
+    if(d && d.status === 'success'){
+      alert(`Moved ${d.moved} failed invoice(s) back to pending. The till agent will retry shortly.`);
+      loadQueueStats();
+    } else {
+      alert('Retry request failed — check server logs.');
+    }
+  }); }
+
+  // Trapped sales
+  const trappedSalesRefreshBtn   = document.getElementById('trappedSalesRefreshBtn');
+  const trappedSalesDeleteAllBtn = document.getElementById('trappedSalesDeleteAllBtn');
+  const trappedSalesInfo         = document.getElementById('trappedSalesInfo');
+  const trappedSalesList         = document.getElementById('trappedSalesList');
+  const trappedSalesDeleteAll    = document.getElementById('trappedSalesDeleteAll');
+
+  function _buildTrappedSaleRow(s) {
+    const dt = (s.created_utc || '').replace('T',' ').substring(0,16) || '—';
+    const STATUS_CLASS = { failed:'text-danger', queued:'text-warning fw-semibold', posting:'text-info' };
+    const statusCls = STATUS_CLASS[s.queue_status] || '';
+    const sid8 = s.sale_id.substring(0,8);
+
+    // Items with diagnosis badges
+    const lineHtml = (s.lines||[]).map(ln => {
+      const badge = ln.in_local_db
+        ? `<span class="badge bg-success ms-1" title="Item found in local DB">&#10003;</span>`
+        : `<span class="badge bg-danger ms-1" title="Item not found in local DB — may not exist in ERPNext">missing</span>`;
+      const attrs = ln.attributes ? ` <span class="text-muted">(${ln.attributes})</span>` : '';
+      return `<div class="d-flex justify-content-between small py-1 border-bottom">
+        <span>${ln.item_name}${attrs}${badge} &times;${ln.qty}</span>
+        <span class="text-muted ms-2">£${parseFloat(ln.line_total||0).toFixed(2)}</span>
+      </div>`;
+    }).join('') || '<div class="small text-muted">No lines found</div>';
+
+    const payHtml = (s.payments||[]).map(p =>
+      `<span class="badge bg-secondary me-1">${p.method}: £${parseFloat(p.amount_gbp||0).toFixed(2)}</span>`
+    ).join('') || '';
+
+    const diagHtml = s.diagnosis
+      ? `<div class="alert alert-warning py-1 px-2 small mt-2 mb-0">${s.diagnosis}</div>` : '';
+
+    const errHtml = s.last_error
+      ? `<div class="text-danger small mt-1" style="word-break:break-word;"><strong>Error:</strong> ${s.last_error}</div>` : '';
+
+    return `<div class="border rounded mb-2 overflow-hidden" data-sale-id="${s.sale_id}">
+      <div class="d-flex justify-content-between align-items-start px-2 py-2 gap-2 trapped-sale-header" style="cursor:pointer;background:#f8f9fa;">
+        <div class="small" style="min-width:0;">
+          <span class="font-monospace">${sid8}…</span>
+          &nbsp;<span class="${statusCls}">${s.queue_status}</span>
+          <span class="text-muted ms-2">${dt}</span>
+          &nbsp;£${parseFloat(s.total||0).toFixed(2)}
+          ${s.cashier ? `<span class="text-muted ms-1">(${s.cashier})</span>` : ''}
+        </div>
+        <span class="text-muted small flex-shrink-0">&#9660;</span>
+      </div>
+      <div class="trapped-sale-detail px-2 pb-2 pt-1" style="display:none;">
+        <div class="mb-2">${lineHtml}</div>
+        ${payHtml ? `<div class="mb-2">${payHtml}</div>` : ''}
+        ${diagHtml}${errHtml}
+        <div class="d-flex gap-2 mt-2 trapped-sale-actions" data-sale-id="${s.sale_id}">
+          <button class="btn btn-outline-primary btn-sm trapped-retry-btn">Retry sync</button>
+          <button class="btn btn-outline-danger btn-sm trapped-delete-btn">Delete</button>
+        </div>
+        <div class="trapped-retry-result small mt-1"></div>
+      </div>
+    </div>`;
+  }
+
+  async function loadTrappedSales() {
+    if(trappedSalesInfo) trappedSalesInfo.textContent = 'Loading…';
+    if(trappedSalesList){ trappedSalesList.innerHTML = ''; trappedSalesList.style.display = 'none'; }
+    if(trappedSalesDeleteAll) trappedSalesDeleteAll.style.display = 'none';
+    let d;
+    try { const r = await fetch('/api/admin/trapped-sales'); d = await r.json(); } catch(_){}
+    if(!d || d.status !== 'success'){
+      if(trappedSalesInfo) trappedSalesInfo.textContent = 'Failed to load trapped sales.';
+      return;
+    }
+    const sales = d.sales || [];
+    if(!sales.length){
+      if(trappedSalesInfo) trappedSalesInfo.textContent = 'No trapped sales — all synced.';
+      return;
+    }
+    if(trappedSalesInfo) trappedSalesInfo.textContent = `${sales.length} sale${sales.length !== 1 ? 's' : ''} pending sync:`;
+    if(trappedSalesList){
+      trappedSalesList.innerHTML = sales.map(s => _buildTrappedSaleRow(s)).join('');
+      trappedSalesList.style.display = 'block';
+    }
+    if(trappedSalesDeleteAll) trappedSalesDeleteAll.style.display = 'block';
+
+    // Expand/collapse on header click
+    trappedSalesList.querySelectorAll('.trapped-sale-header').forEach(hdr => {
+      hdr.addEventListener('click', () => {
+        const detail = hdr.nextElementSibling;
+        const arrow  = hdr.querySelector('span:last-child');
+        const open   = detail.style.display !== 'none';
+        detail.style.display = open ? 'none' : 'block';
+        if(arrow) arrow.textContent = open ? '▼' : '▲';
+      });
+    });
+
+    // Per-row retry
+    trappedSalesList.querySelectorAll('.trapped-retry-btn').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        const actions = btn.closest('.trapped-sale-actions');
+        const sid = actions.dataset.saleId;
+        const resultEl = btn.closest('.trapped-sale-detail').querySelector('.trapped-retry-result');
+        btn.disabled = true; btn.textContent = 'Retrying…';
+        let d2;
+        try {
+          const r2 = await fetch('/api/admin/trapped-sales/retry', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ sale_id: sid })
+          });
+          d2 = await r2.json();
+        } catch(_){}
+        btn.disabled = false; btn.textContent = 'Retry sync';
+        if(!d2){ if(resultEl) resultEl.innerHTML = '<span class="text-danger">Request failed.</span>'; return; }
+        if(d2.posted){
+          if(resultEl) resultEl.innerHTML = `<span class="text-success">Posted &#10003; — ${d2.erp_docname}</span>`;
+          setTimeout(loadTrappedSales, 1200);
+        } else {
+          if(resultEl) resultEl.innerHTML = `<span class="text-danger"><strong>ERPNext error:</strong> ${d2.error || 'unknown'}</span>`;
+        }
+      });
+    });
+
+    // Per-row delete
+    trappedSalesList.querySelectorAll('.trapped-delete-btn').forEach(btn => {
+      btn.addEventListener('click', async e => {
+        e.stopPropagation();
+        const sid = btn.closest('.trapped-sale-actions').dataset.saleId;
+        if(!confirm(`Delete sale ${sid.substring(0,8)}…? This cannot be undone.`)) return;
+        await deleteTrappedSales([sid]);
+      });
+    });
+  }
+
+  async function deleteTrappedSales(saleIds) {
+    let d;
+    try {
+      const r = await fetch('/api/admin/trapped-sales/delete', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ sale_ids: saleIds })
+      });
+      d = await r.json();
+    } catch(_){}
+    if(d && d.status === 'success'){
+      const msg = d.skipped && d.skipped.length
+        ? `Deleted ${d.deleted}. Skipped ${d.skipped.length} (already posted).`
+        : `Deleted ${d.deleted} sale${d.deleted !== 1 ? 's' : ''}.`;
+      if(trappedSalesInfo) trappedSalesInfo.textContent = msg;
+      loadTrappedSales();
+    } else {
+      alert('Delete failed — check server logs.');
+    }
+  }
+
+  if(trappedSalesRefreshBtn) trappedSalesRefreshBtn.addEventListener('click', loadTrappedSales);
+  if(trappedSalesDeleteAllBtn) trappedSalesDeleteAllBtn.addEventListener('click', async () => {
+    const rows = trappedSalesList ? trappedSalesList.querySelectorAll('[data-sale-id]') : [];
+    const ids = [...new Set([...rows].map(el => el.dataset.saleId))];
+    if(!ids.length) return;
+    if(!confirm(`Delete all ${ids.length} trapped sale${ids.length !== 1 ? 's' : ''}? This cannot be undone.`)) return;
+    await deleteTrappedSales(ids);
+  });
+
   if(reprintLastBtn){ reprintLastBtn.addEventListener('click',()=>{ if(lastReceiptInfo) showReceiptOverlay(lastReceiptInfo); else alert('No receipt available to reprint yet.'); }); }
   // search field opens overlay
   const s=document.getElementById('itemSearch'); if(s){ s.addEventListener('focus',()=>showSearchOverlay()); s.addEventListener('input',e=>showSearchOverlay(e.target.value)); }
@@ -2540,6 +2830,8 @@ function bindEvents(){
   const badgeWrap=document.querySelector('.cashier-wrap');
   if(badgeWrap){ badgeWrap.addEventListener('click',e=>{ if(e.target!==badge && !currentCashier){ e.stopPropagation(); log('cashier wrap clicked'); showLogin(); } }); }
   if(logout){ logout.addEventListener('click',e=>{ e.stopPropagation(); if(menu) menu.classList.remove('open'); logoutToLogin(); }); }
+  const trainingBtn=document.getElementById('cashierTrainingBtn');
+  if(trainingBtn){ trainingBtn.addEventListener('click',e=>{ e.stopPropagation(); if(!currentCashier) return; const levels=settings.cashier_training_levels||{}; const cur=getActiveCashierTrainingLevel(); const next=(cur+1)%4; levels[currentCashier.code]=next; settings.cashier_training_levels=levels; saveSettings(); updateCashierTrainingBtn(); if(typeof TrainingWheels!=='undefined') TrainingWheels.init(next); }); }
   document.addEventListener('click',e=>{ const wrap=document.querySelector('.cashier-wrap'); if(menu&&wrap&&!wrap.contains(e.target)) menu.classList.remove('open'); });
   document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&menu) menu.classList.remove('open'); });
   // login overlay
@@ -2568,7 +2860,7 @@ function bindEvents(){
           browseLoading = true;
           renderSearchItems();
           searchDebounceTimer = setTimeout(()=>{
-            fetchBrowseItems({ brand: null, q, force: true })
+            fetchBrowseItems({ brand: selectedBrand || null, q, force: true })
               .then(list=>{
                 searchItems = list;
                 browseLoading = false;
@@ -2687,6 +2979,21 @@ function bindEvents(){
       });
     }
     
+    // Plastic bag quick-add button
+    const addPlasticBagBtn = document.getElementById('addPlasticBagBtn');
+    if(addPlasticBagBtn){
+      if(!plasticBagItemCode){ addPlasticBagBtn.style.display = 'none'; }
+      else {
+        addPlasticBagBtn.addEventListener('click', ()=>{
+          const item = items.find(x => x.item_code === plasticBagItemCode || x.name === plasticBagItemCode);
+          if(!item){ alert('Plastic bag item not found in catalogue. Check POS_PLASTIC_BAG_ITEM setting.'); return; }
+          addSimpleItemToCart(item);
+          renderCheckoutCart();
+          updateCashSection();
+        });
+      }
+    }
+
     const applyOtherBtn = document.getElementById('applyOtherBtn');
     if(applyOtherBtn){
       applyOtherBtn.addEventListener('click', ()=>{
@@ -2877,10 +3184,47 @@ function bindEvents(){
     });
     btn.__posTenderBound = true;
   });
+  // Layaway store button
+  const layStoreBtn = document.getElementById('layawayStoreBtn');
+  if (layStoreBtn) layStoreBtn.addEventListener('click', () => openLayawayStore());
+  // Put on Layaway button in checkout
+  const putLayawayBtn = document.getElementById('putOnLayawayBtn');
+  if (putLayawayBtn) putLayawayBtn.addEventListener('click', () => { hideCheckoutOverlay(); startLayawayFlow(); });
+  // Layaway store close
+  const layStoreClose = document.getElementById('layawayStoreCloseBtn');
+  if (layStoreClose) layStoreClose.addEventListener('click', closeLayawayStore);
+  // Layaway status filter
+  const layFilter = document.getElementById('layawayStatusFilter');
+  if (layFilter) layFilter.addEventListener('change', () => renderLayawayList());
+  // Sync layaways from ERPNext
+  const laySyncBtn = document.getElementById('lawaySyncFromErpBtn') || document.getElementById('layawaySyncFromErpBtn');
+  if (laySyncBtn) laySyncBtn.addEventListener('click', syncLayawaysFromErp);
+  // Layaway detail close
+  const layDetailClose = document.getElementById('layawayDetailCloseBtn');
+  if (layDetailClose) layDetailClose.addEventListener('click', closeLayawayDetail);
+  // Customer name prompt
+  const layCancelNameBtn = document.getElementById('layawayCustomerCancelBtn');
+  if (layCancelNameBtn) layCancelNameBtn.addEventListener('click', closeLayawayModals);
+  const layNextBtn = document.getElementById('layawayCustomerNextBtn');
+  if (layNextBtn) layNextBtn.addEventListener('click', layawayCustomerNext);
+  const layCustInput = document.getElementById('layawayCustomerInput');
+  if (layCustInput) layCustInput.addEventListener('keydown', e => { if (e.key === 'Enter') layawayCustomerNext(); });
+  // Payment modal
+  const layPayBackBtn = document.getElementById('layawayPaymentBackBtn');
+  if (layPayBackBtn) layPayBackBtn.addEventListener('click', () => { layawayHidePaymentModal(); layawayShowCustomerModal(); });
+  const layPayConfirmBtn = document.getElementById('layawayPaymentConfirmBtn');
+  if (layPayConfirmBtn) layPayConfirmBtn.addEventListener('click', layawayConfirmCreate);
+  // Method pills
+  document.querySelectorAll('.lay-method-btn').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('.lay-method-btn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+    });
+  });
 }
 
-function showMenu(){ const o=document.getElementById('menuOverlay'); const mv=document.getElementById('menuView'); const sv=document.getElementById('settingsView'); if(!o){ err('loginOverlay element missing'); return; }
-  neutralizeForeignOverlays(); if(mv) mv.style.display='block'; if(sv) sv.style.display='none'; o.style.display='flex';
+function showMenu(){ const o=document.getElementById('menuOverlay'); const mv=document.getElementById('menuView'); const sv=document.getElementById('settingsView'); const av=document.getElementById('adminView'); if(!o){ err('loginOverlay element missing'); return; }
+  neutralizeForeignOverlays(); if(mv) mv.style.display='block'; if(sv) sv.style.display='none'; if(av) av.style.display='none'; o.style.display='flex';
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity }); } catch(_){} }
@@ -2913,7 +3257,9 @@ function loadSettings(){
         show_zero_stock: false,
         till_open: false,
         till_opened_at: null,
-        till_closed_at: null
+        till_closed_at: null,
+        training_level: 0,
+        cashier_training_levels: {}
       }, s);
     }
   }catch(e){}
@@ -3023,6 +3369,8 @@ function populateSettingsForm(){
   if(searchView) searchView.value = (settings.search_view_mode || 'variants');
   if(header) header.value = (settings.receipt_header!=null?settings.receipt_header:RECEIPT_DEFAULT_HEADER);
   if(footer) footer.value = (settings.receipt_footer!=null?settings.receipt_footer:'');
+  const trainingSelect=document.getElementById('trainingLevelSelect');
+  if(trainingSelect) trainingSelect.value = String(settings.training_level||0);
 }
 function saveSettingsFromForm(){
   const till=document.getElementById('tillNumberInput');
@@ -3049,7 +3397,25 @@ function saveSettingsFromForm(){
   }
   if(header) settings.receipt_header = normalizeMultilineInput(header.value||'');
   if(footer) settings.receipt_footer = normalizeMultilineInput(footer.value||'');
+  const trainingSelect=document.getElementById('trainingLevelSelect');
+  settings.training_level = trainingSelect ? parseInt(trainingSelect.value||'0',10) : 0;
   saveSettings();
+}
+function getActiveCashierTrainingLevel(){
+  if(currentCashier && currentCashier.code){
+    const levels = settings.cashier_training_levels || {};
+    if(levels[currentCashier.code] !== undefined) return levels[currentCashier.code];
+  }
+  return settings.training_level || 0;
+}
+function updateCashierTrainingBtn(){
+  const btn = document.getElementById('cashierTrainingBtn');
+  if(!btn) return;
+  if(!currentCashier){ btn.style.display='none'; return; }
+  btn.style.display='';
+  const lvl = getActiveCashierTrainingLevel();
+  const labels = ['Training: Off','Training: L1','Training: L2','Training: L3'];
+  btn.textContent = labels[lvl] || 'Training: Off';
 }
 function applySettings(){
   document.body.classList.toggle('dark-mode', !!settings.dark_mode);
@@ -3057,6 +3423,9 @@ function applySettings(){
   SEARCH_VIEW_MODE = (settings && settings.search_view_mode === 'tiles') ? 'tiles' : 'variants';
   if(typeof renderSearchStage === 'function'){
     try{ renderSearchStage(); }catch(_){}
+  }
+  if(typeof TrainingWheels !== 'undefined'){
+    TrainingWheels.init(getActiveCashierTrainingLevel());
   }
 }
 
@@ -3308,14 +3677,12 @@ function renderBrowseBrands(){
   g.innerHTML='';
   if(!list.length){
     const msg=document.createElement('div');
-    msg.className='col-12';
+    msg.className='search-grid-full';
     msg.innerHTML=`<div class="alert alert-secondary mb-0 small">No brands found.</div>`;
     g.appendChild(msg);
     return;
   }
   list.forEach(name=>{
-    const c=document.createElement('div');
-    c.className='col';
     const card=document.createElement('div');
     card.className='product-card browse-card';
     const title=document.createElement('div');
@@ -3323,15 +3690,14 @@ function renderBrowseBrands(){
     title.textContent=name;
     const meta=document.createElement('div');
     meta.className='browse-card-meta';
-    meta.textContent='Tap to view groups';
+    meta.textContent='Tap to view products';
     card.appendChild(title);
     card.appendChild(meta);
-    c.appendChild(card);
-    c.addEventListener('click', ()=>{
+    card.addEventListener('click', ()=>{
       selectedBrand = name;
       setSearchStage('items');
     });
-    g.appendChild(c);
+    g.appendChild(card);
   });
 }
 function renderSearchItems(){
@@ -3356,21 +3722,21 @@ function renderSearchItems(){
   g.innerHTML='';
   if(q && q.length < SEARCH_MIN_CHARS){
     const msg=document.createElement('div');
-    msg.className='col-12';
+    msg.className='search-grid-full';
     msg.innerHTML=`<div class="alert alert-secondary mb-0 small">Type at least ${SEARCH_MIN_CHARS} characters to search.</div>`;
     g.appendChild(msg);
     return;
   }
   if(browseLoading){
     const msg=document.createElement('div');
-    msg.className='col-12';
+    msg.className='search-grid-full';
     msg.innerHTML=`<div class="alert alert-secondary mb-0 small">Loading products…</div>`;
     g.appendChild(msg);
     return;
   }
   if(!list.length){
     const msg=document.createElement('div');
-    msg.className='col-12';
+    msg.className='search-grid-full';
     msg.innerHTML=`<div class="alert alert-secondary mb-0 small">No matching products${isShowZeroStockEnabled()?'':' with stock'}. Toggle "Show zero-stock lines" to include everything.</div>`;
     g.appendChild(msg);
     return;
@@ -3380,8 +3746,6 @@ function renderSearchItems(){
     return;
   }
   list.forEach(it=>{
-    const c=document.createElement('div');
-    c.className='col';
     const thumb = it.image ? thumbUrl(it.image, 180, 180) : '';
     const card=document.createElement('div');
     card.className='product-card';
@@ -3402,8 +3766,7 @@ function renderSearchItems(){
     card.appendChild(nameEl);
     card.appendChild(brandEl);
     card.appendChild(priceEl);
-    c.appendChild(card);
-    g.appendChild(c);
+    g.appendChild(card);
   });
 }
 
@@ -3421,6 +3784,7 @@ function renderSearchVariantTable(container, list){
       <th>Colour</th>
       <th>Width</th>
       <th>Size</th>
+      <th class="text-end">Price</th>
       <th class="text-end">Qty</th>
     </tr>
   `;
@@ -3439,6 +3803,7 @@ function renderSearchVariantTable(container, list){
       <td class="scroll-cell"><span class="scroll-text">${it.color || '-'}</span></td>
       <td class="scroll-cell"><span class="scroll-text">${it.width || '-'}</span></td>
       <td class="scroll-cell"><span class="scroll-text">${it.size || '-'}</span></td>
+      <td class="text-end scroll-cell"><span class="scroll-text">${formatItemPrice(it)}</span></td>
       <td class="text-end scroll-cell"><span class="scroll-text">${Number(it.stock_qty || 0)}</span></td>
     `;
     row.addEventListener('click', ()=>handleSearchVariantClick(it));
@@ -3499,6 +3864,17 @@ function handleSearchOverlayKeydown(e){
   if(typeof e.preventDefault === 'function') e.preventDefault();
   if(typeof e.stopPropagation === 'function') e.stopPropagation();
   if(key === 'Enter'){
+    const sb = document.getElementById('searchInputBig');
+    const val = sb ? sb.value.trim() : '';
+    // If the debounce timer is still pending, the Enter arrived too fast for human typing —
+    // treat it as a barcode scanner completing a scan, route through the barcode handler.
+    if(searchDebounceTimer && val){
+      clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = null;
+      hideSearchOverlay();
+      processBarcodeScan(val);
+      return;
+    }
     if(searchNavIndex >= 0 && searchNavIndex < searchNavItems.length){
       handleSearchVariantClick(searchNavItems[searchNavIndex]);
     }
@@ -3867,6 +4243,7 @@ function openCheckoutOverlay(options = {}){
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
+  if(typeof TrainingWheels !== 'undefined') TrainingWheels.setStep('checkout_open');
 }
 function hideCheckoutOverlay(){
   const o=document.getElementById('checkoutOverlay');
@@ -3898,11 +4275,22 @@ function renderCheckoutCart() {
     meta.textContent = `${item.qty} x ${money(item.rate)}${isRefund ? ' (refund)' : ''}` + (perDisc>0 ? ` (was ${money(base)}, -${perPct.toFixed(1)}%)` : '');
     details.appendChild(name);
     details.appendChild(meta);
+    const refundBtn = document.createElement('button');
+    refundBtn.type = 'button';
+    refundBtn.className = 'checkout-refund-btn' + (isRefund ? ' active' : '');
+    refundBtn.textContent = isRefund ? 'Refunding' : 'Refund';
+    refundBtn.title = isRefund ? 'Click to remove refund flag' : 'Mark this item as a return';
+    refundBtn.addEventListener('click', () => {
+      toggleRefund(item.item_code);
+      renderCheckoutCart();
+      updateCashSection();
+    });
     const price = document.createElement('div');
     price.className = 'price';
     price.textContent = money(lineTotal);
     row.appendChild(img);
     row.appendChild(details);
+    row.appendChild(refundBtn);
     row.appendChild(price);
     el.appendChild(row);
   });
@@ -3977,6 +4365,14 @@ function renderAppliedPayments(){
   if(totalEl){
     const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
     totalEl.textContent = paid>0 ? money(paid) : '';
+    if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+      const cartTotal = getCartTotal();
+      if(paid > 0 && cartTotal > 0 && paid + 1e-9 >= cartTotal){
+        TrainingWheels.setStep('payment_ready');
+      } else if(paid > 0 && cartTotal > 0){
+        TrainingWheels.setStep('payment_partial');
+      }
+    }
   }
   updateVoucherButtonLabel();
 }
@@ -4065,6 +4461,11 @@ function selectTender(t){
     }
     if ((t === 'card' || t === 'other') && !otherEntryDirty) {
       resetOtherEntry();
+    }
+    if(typeof TrainingWheels !== 'undefined'){
+      if(t==='cash') TrainingWheels.setStep('tender_cash');
+      else if(t==='card'||t==='other') TrainingWheels.setStep('tender_card');
+      else if(t==='voucher') TrainingWheels.setStep('tender_voucher');
     }
 
     // If voucher selected, open voucher overlay
@@ -4278,6 +4679,7 @@ async function completeSaleFromOverlay() {
     pendingVoucherBalancePrints = [];
     voucherSaleMode = false;
     hideCheckoutOverlay();
+    if(typeof TrainingWheels !== 'undefined') TrainingWheels.onSaleDone();
     updateCashSection();
     lastReceiptInfo = info;
     trackRecentItems(receiptItems);
@@ -4423,6 +4825,10 @@ function openVoucherOverlay(options = {}){
   const isIssue = voucherOverlayMode !== 'redeem';
   const isSaleIssue = voucherOverlayMode === 'issue_sale';
   const suggested = isSaleIssue ? 0 : (state.remaining > 0 ? state.remaining : state.due);
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    TrainingWheels.hideGuidePanel();
+    TrainingWheels.clearHints();
+  }
   overlay.style.display = 'flex';
   overlay.style.visibility = 'visible';
   overlay.style.opacity = '1';
@@ -4488,6 +4894,14 @@ function hideVoucherOverlay(){
   if(statusEl){
     statusEl.style.display='none';
     statusEl.textContent='';
+  }
+  // Return to checkout_open step if voucher was dismissed without completing
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    const paid = appliedPayments.reduce((s,p)=> s + Number(p.amount||0), 0);
+    const cartTotal = getCartTotal();
+    if(paid + 1e-9 >= cartTotal && paid > 0) TrainingWheels.setStep('payment_ready');
+    else if(paid > 0) TrainingWheels.setStep('payment_partial');
+    else TrainingWheels.setStep('checkout_open');
   }
 }
 async function submitVoucher(){
@@ -4927,12 +5341,20 @@ function openDiscountOverlay(){
   }));
   renderDiscountItems();
   resetDiscountValueInput();
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    TrainingWheels.hideGuidePanel();
+    TrainingWheels.clearHints();
+  }
   o.style.display='flex'; o.style.visibility='visible'; o.style.opacity='1';
+  if(typeof TrainingWheels !== 'undefined') TrainingWheels.setStep('tender_discount');
 }
 function hideDiscountOverlay(){
   const o=document.getElementById('discountOverlay');
   if(o) o.style.display='none';
   resetDiscountValueInput();
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    TrainingWheels.setStep('checkout_open');
+  }
 }
 function renderDiscountItems(){
   const list=document.getElementById('discountItemsList');
@@ -5036,6 +5458,11 @@ function openReturnOverlay(){
   const load=document.getElementById('returnLoadBtn');
   if(!o) return;
   neutralizeForeignOverlays();
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    TrainingWheels.hideGuidePanel();
+    TrainingWheels.clearHints();
+    if(TrainingWheels.clearHighlights) TrainingWheels.clearHighlights();
+  }
   if(err){ err.textContent=''; err.style.display='none'; }
   if(res){ res.innerHTML=''; }
   if(load){ load.disabled=true; load.dataset.saleId=''; }
@@ -5043,8 +5470,15 @@ function openReturnOverlay(){
   o.style.visibility='visible';
   o.style.opacity='1';
   setTimeout(()=>{ if(input){ input.value=''; input.focus(); } }, 0);
+  if(typeof TrainingWheels !== 'undefined') TrainingWheels.setStep('return_open');
 }
-function hideReturnOverlay(){ const o=document.getElementById('returnOverlay'); if(o) o.style.display='none'; }
+function hideReturnOverlay(){
+  const o=document.getElementById('returnOverlay');
+  if(o) o.style.display='none';
+  if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0){
+    TrainingWheels.setStep('checkout_open');
+  }
+}
 function extractSaleId(raw){
   const v = String(raw||'').trim();
   if(!v) return '';
@@ -5170,6 +5604,8 @@ async function attemptLogin(){
     currentCashier = { code: d.cashier.code, name: d.cashier.name };
     setCashierSession(d.session || null, d.session_ping_interval || 60);
     updateCashierInfo();
+    updateCashierTrainingBtn();
+    if(typeof TrainingWheels !== 'undefined') TrainingWheels.init(getActiveCashierTrainingLevel());
     hideLogin();
     resetIdleTimer();
     enforceTillOpenState();
@@ -5235,6 +5671,8 @@ function logoutToLogin(reason){
   }
   currentCashier=null;
   updateCashierInfo();
+  updateCashierTrainingBtn();
+  if(typeof TrainingWheels !== 'undefined') TrainingWheels.init(0);
   showLogin();
   if(reason){
     const e=document.getElementById('loginError');
@@ -5406,6 +5844,29 @@ async function enrichSaleItems(sale){
 
 
 
+function recordPettyCash(type, amount, reason){
+  const agg = _ensureZAggToday();
+  if(!agg.petty_cash) agg.petty_cash = { in:0, out:0, entries:[] };
+  agg.petty_cash[type] = (agg.petty_cash[type] || 0) + amount;
+  agg.petty_cash.entries.push({ type, amount, reason, time: new Date().toLocaleTimeString() });
+  saveSettings();
+  const label = type === 'in' ? 'Cash In' : 'Cash Out';
+  alert(`${label} of £${amount.toFixed(2)} recorded${reason ? ': ' + reason : ''}.`);
+  pulseCashDrawer();
+}
+
+function _pettyCashLines(agg){
+  const pc = agg.petty_cash;
+  if(!pc || (!pc.in && !pc.out)) return [];
+  const lines = ['', 'Petty Cash'];
+  if(pc.in) lines.push(`  Cash In: +${money(pc.in)}`);
+  if(pc.out) lines.push(`  Cash Out: -${money(pc.out)}`);
+  if(pc.entries && pc.entries.length){
+    pc.entries.forEach(e=> lines.push(`    ${e.time} ${e.type==='in'?'+':'-'}${money(e.amount)}${e.reason?' ('+e.reason+')':''}`));
+  }
+  return lines;
+}
+
 async function printZRead(){
   try{
     const opening = Number(settings.opening_float||0);
@@ -5429,6 +5890,8 @@ async function printZRead(){
     const groupLines = Object.entries(perGroup)
       .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
       .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
+    const pc = agg.petty_cash || { in:0, out:0 };
+    const expectedCash = opening + cashSales + (pc.in||0) - (pc.out||0);
     const lines = [
       'Z-Read',
       `Date: ${new Date().toLocaleString()}`,
@@ -5452,6 +5915,8 @@ async function printZRead(){
       '',
       'By Tender',
       ...tenderLines,
+      ..._pettyCashLines(agg),
+      `  Expected Cash in Drawer: ${money(expectedCash)}`,
       '',
       'By Cashier',
       ...(cashierLines.length ? cashierLines : ['  No data']),
@@ -5474,6 +5939,7 @@ async function printZRead(){
       settings.till_closed_at = new Date().toISOString();
       const d = todayStr();
       if(settings.z_agg && settings.z_agg[d]) delete settings.z_agg[d];
+      // petty cash entries are included in z_agg and cleared above
       saveSettings();
     }catch(_){ }
 
@@ -5514,6 +5980,8 @@ async function printXRead(){
     const groupLines = Object.entries(perGroup)
       .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
       .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
+    const pc = agg.petty_cash || { in:0, out:0 };
+    const expectedCash = opening + cashSales + (pc.in||0) - (pc.out||0);
     const lines = [
       'X-Read',
       `Date: ${new Date().toLocaleString()}`,
@@ -5537,6 +6005,8 @@ async function printXRead(){
       '',
       'By Tender',
       ...tenderLines,
+      ..._pettyCashLines(agg),
+      `  Expected Cash in Drawer: ${money(expectedCash)}`,
       '',
       'By Cashier',
       ...(cashierLines.length ? cashierLines : ['  No data']),
@@ -6065,4 +6535,968 @@ function assembleLineSections(body, headerLines = [], footerLines = []) {
     segments.push(footerLines.join('\n'));
   }
   return segments.join('\n');
+}
+
+// ── Layaway Module ────────────────────────────────────────────────────────────
+
+let _layawayCart = null;       // snapshot of cart at "Put on Layaway" time
+let _layawayCustomerTag = '';  // customer name entered in the modal
+let _layawayCurrentRef = null; // ref of layaway open in detail view
+
+// ── Badge ──────────────────────────────────────────────────────────────────────
+
+async function layawayRefreshBadge() {
+  try {
+    const r = await fetch('/api/layaways/badge');
+    if (!r.ok) return;
+    const d = await r.json();
+    const badge = document.getElementById('layawayBadge');
+    if (!badge) return;
+    const count = d.count || 0;
+    if (count > 0) {
+      badge.textContent = count;
+      badge.style.display = 'inline-flex';
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (_) { /* ignore */ }
+}
+
+// Refresh badge on page load and periodically
+setTimeout(layawayRefreshBadge, 2000);
+setInterval(layawayRefreshBadge, 60000);
+
+// ── Flow: Put on Layaway ───────────────────────────────────────────────────────
+
+function startLayawayFlow() {
+  if (!currentCashier) { showLogin(); return; }
+  if (!cart || cart.length === 0) { alert('Cart is empty.'); return; }
+  _layawayCart = cart.map(i => ({ ...i }));  // snapshot
+  _layawayCustomerTag = '';
+  layawayShowCustomerModal();
+}
+
+function layawayShowCustomerModal() {
+  const m = document.getElementById('layawayCustomerModal');
+  const inp = document.getElementById('layawayCustomerInput');
+  const err = document.getElementById('layawayCustomerError');
+  if (m) m.style.display = 'flex';
+  if (inp) { inp.value = _layawayCustomerTag || ''; inp.focus(); }
+  if (err) err.style.display = 'none';
+}
+
+function layawayHideCustomerModal() {
+  const m = document.getElementById('layawayCustomerModal');
+  if (m) m.style.display = 'none';
+}
+
+function layawayShowPaymentModal() {
+  const m = document.getElementById('layawayPaymentModal');
+  const inp = document.getElementById('layawayDepositInput');
+  const err = document.getElementById('layawayPaymentError');
+  if (m) m.style.display = 'flex';
+  if (inp) { inp.value = '0'; inp.focus(); }
+  if (err) err.style.display = 'none';
+  // Reset method selection
+  document.querySelectorAll('.lay-method-btn').forEach((b, i) => {
+    b.classList.toggle('active', i === 0);
+  });
+}
+
+function layawayHidePaymentModal() {
+  const m = document.getElementById('layawayPaymentModal');
+  if (m) m.style.display = 'none';
+}
+
+function closeLayawayModals() {
+  layawayHideCustomerModal();
+  layawayHidePaymentModal();
+  _layawayCart = null;
+}
+
+function layawayCustomerNext() {
+  const inp = document.getElementById('layawayCustomerInput');
+  const errEl = document.getElementById('layawayCustomerError');
+  const name = (inp ? inp.value : '').trim();
+  if (!name) {
+    if (errEl) { errEl.textContent = 'Please enter a customer name.'; errEl.style.display = 'block'; }
+    if (inp) inp.focus();
+    return;
+  }
+  _layawayCustomerTag = name;
+  layawayHideCustomerModal();
+  layawayShowPaymentModal();
+}
+
+async function layawayConfirmCreate() {
+  const confirmBtn = document.getElementById('layawayPaymentConfirmBtn');
+  const errEl = document.getElementById('layawayPaymentError');
+  const depInput = document.getElementById('layawayDepositInput');
+  const tendered = parseFloat(depInput ? depInput.value : '0') || 0;
+  const activeMethod = document.querySelector('.lay-method-btn.active');
+  const method = activeMethod ? activeMethod.dataset.method : 'Cash';
+
+  // Calculate the agreed total from the cart snapshot
+  const cartTotal = (_layawayCart || []).reduce((s, ci) => s + (ci.qty || 1) * (ci.rate || 0), 0);
+  // Cap deposit at cart total — show change if tendered more
+  const depositAmount = tendered > 0 ? Math.min(tendered, cartTotal) : 0;
+  const depositChange = tendered - depositAmount;
+
+  if (errEl) errEl.style.display = 'none';
+  if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'Creating…'; }
+
+  try {
+    const items = (_layawayCart || []).map(ci => ({
+      item_code: ci.item_code,
+      item_name: ci.item_name || ci.name || ci.item_code,
+      qty: ci.qty || 1,
+      rate: ci.rate || 0,
+    }));
+
+    const body = {
+      customer_tag: _layawayCustomerTag,
+      items,
+      cashier_code: currentCashier ? currentCashier.code : '',
+    };
+    if (depositAmount > 0) {
+      body.payment = { amount: depositAmount, method };
+    }
+
+    const r = await fetch('/api/layaways', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!r.ok || d.status !== 'success') {
+      throw new Error(d.message || 'Failed to create layaway');
+    }
+
+    const lay = d.layaway;
+    layawayHidePaymentModal();
+    _layawayCart = null;
+
+    // Clear the cart — items go to the shelf
+    cart = [];
+    appliedPayments = [];
+    vouchers = [];
+    issuedVouchers = [];
+    updateCartDisplay();
+    renderAppliedPayments && renderAppliedPayments();
+
+    // Use server-authoritative change (server caps deposit at total)
+    const confirmedChange = d.change || 0;
+    const confirmedDeposit = lay.paid || 0;
+
+    // Refresh badge
+    layawayRefreshBadge();
+
+    if (d.auto_completed) {
+      // Fully paid at creation — show the same completion screen as a normal final payment
+      showLayawayCompletionScreen(lay, confirmedDeposit, method, confirmedChange);
+    } else {
+      // Print receipts and show a brief summary alert
+      printLayawayReceipts(lay, confirmedDeposit, method, 'created');
+      const balance = lay.total - confirmedDeposit;
+      let successMsg = `Layaway ${lay.layaway_id} created!\nBalance: £${balance.toFixed(2)}\nExpires: ${formatLayawayDate(lay.expires_at)}`;
+      if (confirmedChange > 0.005) {
+        successMsg += `\n\n⚠ Give change: £${confirmedChange.toFixed(2)}`;
+      }
+      alert(successMsg);
+    }
+  } catch (e) {
+    if (errEl) { errEl.textContent = e.message || 'Error creating layaway'; errEl.style.display = 'block'; }
+  } finally {
+    if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'Confirm Layaway'; }
+  }
+}
+
+// ── Store View ─────────────────────────────────────────────────────────────────
+
+async function openLayawayStore() {
+  const overlay = document.getElementById('layawayStoreOverlay');
+  if (overlay) overlay.style.display = 'flex';
+  await renderLayawayList();
+}
+
+function closeLayawayStore() {
+  const overlay = document.getElementById('layawayStoreOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+async function syncLayawaysFromErp() {
+  const btn = document.getElementById('layawaySyncFromErpBtn');
+  const list = document.getElementById('layawayStoreList');
+  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+  if (list) list.innerHTML = '<div class="text-muted small p-2">Pulling from ERPNext…</div>';
+  try {
+    const r = await fetch('/api/layaways/pull-from-erp', { method: 'POST' });
+    const d = await r.json();
+    if (d.status === 'ok') {
+      const msg = `Sync complete — ${d.added} added, ${d.updated} updated, ${d.unchanged} unchanged${d.errors ? ', ' + d.errors + ' errors' : ''}.`;
+      if (list) list.innerHTML = `<div class="alert alert-success m-2 small">${msg}</div>`;
+      setTimeout(() => renderLayawayList(), 1800);
+    } else {
+      if (list) list.innerHTML = `<div class="alert alert-danger m-2 small">Sync failed: ${d.message || 'unknown error'}</div>`;
+    }
+  } catch (err) {
+    if (list) list.innerHTML = `<div class="alert alert-danger m-2 small">Sync error: ${err.message}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Sync from ERPNext'; }
+  }
+}
+
+async function renderLayawayList() {
+  const list = document.getElementById('layawayStoreList');
+  const filterEl = document.getElementById('layawayStatusFilter');
+  if (!list) return;
+  list.innerHTML = '<div class="text-muted small p-2">Loading…</div>';
+  const status = filterEl ? filterEl.value : 'active';
+  try {
+    const url = status ? `/api/layaways?status=${encodeURIComponent(status)}` : '/api/layaways';
+    const r = await fetch(url);
+    const d = await r.json();
+    if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
+    const layaways = d.layaways || [];
+    if (layaways.length === 0) {
+      list.innerHTML = '<div class="text-muted small p-3 text-center">No layaways found.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    const now = Date.now();
+    layaways.forEach(lay => {
+      const balance = (lay.total || 0) - (lay.paid || 0);
+      const expiry = new Date(lay.expires_at);
+      const expired = expiry < now;
+      const expiryStr = formatLayawayDate(lay.expires_at);
+      const row = document.createElement('div');
+      row.className = 'layaway-store-row' + (expired && lay.status === 'active' ? ' lay-expired' : '');
+      row.innerHTML = `
+        <div class="lay-row-id">${lay.layaway_id}</div>
+        <div class="lay-row-info">
+          <div class="lay-row-customer fw-semibold">${lay.customer_tag || ''}</div>
+          <div class="lay-row-items text-muted">${(lay.items || []).length} item(s)</div>
+          <div class="lay-row-expiry ${expired && lay.status === 'active' ? 'text-danger fw-semibold' : 'text-muted'}">${expired && lay.status === 'active' ? '⚠ Expired ' : ''}${expiryStr}</div>
+        </div>
+        <div class="lay-row-amounts">
+          <div class="lay-row-total text-muted">Total £${(lay.total || 0).toFixed(2)}</div>
+          <div class="lay-row-balance fw-bold ${balance <= 0 ? 'text-success' : ''}">Balance £${balance.toFixed(2)}</div>
+        </div>
+        <div class="lay-row-status badge bg-${layStatusColor(lay.status)}">${lay.status}</div>
+      `;
+      row.addEventListener('click', () => openLayawayDetail(lay.layaway_id));
+      list.appendChild(row);
+    });
+  } catch (e) {
+    list.innerHTML = `<div class="text-danger small p-2">${e.message}</div>`;
+  }
+}
+
+function layStatusColor(status) {
+  return { active: 'warning', completed: 'success', cancelled: 'secondary', expired: 'danger' }[status] || 'secondary';
+}
+
+// ── Detail View ────────────────────────────────────────────────────────────────
+
+async function layawayOpenByRef(ref) {
+  closeLayawayStore();
+  await openLayawayDetail(ref);
+  const overlay = document.getElementById('layawayDetailOverlay');
+  if (overlay) overlay.style.display = 'flex';
+}
+
+async function openLayawayDetail(ref) {
+  _layawayCurrentRef = ref;
+  const overlay = document.getElementById('layawayDetailOverlay');
+  const body = document.getElementById('layawayDetailBody');
+  const title = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (overlay) overlay.style.display = 'flex';
+  if (body) body.innerHTML = '<div class="text-muted small p-2">Loading…</div>';
+
+  try {
+    const r = await fetch(`/api/layaways/${encodeURIComponent(ref)}`);
+    const d = await r.json();
+    if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Not found');
+    const lay = d.layaway;
+    if (title) title.textContent = lay.layaway_id;
+    if (subtitle) subtitle.textContent = `Status: ${lay.status}  |  Expires: ${formatLayawayDate(lay.expires_at)}`;
+    if (body) body.innerHTML = renderLayawayDetailHTML(lay);
+    // Bind actions
+    bindLayawayDetailActions(lay);
+  } catch (e) {
+    if (body) body.innerHTML = `<div class="text-danger small p-2">${e.message}</div>`;
+  }
+}
+
+function renderLayawayDetailHTML(lay) {
+  const balance = (lay.total || 0) - (lay.paid || 0);
+  const items = lay.items || [];
+  const payments = lay.payments || [];
+  const isActive = lay.status === 'active';
+  const expired = lay.expires_at && new Date(lay.expires_at) < new Date();
+
+  // Expiry banner — shown prominently above everything when past the warning date
+  const expiryBannerHtml = (() => {
+    if (!isActive || !lay.expires_at) return '';
+    const expDate = new Date(lay.expires_at);
+    const now = new Date();
+    const daysUntil = Math.ceil((expDate - now) / 86400000);
+    if (daysUntil < 0) {
+      const daysOver = -daysUntil;
+      return `<div class="alert alert-danger d-flex align-items-center gap-2 mb-3">
+        <span style="font-size:1.4rem;">⚠️</span>
+        <div>
+          <div class="fw-bold">Expiry date passed ${daysOver} day${daysOver !== 1 ? 's' : ''} ago</div>
+          <div class="small">This layaway is overdue — extend the date or cancel and refund the customer.</div>
+        </div>
+      </div>`;
+    }
+    if (daysUntil <= 7) {
+      return `<div class="alert alert-warning d-flex align-items-center gap-2 mb-3">
+        <span style="font-size:1.4rem;">🕐</span>
+        <div>
+          <div class="fw-bold">Expires in ${daysUntil} day${daysUntil !== 1 ? 's' : ''}</div>
+          <div class="small">Consider contacting the customer or extending the date.</div>
+        </div>
+      </div>`;
+    }
+    return '';
+  })();
+
+  let html = `${expiryBannerHtml}<div class="lay-detail-summary">
+    <div class="lay-detail-stat"><div class="lay-stat-label">Agreed Total</div><div class="lay-stat-val">£${(lay.total || 0).toFixed(2)}</div></div>
+    <div class="lay-detail-stat"><div class="lay-stat-label">Paid So Far</div><div class="lay-stat-val text-success">£${(lay.paid || 0).toFixed(2)}</div></div>
+    <div class="lay-detail-stat"><div class="lay-stat-label">Balance Due</div><div class="lay-stat-val fw-bold ${balance <= 0 ? 'text-success' : ''}">£${balance.toFixed(2)}</div></div>
+  </div>`;
+
+  // Items table
+  html += `<table class="table table-sm lay-items-table mt-3"><thead><tr><th>Item</th><th>Qty</th><th class="text-end">Price</th><th class="text-end">Can Collect?</th></tr></thead><tbody>`;
+  items.forEach(it => {
+    const canCollect = (lay.paid || 0) >= it.original_rate * it.qty;
+    html += `<tr>
+      <td>${it.item_name || it.item_code}</td>
+      <td>${it.qty}</td>
+      <td class="text-end">£${(it.original_rate * it.qty).toFixed(2)}</td>
+      <td class="text-end">${canCollect ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>'}</td>
+    </tr>`;
+  });
+  html += `</tbody></table>`;
+
+  // Payments history
+  if (payments.length > 0) {
+    html += `<div class="fw-semibold small text-muted mb-1 mt-3">Payment History</div><ul class="lay-pay-history">`;
+    payments.forEach(p => {
+      html += `<li><span class="lay-pay-date">${formatLayawayDate(p.paid_at)}</span> <span class="lay-pay-method badge bg-secondary">${p.method}</span> <span class="lay-pay-amount">£${p.amount.toFixed(2)}</span></li>`;
+    });
+    html += `</ul>`;
+  }
+
+  // Action buttons
+  if (isActive) {
+    html += `<div class="lay-detail-actions mt-3">`;
+    if (balance > 0) {
+      html += `<div class="lay-payment-row mb-2">
+        <div class="d-flex gap-2 align-items-end">
+          <div class="input-group" style="max-width:200px;">
+            <span class="input-group-text">£</span>
+            <input type="number" id="layDetPayInput" class="form-control form-control-sm" min="0.01" step="0.01" placeholder="${balance.toFixed(2)}" />
+          </div>
+          <select id="layDetPayMethod" class="form-select form-select-sm" style="max-width:120px;">
+            <option>Cash</option><option>Card</option><option>Voucher</option>
+          </select>
+          <button id="layDetPayBtn" class="btn btn-success btn-sm">Take Payment</button>
+        </div>
+        <div id="layDetChangeRow" class="lay-change-row" style="display:none;">
+          <span class="lay-change-label">Change to give:</span>
+          <span id="layDetChangeAmt" class="lay-change-amt">£0.00</span>
+          <span class="lay-change-note text-muted">(payment will be capped at balance)</span>
+        </div>
+      </div>`;
+    }
+    if (balance <= 0) {
+      html += `<button id="layDetCompleteBtn" class="btn btn-success btn-sm me-2">Complete &amp; Invoice</button>`;
+    }
+    // Extend expiry always available for active layaways (pre-emptive extension, not just after expiry)
+    html += `<div class="d-flex gap-2 align-items-center mb-2">
+      <input type="date" id="layDetExtendDate" class="form-control form-control-sm" style="max-width:160px;" />
+      <button id="layDetExtendBtn" class="btn btn-outline-${expired ? 'danger' : 'primary'} btn-sm">
+        ${expired ? '⚠ Extend Expired Date' : 'Extend Expiry'}
+      </button>
+    </div>`;
+    const hasPaid = (lay.paid || 0) > 0;
+    html += `<button id="layDetCancelBtn" class="btn btn-outline-danger btn-sm">${hasPaid ? 'Cancel (Refund Required)' : 'Cancel'}</button>`;
+    html += `</div>`;
+  }
+
+  return html;
+}
+
+function bindLayawayDetailActions(lay) {
+  const ref = lay.layaway_id;
+  const cashierCode = currentCashier ? currentCashier.code : '';
+
+  // Take payment — with change handling
+  const payInput = document.getElementById('layDetPayInput');
+  const changeRow = document.getElementById('layDetChangeRow');
+  const changeAmt = document.getElementById('layDetChangeAmt');
+  const balance = (lay.total || 0) - (lay.paid || 0);
+
+  if (payInput && changeRow) {
+    payInput.addEventListener('input', () => {
+      const tendered = parseFloat(payInput.value) || 0;
+      const change = tendered - balance;
+      if (change > 0.005) {
+        changeAmt.textContent = `£${change.toFixed(2)}`;
+        changeRow.style.display = 'flex';
+      } else {
+        changeRow.style.display = 'none';
+      }
+    });
+  }
+
+  const payBtn = document.getElementById('layDetPayBtn');
+  if (payBtn) {
+    payBtn.addEventListener('click', () => {
+      const tendered = parseFloat(payInput ? payInput.value : '0') || 0;
+      const method = document.getElementById('layDetPayMethod').value;
+      if (tendered <= 0) { alert('Enter a valid amount'); return; }
+      const actualPayment = Math.min(tendered, balance);
+      const change = tendered - actualPayment;
+      showLayawayPaymentConfirm(lay, tendered, actualPayment, method, change, cashierCode);
+    });
+  }
+
+  // Complete
+  const completeBtn = document.getElementById('layDetCompleteBtn');
+  if (completeBtn) {
+    completeBtn.addEventListener('click', async () => {
+      if (!confirm('Mark this layaway as complete and raise a Sales Invoice?')) return;
+      completeBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/layaways/${encodeURIComponent(ref)}/complete`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cashier_code: cashierCode }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
+        layawayRefreshBadge();
+        closeLayawayDetail();
+        alert('Layaway completed. Sales Invoice queued.');
+      } catch (e) { alert(e.message); completeBtn.disabled = false; }
+    });
+  }
+
+  // Extend
+  const extendBtn = document.getElementById('layDetExtendBtn');
+  if (extendBtn) {
+    extendBtn.addEventListener('click', async () => {
+      const dateVal = document.getElementById('layDetExtendDate').value;
+      if (!dateVal) { alert('Pick a new expiry date'); return; }
+      const newExpires = new Date(dateVal).toISOString();
+      extendBtn.disabled = true;
+      try {
+        const r = await fetch(`/api/layaways/${encodeURIComponent(ref)}/extend`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expires_at: newExpires, cashier_code: cashierCode }),
+        });
+        const d = await r.json();
+        if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
+        layawayRefreshBadge();
+        await openLayawayDetail(ref);
+      } catch (e) { alert(e.message); extendBtn.disabled = false; }
+    });
+  }
+
+  // Cancel
+  const cancelBtn = document.getElementById('layDetCancelBtn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      showLayawayCancelConfirm(lay, cashierCode);
+    });
+  }
+}
+
+function closeLayawayDetail() {
+  const overlay = document.getElementById('layawayDetailOverlay');
+  if (overlay) overlay.style.display = 'none';
+  _layawayCurrentRef = null;
+  // Refresh store list if open
+  const storeOverlay = document.getElementById('layawayStoreOverlay');
+  if (storeOverlay && storeOverlay.style.display !== 'none') renderLayawayList();
+}
+
+// ── Receipt printing ───────────────────────────────────────────────────────────
+
+function formatLayawayDate(isoStr) {
+  if (!isoStr) return '';
+  try {
+    return new Date(isoStr).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  } catch (_) { return isoStr; }
+}
+
+function showLayawayCancelConfirm(lay, cashierCode) {
+  const overlay  = document.getElementById('layawayDetailOverlay');
+  const body     = document.getElementById('layawayDetailBody');
+  const title    = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (title)    title.textContent    = 'Cancel Layaway';
+  if (subtitle) subtitle.textContent = `${lay.layaway_id} — ${lay.customer_tag || ''}`;
+
+  const refundAmount = lay.paid || 0;
+  const hasPaid = refundAmount > 0.005;
+
+  const refundHtml = hasPaid
+    ? `<div class="alert alert-danger fw-bold fs-5 text-center">
+        Refund due to customer: £${refundAmount.toFixed(2)}
+        <div class="fw-normal fs-6 mt-1">Process via till after cancelling</div>
+       </div>`
+    : `<div class="alert alert-secondary text-center">No payments to refund</div>`;
+
+  const itemRows = (lay.items || []).map(it =>
+    `<tr><td>${it.item_name || it.item_code}</td><td class="text-end">x${it.qty}</td><td class="text-end">£${((it.original_rate || it.rate || 0) * it.qty).toFixed(2)}</td></tr>`
+  ).join('');
+
+  body.innerHTML = `
+    <div class="text-center mb-3">
+      <div style="font-size:2.5rem;line-height:1;">⚠️</div>
+      <div class="fw-bold fs-5 text-danger mt-1">This will permanently cancel the layaway</div>
+    </div>
+    ${refundHtml}
+    <table class="table table-sm mb-3">
+      <thead><tr><th>Item</th><th class="text-end">Qty</th><th class="text-end">Value</th></tr></thead>
+      <tbody>${itemRows}</tbody>
+    </table>
+    <div class="lay-detail-summary mb-3">
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Agreed Total</div>
+        <div class="lay-stat-val">£${(lay.total || 0).toFixed(2)}</div>
+      </div>
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Paid So Far</div>
+        <div class="lay-stat-val">£${refundAmount.toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="d-flex gap-2 mt-3">
+      <button id="layCancelBackBtn"    class="btn btn-outline-secondary flex-grow-1">Back</button>
+      <button id="layCancelConfirmBtn" class="btn btn-danger flex-grow-1 fw-bold">Confirm Cancel</button>
+    </div>
+    <div id="layCancelError" class="alert alert-danger mt-3" style="display:none;"></div>`;
+
+  if (overlay) overlay.style.display = 'flex';
+
+  document.getElementById('layCancelBackBtn').addEventListener('click', () => {
+    openLayawayDetail(lay.layaway_id);
+  });
+
+  const confirmBtn = document.getElementById('layCancelConfirmBtn');
+  confirmBtn.addEventListener('click', async () => {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Cancelling…';
+    document.getElementById('layCancelError').style.display = 'none';
+    try {
+      const r = await fetch(`/api/layaways/${encodeURIComponent(lay.layaway_id)}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cashier_code: cashierCode, refund_confirmed: true }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
+      layawayRefreshBadge();
+      showLayawayCancelledScreen(lay, refundAmount);
+    } catch (e) {
+      const errEl = document.getElementById('layCancelError');
+      if (errEl) { errEl.textContent = e.message || 'Cancellation failed'; errEl.style.display = 'block'; }
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = 'Confirm Cancel';
+    }
+  });
+}
+
+function showLayawayCancelledScreen(lay, refundAmount) {
+  const overlay  = document.getElementById('layawayDetailOverlay');
+  const body     = document.getElementById('layawayDetailBody');
+  const title    = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (title)    title.textContent    = 'Layaway Cancelled';
+  if (subtitle) subtitle.textContent = `${lay.layaway_id} — ${lay.customer_tag || ''}`;
+
+  const hasPaid = refundAmount > 0.005;
+  const refundHtml = hasPaid
+    ? `<div class="alert alert-warning fw-bold fs-4 text-center mt-2">
+        Process refund: £${refundAmount.toFixed(2)}
+        <div class="fw-normal fs-6 mt-1">Return cash / reverse card payment via till</div>
+       </div>`
+    : '';
+
+  const payments = lay.payments || [];
+  const payRows = payments.map(p =>
+    `<tr>
+      <td>${formatLayawayDate(p.paid_at)}</td>
+      <td><span class="badge bg-secondary">${p.method}</span></td>
+      <td class="text-end">£${(p.amount || 0).toFixed(2)}</td>
+    </tr>`
+  ).join('');
+
+  const payTable = payments.length > 0 ? `
+    <table class="table table-sm mb-3">
+      <thead><tr><th>Date</th><th>Method</th><th class="text-end">Amount</th></tr></thead>
+      <tbody>${payRows}</tbody>
+    </table>` : '';
+
+  body.innerHTML = `
+    <div class="text-center mb-3">
+      <div style="font-size:3rem;line-height:1;">❌</div>
+      <div class="fw-bold fs-4 text-danger mt-1">CANCELLED</div>
+      <div class="text-muted">${lay.customer_tag || ''}</div>
+    </div>
+    ${refundHtml}
+    ${payTable}
+    <div class="lay-detail-summary mb-3">
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Agreed Total</div>
+        <div class="lay-stat-val">£${(lay.total || 0).toFixed(2)}</div>
+      </div>
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Refund Due</div>
+        <div class="lay-stat-val ${hasPaid ? 'text-warning fw-bold' : ''}">£${refundAmount.toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="d-flex gap-2 mt-3">
+      <button id="layCancelledPrintBtn" class="btn btn-outline-primary flex-grow-1">Print Cancellation</button>
+      <button id="layCancelledDoneBtn"  class="btn btn-secondary flex-grow-1">Done</button>
+    </div>`;
+
+  if (overlay) overlay.style.display = 'flex';
+
+  document.getElementById('layCancelledPrintBtn').addEventListener('click', () => {
+    printLayawayReceipts(lay, refundAmount, '', 'cancelled');
+  });
+  document.getElementById('layCancelledDoneBtn').addEventListener('click', () => {
+    if (overlay) overlay.style.display = 'none';
+    openLayawayStore();
+  });
+}
+
+function showLayawayPaymentConfirm(lay, tendered, actualPayment, method, change, cashierCode) {
+  const overlay  = document.getElementById('layawayDetailOverlay');
+  const body     = document.getElementById('layawayDetailBody');
+  const title    = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (title)    title.textContent    = 'Confirm Payment';
+  if (subtitle) subtitle.textContent = `${lay.layaway_id} — ${lay.customer_tag || ''}`;
+
+  const balanceAfter = Math.max(0, (lay.total || 0) - (lay.paid || 0) - actualPayment);
+  const changeHtml = change > 0.005
+    ? `<div class="alert alert-warning fw-bold fs-5 text-center">Change to return: £${change.toFixed(2)}</div>`
+    : '';
+
+  body.innerHTML = `
+    <div class="lay-detail-summary mb-3">
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Tendered</div>
+        <div class="lay-stat-val fw-bold">£${tendered.toFixed(2)}</div>
+      </div>
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Applied to Layaway</div>
+        <div class="lay-stat-val fw-bold text-success">£${actualPayment.toFixed(2)}</div>
+      </div>
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Method</div>
+        <div class="lay-stat-val">${method}</div>
+      </div>
+    </div>
+    ${changeHtml}
+    <div class="lay-detail-summary mb-3">
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Balance After</div>
+        <div class="lay-stat-val ${balanceAfter > 0 ? 'text-warning fw-bold' : 'text-success fw-bold'}">£${balanceAfter.toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="d-flex gap-2 mt-3">
+      <button id="layConfirmBackBtn"    class="btn btn-outline-secondary flex-grow-1">Back</button>
+      <button id="layConfirmPayBtn"     class="btn btn-success flex-grow-1 fw-bold">Confirm Payment</button>
+    </div>
+    <div id="layConfirmError" class="alert alert-danger mt-3" style="display:none;"></div>`;
+
+  if (overlay) overlay.style.display = 'flex';
+
+  document.getElementById('layConfirmBackBtn').addEventListener('click', () => {
+    openLayawayDetail(lay.layaway_id);
+  });
+
+  const confirmPayBtn = document.getElementById('layConfirmPayBtn');
+  confirmPayBtn.addEventListener('click', async () => {
+    confirmPayBtn.disabled = true;
+    confirmPayBtn.textContent = 'Processing…';
+    document.getElementById('layConfirmError').style.display = 'none';
+    try {
+      const r = await fetch(`/api/layaways/${encodeURIComponent(lay.layaway_id)}/payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: tendered, method, cashier_code: cashierCode }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
+      const confirmedChange  = d.change || 0;
+      const confirmedAmount  = d.amount_applied || actualPayment;
+      layawayRefreshBadge();
+      if (d.auto_completed) {
+        showLayawayCompletionScreen(d.layaway, confirmedAmount, method, confirmedChange);
+      } else {
+        showLayawayPaymentScreen(d.layaway, confirmedAmount, method, confirmedChange);
+      }
+    } catch (e) {
+      const errEl = document.getElementById('layConfirmError');
+      if (errEl) { errEl.textContent = e.message || 'Payment failed'; errEl.style.display = 'block'; }
+      confirmPayBtn.disabled = false;
+      confirmPayBtn.textContent = 'Confirm Payment';
+    }
+  });
+}
+
+function showLayawayPaymentScreen(lay, paymentAmount, paymentMethod, change) {
+  const overlay  = document.getElementById('layawayDetailOverlay');
+  const body     = document.getElementById('layawayDetailBody');
+  const title    = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (title)    title.textContent    = 'Payment Accepted';
+  if (subtitle) subtitle.textContent = `${lay.layaway_id} — ${lay.customer_tag || ''}`;
+
+  const remaining = Math.max(0, (lay.total || 0) - (lay.paid || 0));
+  const paidSoFar = lay.paid || 0;
+  const numPayments = (lay.payments || []).length;
+
+  const changeHtml = change > 0.005
+    ? `<div class="alert alert-warning fw-bold fs-5 text-center mt-2">Give change: £${change.toFixed(2)}</div>`
+    : '';
+
+  body.innerHTML = `
+    <div class="text-center mb-3">
+      <div style="font-size:3rem;line-height:1;">💳</div>
+      <div class="fw-bold fs-4 text-success mt-1">£${paymentAmount.toFixed(2)} RECEIVED</div>
+      <div class="text-muted small">${paymentMethod}</div>
+    </div>
+    ${changeHtml}
+    <div class="lay-detail-summary mb-3">
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Agreed Total</div>
+        <div class="lay-stat-val">£${(lay.total || 0).toFixed(2)}</div>
+      </div>
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Paid So Far</div>
+        <div class="lay-stat-val text-success fw-bold">£${paidSoFar.toFixed(2)}</div>
+      </div>
+      <div class="lay-detail-stat">
+        <div class="lay-stat-label">Balance Remaining</div>
+        <div class="lay-stat-val ${remaining > 0 ? 'text-warning fw-bold' : 'text-success fw-bold'}">£${remaining.toFixed(2)}</div>
+      </div>
+    </div>
+    <div class="text-muted small text-center mb-3">
+      ${numPayments} payment${numPayments !== 1 ? 's' : ''} made &nbsp;·&nbsp; Expires ${formatLayawayDate(lay.expires_at)}
+    </div>
+    <div class="d-flex gap-2 mt-3">
+      <button id="layPaymentPrintBtn" class="btn btn-outline-primary flex-grow-1">Print Receipt</button>
+      <button id="layPaymentDoneBtn" class="btn btn-success flex-grow-1">Done</button>
+    </div>`;
+
+  if (overlay) overlay.style.display = 'flex';
+
+  document.getElementById('layPaymentPrintBtn').addEventListener('click', () => {
+    printLayawayReceipts(lay, paymentAmount, paymentMethod, 'payment');
+  });
+  document.getElementById('layPaymentDoneBtn').addEventListener('click', async () => {
+    if (overlay) overlay.style.display = 'none';
+    await openLayawayDetail(lay.layaway_id);
+  });
+}
+
+function showLayawayCompletionScreen(lay, lastPayment, lastMethod, change) {
+  const overlay = document.getElementById('layawayDetailOverlay');
+  const body = document.getElementById('layawayDetailBody');
+  const title = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (title) title.textContent = 'Layaway Complete';
+  if (subtitle) subtitle.textContent = `${lay.layaway_id} — ${lay.customer_tag || ''}`;
+
+  const payments = lay.payments || [];
+  let payRows = '';
+  payments.forEach(p => {
+    payRows += `<tr>
+      <td>${formatLayawayDate(p.paid_at)}</td>
+      <td><span class="badge bg-secondary">${p.method}</span></td>
+      <td class="text-end fw-semibold">£${(p.amount || 0).toFixed(2)}</td>
+    </tr>`;
+  });
+
+  const changeHtml = change > 0.005
+    ? `<div class="alert alert-warning fw-bold fs-5 text-center mt-3">Give change: £${change.toFixed(2)}</div>`
+    : '';
+
+  body.innerHTML = `
+    <div class="text-center mb-3">
+      <div style="font-size:3rem;line-height:1;">✅</div>
+      <div class="fw-bold fs-4 text-success mt-1">PAID IN FULL</div>
+      <div class="text-muted">${lay.customer_tag || ''}</div>
+    </div>
+    ${changeHtml}
+    <div class="lay-detail-summary mb-3">
+      <div class="lay-detail-stat"><div class="lay-stat-label">Agreed Total</div><div class="lay-stat-val">£${(lay.total || 0).toFixed(2)}</div></div>
+      <div class="lay-detail-stat"><div class="lay-stat-label">Total Paid</div><div class="lay-stat-val text-success fw-bold">£${(lay.paid || 0).toFixed(2)}</div></div>
+      <div class="lay-detail-stat"><div class="lay-stat-label">Balance</div><div class="lay-stat-val text-success fw-bold">£0.00</div></div>
+    </div>
+    <table class="table table-sm mb-3">
+      <thead><tr><th>Date</th><th>Method</th><th class="text-end">Amount</th></tr></thead>
+      <tbody>${payRows}</tbody>
+    </table>
+    <div class="d-flex gap-2 mt-3">
+      <button id="layCompletePrintBtn" class="btn btn-primary flex-grow-1">Print Collection Receipt</button>
+      <button id="layCompleteDoneBtn" class="btn btn-success flex-grow-1">Done</button>
+    </div>`;
+
+  if (overlay) overlay.style.display = 'flex';
+
+  document.getElementById('layCompletePrintBtn').addEventListener('click', () => {
+    printLayawayReceipts(lay, lastPayment, lastMethod, 'completed');
+  });
+  document.getElementById('layCompleteDoneBtn').addEventListener('click', () => {
+    if (overlay) overlay.style.display = 'none';
+    openLayawayStore();
+  });
+}
+
+
+async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
+  const balance = (lay.total || 0) - (lay.paid || 0);
+  const totalStr = `£${(lay.total || 0).toFixed(2)}`;
+  const paidStr  = `£${(lay.paid  || 0).toFixed(2)}`;
+  const balStr   = `£${balance.toFixed(2)}`;
+  const payStr   = paymentAmount > 0 ? `£${paymentAmount.toFixed(2)}` : '£0.00';
+
+  const itemLines = (lay.items || []).map(it =>
+    `${it.item_name || it.item_code}  x${it.qty}  £${(it.original_rate * it.qty).toFixed(2)}`
+  );
+
+  // ── Cancellation receipt ───────────────────────────────────────────────────
+  if (event === 'cancelled') {
+    const payments = lay.payments || [];
+    const payHistLines = payments.map(p =>
+      `  ${formatLayawayDate(p.paid_at)}  ${p.method.padEnd(8)} £${(p.amount || 0).toFixed(2)}`
+    );
+    const cancelLines = [
+      '================================',
+      '      LAYAWAY — CANCELLED',
+      '================================',
+      `Ref:      ${lay.layaway_id}`,
+      `Customer: ${lay.customer_tag || ''}`,
+      `Date:     ${formatLayawayDate(new Date().toISOString())}`,
+      '--------------------------------',
+      ...itemLines,
+      '--------------------------------',
+      ...(payHistLines.length > 0 ? ['Payments Made:', ...payHistLines, '--------------------------------'] : []),
+      `Total Was: ${totalStr}`,
+      `Paid:      ${paidStr}`,
+      ...(paymentAmount > 0.005 ? [`REFUND DUE: £${paymentAmount.toFixed(2)}`] : ['No refund due']),
+      '================================',
+      '     LAYAWAY CANCELLED',
+      '================================',
+    ];
+    await triggerReceiptPrint({ lines: cancelLines, title: `Cancelled ${lay.layaway_id}` });
+    return;
+  }
+
+  // ── Collection receipt (fully paid) ────────────────────────────────────────
+  if (event === 'completed') {
+    const payments = lay.payments || [];
+    const payHistLines = payments.map(p =>
+      `  ${formatLayawayDate(p.paid_at)}  ${p.method.padEnd(8)} £${(p.amount || 0).toFixed(2)}`
+    );
+    const collectionLines = [
+      '================================',
+      '      LAYAWAY — COLLECTED',
+      '================================',
+      `Ref:      ${lay.layaway_id}`,
+      `Customer: ${lay.customer_tag || ''}`,
+      `Date:     ${formatLayawayDate(new Date().toISOString())}`,
+      '--------------------------------',
+      ...itemLines,
+      '--------------------------------',
+      'Payment History:',
+      ...payHistLines,
+      '--------------------------------',
+      `Total:    ${totalStr}`,
+      `PAID:     ${paidStr}`,
+      paymentAmount > 0 ? `Last pmt: ${payStr} (${paymentMethod})` : '',
+      '================================',
+      '     THANK YOU — COLLECTED',
+      '================================',
+    ].filter(l => l !== '');
+    await triggerReceiptPrint({ lines: collectionLines, title: `Collected ${lay.layaway_id}` });
+    return;
+  }
+
+  // ── Deposit / instalment receipts ──────────────────────────────────────────
+  const expiryStr = formatLayawayDate(lay.expires_at);
+
+  const customerLines = [
+    '================================',
+    '          LAYAWAY RECEIPT',
+    '================================',
+    `Ref: ${lay.layaway_id}`,
+    `Date: ${formatLayawayDate(lay.created_at || new Date().toISOString())}`,
+    '--------------------------------',
+    ...itemLines,
+    '--------------------------------',
+    `Agreed Total:  ${totalStr}`,
+    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
+    `Total Paid:    ${paidStr}`,
+    `Balance Due:   ${balStr}`,
+    '--------------------------------',
+    `Expires:       ${expiryStr}`,
+    '--------------------------------',
+    `Barcode: ${lay.layaway_id}`,
+    '================================',
+  ].filter(l => l !== '');
+
+  const storeCopyLines = [
+    '================================',
+    '       LAYAWAY — STORE COPY',
+    '================================',
+    `Ref:      ${lay.layaway_id}`,
+    `Customer: ${lay.customer_tag || ''}`,
+    `Date: ${formatLayawayDate(lay.created_at || new Date().toISOString())}`,
+    '--------------------------------',
+    ...itemLines,
+    '--------------------------------',
+    `Agreed Total:  ${totalStr}`,
+    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
+    `Total Paid:    ${paidStr}`,
+    `Balance Due:   ${balStr}`,
+    '--------------------------------',
+    `Expires:       ${expiryStr}`,
+    '================================',
+  ].filter(l => l !== '');
+
+  // Print customer copy then store tally
+  await triggerReceiptPrint({ lines: customerLines, title: `Layaway ${lay.layaway_id}` });
+  await triggerReceiptPrint({ lines: storeCopyLines, title: `Store Copy ${lay.layaway_id}` });
+}
+
+async function triggerReceiptPrint(payload) {
+  const text = (payload.lines || []).join('\n');
+  const label = payload.title || 'Receipt';
+  if (receiptAgentClient && receiptAgentClient.isReady()) {
+    try {
+      await receiptAgentClient.printText(text, { line_feeds: 5, cut: true });
+      console.log(`[layaway] Printed: ${label}`);
+    } catch (e) {
+      console.warn(`[layaway] Print failed (${label}):`, e.message);
+      showBarcodeFeedback(`Print failed: ${e.message}`, true);
+    }
+  } else {
+    console.warn('[layaway] Receipt agent not configured — print skipped');
+    showBarcodeFeedback('Receipt agent not configured', true);
+  }
 }
