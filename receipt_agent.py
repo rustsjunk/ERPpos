@@ -1,23 +1,30 @@
 """
-Simple Flask-based ESC/POS print agent that writes raw bytes to a serial/USB printer.
+Simple Flask-based ESC/POS print agent that writes raw bytes to a printer.
 
-Install with: pip install flask pyserial
+Two modes:
+  1. Windows printer name (for USB printers via APD driver):
+       RECEIPT_PRINTER_NAME="EPSON TM-T20III Receipt" python receipt_agent.py
 
-Usage:
-  RECEIPT_SERIAL_PORT=COM3 \
-  RECEIPT_SERIAL_BAUD=9600 \
-  python receipt_agent.py
+  2. Direct serial/COM port:
+       RECEIPT_SERIAL_PORT=COM3 RECEIPT_SERIAL_BAUD=38400 python receipt_agent.py
 
 Then POST JSON to /print with `text` and optional `hex` sequences.
 """
 
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterable, Sequence
 
 from flask import Flask, jsonify, request
-from serial import Serial, SerialException
+
+try:
+    from serial import Serial, SerialException
+    _SERIAL_AVAILABLE = True
+except ImportError:
+    _SERIAL_AVAILABLE = False
+    SerialException = OSError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -123,6 +130,38 @@ LINE_FEEDS = int(os.environ.get("RECEIPT_LINE_FEEDS", "2"))
 CUT_AFTER_PRINT = os.environ.get("RECEIPT_CUT_AFTER_PRINT", "True").lower() in ("1", "true", "yes")
 HOST = os.environ.get("RECEIPT_AGENT_HOST", "127.0.0.1")
 PORT = int(os.environ.get("RECEIPT_AGENT_PORT", "5001"))
+PRINTER_NAME = os.environ.get("RECEIPT_PRINTER_NAME", "").strip()
+
+
+class _Win32Printer:
+    """Thin wrapper around a win32print job that exposes .write() like Serial."""
+    def __init__(self, handle):
+        self._h = handle
+
+    def write(self, data: bytes) -> None:
+        import win32print
+        win32print.WritePrinter(self._h, data)
+
+
+@contextmanager
+def _open_printer():
+    """Open either a Windows printer (by name) or a serial port."""
+    if PRINTER_NAME:
+        import win32print
+        hprinter = win32print.OpenPrinter(PRINTER_NAME)
+        try:
+            win32print.StartDocPrinter(hprinter, 1, ("Receipt", None, "RAW"))
+            try:
+                win32print.StartPagePrinter(hprinter)
+                yield _Win32Printer(hprinter)
+                win32print.EndPagePrinter(hprinter)
+            finally:
+                win32print.EndDocPrinter(hprinter)
+        finally:
+            win32print.ClosePrinter(hprinter)
+    else:
+        with Serial(SERIAL_PORT, BAUD_RATE, timeout=1) as ser:
+            yield ser
 
 
 def _sequence_to_bytes(sequence: Sequence[str]) -> Iterable[bytes]:
@@ -161,13 +200,13 @@ def _write_cut(ser: Serial) -> None:
     ser.write(b"\x1D\x56\x00")
 
 
-def _with_serial(func):
+def _with_printer(func):
     def wrapper(*args, **kwargs):
         try:
-            with Serial(SERIAL_PORT, BAUD_RATE, timeout=1) as ser:
-                return func(ser, *args, **kwargs)
-        except SerialException:
-            logging.exception("Serial error")
+            with _open_printer() as printer:
+                return func(printer, *args, **kwargs)
+        except Exception:
+            logging.exception("Printer error")
             raise
     return wrapper
 
@@ -195,21 +234,21 @@ def print_receipt():
     if hex_commands:
         logging.info("Printing extra hex commands: %s", hex_commands)
 
-    @_with_serial
-    def _send(ser: Serial) -> None:
-        _write_text(ser, text)
-        _write_custom_hex(ser, hex_commands)
+    @_with_printer
+    def _send(printer) -> None:
+        _write_text(printer, text)
+        _write_custom_hex(printer, hex_commands)
         if extra_line_feeds > 0:
-            ser.write(b"\n" * extra_line_feeds)
+            printer.write(b"\n" * extra_line_feeds)
         if cut:
-            _write_cut(ser)
+            _write_cut(printer)
 
     try:
         _send()
     except ValueError as exc:
         logging.warning("Bad hex payload: %s", exc)
         return jsonify(ok=False, error=str(exc)), 400
-    except SerialException as exc:
+    except Exception as exc:
         return jsonify(ok=False, error=str(exc)), 500
 
     logging.info("Printed receipt; text length=%d hex commands=%d", len(text), len(hex_commands))
@@ -300,20 +339,20 @@ def print_voucher():
     extra_line_feeds = int(payload.get("line_feeds", LINE_FEEDS))
     cut = payload.get("cut", CUT_AFTER_PRINT)
 
-    @_with_serial
-    def _send(ser: Serial) -> None:
-        _write_text(ser, text)
-        _write_custom_hex(ser, hex_commands)
+    @_with_printer
+    def _send(printer) -> None:
+        _write_text(printer, text)
+        _write_custom_hex(printer, hex_commands)
         if extra_line_feeds > 0:
-            ser.write(b"\n" * extra_line_feeds)
+            printer.write(b"\n" * extra_line_feeds)
         if cut:
-            _write_cut(ser)
+            _write_cut(printer)
 
     try:
         _send()
     except ValueError as exc:
         return jsonify(ok=False, error=str(exc)), 400
-    except SerialException as exc:
+    except Exception as exc:
         return jsonify(ok=False, error=str(exc)), 500
 
     return jsonify(ok=True, voucher_code=safe_code)
@@ -326,12 +365,9 @@ def health():
 
 
 if __name__ == "__main__":
-    logging.info(
-        "Starting receipt agent on http://%s:%d printing to %s@%d",
-        HOST,
-        PORT,
-        SERIAL_PORT,
-        BAUD_RATE,
-    )
+    if PRINTER_NAME:
+        logging.info("Starting receipt agent on http://%s:%d using Windows printer %r", HOST, PORT, PRINTER_NAME)
+    else:
+        logging.info("Starting receipt agent on http://%s:%d printing to %s@%d", HOST, PORT, SERIAL_PORT, BAUD_RATE)
     # Avoid Flask reloader to keep serial port exclusive
     app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
