@@ -465,8 +465,14 @@ def print_picking_note():
             colour     = (item.get("colour") or "").strip()
             size       = (item.get("size") or "").strip()
             style_code = (item.get("style_code") or "").strip()
+            brand      = (item.get("brand") or "").strip()
+            item_group = (item.get("item_group") or "").strip()
             _write_text(printer, thin)
             _write_text(printer, f"{name}\n")
+            if brand:
+                _write_text(printer, f"Brand: {brand}\n")
+            if item_group:
+                _write_text(printer, f"Dept: {item_group}\n")
             if style_code:
                 _write_text(printer, f"Style: {style_code}\n")
             detail_parts = []

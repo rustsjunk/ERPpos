@@ -4731,10 +4731,11 @@ function renderWebOrders(orders){
     return;
   }
   list.innerHTML = orders.map(o=>{
-    const printed = o.status==='printed';
+    const printed = o.status==='printed' || !!o.printed_at;
+    const printedAt = o.printed_at ? new Date(o.printed_at).toLocaleString() : '';
     const itemCards = (o.items||[]).map(i=>{
       const img = i.image_url ? `<img src="${i.image_url}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:4px;flex-shrink:0;" onerror="this.style.display='none'">` : '';
-      const details = [i.style_code&&`<span style="color:#555;">Style: ${i.style_code}</span>`, i.colour&&`<span>Colour: ${i.colour}</span>`, i.size&&`<span>Size: ${i.size}</span>`].filter(Boolean).join(' &bull; ');
+      const details = [i.brand&&`<span style="color:#555;">${i.brand}</span>`, i.item_group&&`<span style="color:#777;">${i.item_group}</span>`, i.style_code&&`<span style="color:#555;">Style: ${i.style_code}</span>`, i.colour&&`<span>Colour: ${i.colour}</span>`, i.size&&`<span>Size: ${i.size}</span>`].filter(Boolean).join(' &bull; ');
       return `<div style="display:flex;gap:8px;align-items:flex-start;padding:4px 0;border-bottom:1px solid #eee;">
         ${img}
         <div style="flex:1;font-size:0.8rem;">
@@ -4745,7 +4746,7 @@ function renderWebOrders(orders){
       </div>`;
     }).join('');
     const itemsSection = o.items && o.items.length ? `<div style="margin:6px 0;">${itemCards}</div>` : '<p class="small text-muted" style="margin:4px 0;">No items</p>';
-    const printedBanner = printed ? `<div style="background:#e0a800;color:#fff;font-size:0.75rem;font-weight:700;padding:3px 8px;border-radius:4px;margin-bottom:6px;letter-spacing:0.5px;">&#9888; ALREADY PRINTED — check someone isn't already picking this order</div>` : '';
+    const printedBanner = printed ? `<div style="background:#e0a800;color:#fff;font-size:0.75rem;font-weight:700;padding:3px 8px;border-radius:4px;margin-bottom:6px;letter-spacing:0.5px;">&#9888; ALREADY PRINTED${printedAt ? ' — ' + printedAt : ''} — check someone isn't already picking this order</div>` : '';
     return `
       <div class="border rounded p-2 mb-2" style="${printed?'background:#fffde7;border-color:#e0a800!important;':''}">
         ${printedBanner}
@@ -6835,11 +6836,10 @@ async function renderLayawayList() {
       return;
     }
     list.innerHTML = '';
-    const now = Date.now();
+    const todayStr = new Date().toISOString().slice(0, 10);
     layaways.forEach(lay => {
       const balance = (lay.total || 0) - (lay.paid || 0);
-      const expiry = new Date(lay.expires_at);
-      const expired = expiry < now;
+      const expired = lay.expires_at && lay.expires_at.slice(0, 10) <= todayStr;
       const expiryStr = formatLayawayDate(lay.expires_at);
       const row = document.createElement('div');
       row.className = 'layaway-store-row' + (expired && lay.status === 'active' ? ' lay-expired' : '');

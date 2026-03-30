@@ -1409,8 +1409,9 @@ body.dark-mode .lay-modal { background: #1e1e2e; color: #e0e0e0; }
 #putOnLayawayBtn { font-size: 0.9rem; }
 
 /* Layaway store overlay */
-.layaway-store-modal { max-width: 680px; width: 100%; }
-.layaway-store-list { max-height: calc(80vh - 120px); overflow-y: auto; }
+.layaway-store-modal { max-width: 680px; width: 100%; max-height: calc(100vh - 40px); overflow: hidden; display: flex; flex-direction: column; }
+.layaway-store-modal > .d-flex { flex-shrink: 0; }
+.layaway-store-list { flex: 1; overflow-y: auto; min-height: 0; }
 .layaway-store-row {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
@@ -1423,9 +1424,9 @@ body.dark-mode .lay-modal { background: #1e1e2e; color: #e0e0e0; }
   transition: background 0.12s;
 }
 .layaway-store-row:hover { background: #f8f9fa; }
-.layaway-store-row.lay-expired { background: #fff5f5; }
+.layaway-store-row.lay-expired { background: #fee2e2; border-left: 3px solid #ef4444; }
 body.dark-mode .layaway-store-row:hover { background: #2a2a3e; }
-body.dark-mode .layaway-store-row.lay-expired { background: #2e1a1a; }
+body.dark-mode .layaway-store-row.lay-expired { background: #3b1a1a; border-left: 3px solid #ef4444; }
 .lay-row-id { font-family: monospace; font-weight: 700; font-size: 0.9rem; white-space: nowrap; }
 .lay-row-info { min-width: 0; }
 .lay-row-items { font-size: 0.82rem; }

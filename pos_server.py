@@ -3604,6 +3604,7 @@ def api_web_orders():
                         'total':         o.get('total'),
                         'outstanding':   o.get('outstanding'),
                         'status':        o.get('status'),
+                        'printed_at':    o.get('printed_at'),
                         'items':         o.get('items') or [],
                     })
                 _web_orders_cache['orders'] = orders
@@ -3660,6 +3661,10 @@ def api_web_order_print_picking(order_id):
             requests.post(f'{ERPDASH_URL}/api/web-orders/{order_id}/mark-printed', timeout=5)
         except Exception:
             pass
+
+    # Bust the cache so the next poll immediately reflects the printed status
+    _web_orders_cache['ts'] = 0.0
+
     return jsonify(ok=True), 200
 
 
