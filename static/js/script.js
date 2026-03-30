@@ -1877,7 +1877,7 @@ async function loadItems(){
     console.error(error);
   }
 }
-async function loadCustomers(){ try{ const r=await fetch('/api/customers'); const d=await r.json(); if(d.status==='success'){ customers=d.customers; const b=document.getElementById('customerSelect'); const t=document.getElementById('topCustomerSelect'); customers.forEach(c=>{ if(b){const o=document.createElement('option'); o.value=c.name;o.textContent=c.customer_name;b.appendChild(o);} if(t){const o2=document.createElement('option'); o2.value=c.name;o2.textContent=c.customer_name;t.appendChild(o2);} }); setDefaultCustomer(); } }catch(e){ console.error(e);} }
+async function loadCustomers(){ try{ const r=await fetch('/api/customers'); const d=await r.json(); if(d.status==='success'){ customers=d.customers; } }catch(e){ console.error(e);} }
 
 function renderItems(list){
   homeItems = list || [];
@@ -4735,40 +4735,40 @@ function renderWebOrders(orders){
   }
   list.innerHTML = orders.map(o=>{
     const printed = o.status==='printed';
-    const itemRows = (o.items||[]).map(i=>`
-      <tr>
-        <td style="padding:2px 6px;">${i.item_name||i.item_code}</td>
-        <td style="padding:2px 6px;text-align:center;">${i.qty}</td>
-        <td style="padding:2px 6px;color:#666;">${i.barcode||i.item_code||''}</td>
-      </tr>`).join('');
-    const itemsTable = o.items && o.items.length ? `
-      <table style="width:100%;font-size:0.8rem;margin:6px 0;border-collapse:collapse;">
-        <thead><tr style="border-bottom:1px solid #ddd;">
-          <th style="padding:2px 6px;text-align:left;">Item</th>
-          <th style="padding:2px 6px;">Qty</th>
-          <th style="padding:2px 6px;text-align:left;">SKU</th>
-        </tr></thead>
-        <tbody>${itemRows}</tbody>
-      </table>` : '<p class="small text-muted" style="margin:4px 0;">No items</p>';
+    const itemCards = (o.items||[]).map(i=>{
+      const img = i.image_url ? `<img src="${i.image_url}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:4px;flex-shrink:0;" onerror="this.style.display='none'">` : '';
+      const details = [i.style_code&&`<span style="color:#555;">Style: ${i.style_code}</span>`, i.colour&&`<span>Colour: ${i.colour}</span>`, i.size&&`<span>Size: ${i.size}</span>`].filter(Boolean).join(' &bull; ');
+      return `<div style="display:flex;gap:8px;align-items:flex-start;padding:4px 0;border-bottom:1px solid #eee;">
+        ${img}
+        <div style="flex:1;font-size:0.8rem;">
+          <div style="font-weight:600;">${i.item_name||i.item_code}</div>
+          ${details ? `<div style="color:#666;font-size:0.75rem;">${details}</div>` : ''}
+          <div style="color:#888;font-size:0.75rem;">SKU: ${i.barcode||i.item_code||''}  &bull;  Qty: ${i.qty}</div>
+        </div>
+      </div>`;
+    }).join('');
+    const itemsSection = o.items && o.items.length ? `<div style="margin:6px 0;">${itemCards}</div>` : '<p class="small text-muted" style="margin:4px 0;">No items</p>';
+    const printedBanner = printed ? `<div style="background:#e0a800;color:#fff;font-size:0.75rem;font-weight:700;padding:3px 8px;border-radius:4px;margin-bottom:6px;letter-spacing:0.5px;">&#9888; ALREADY PRINTED — check someone isn't already picking this order</div>` : '';
     return `
-      <div class="border rounded p-2 mb-2" style="${printed?'background:#fffde7;':''}">
+      <div class="border rounded p-2 mb-2" style="${printed?'background:#fffde7;border-color:#e0a800!important;':''}">
+        ${printedBanner}
         <div class="d-flex justify-content-between align-items-start">
           <div>
             <span class="fw-bold">${o.order_number||o.id}</span>
-            <span class="text-muted ms-2">${o.customer_name||'Unknown customer'}</span>
+            <span class="text-muted ms-2 small">${o.customer_name||''}</span>
           </div>
           <span class="small text-muted">${o.date||''}</span>
         </div>
-        <div class="small text-muted">£${(o.outstanding||0).toFixed(2)} outstanding &bull; ${o.status||'pending'}</div>
-        ${itemsTable}
-        <button class="btn btn-sm btn-outline-secondary mt-1" onclick="printPickingNote('${o.id}')"
-          ${printed?'style="background:#e0a800;border-color:#e0a800;"':''}>
-          ${printed?'Reprint Picking Note':'Print Picking Note'}
+        <div class="small text-muted mb-1">£${(o.outstanding||0).toFixed(2)} outstanding</div>
+        ${itemsSection}
+        <button class="btn btn-sm mt-1 ${printed?'btn-warning':'btn-outline-secondary'}" onclick="printPickingNote('${o.id}',${printed})">
+          ${printed?'&#9888; Reprint Picking Note':'Print Picking Note'}
         </button>
       </div>`;
   }).join('');
 }
-async function printPickingNote(orderId){
+async function printPickingNote(orderId, alreadyPrinted){
+  if(alreadyPrinted && !confirm('This picking note has already been printed.\n\nMake sure nobody else is already collecting this order before printing again.\n\nPrint anyway?')) return;
   try{
     await fetch('/api/web-orders/'+orderId+'/print-picking', {method:'POST'});
     await pollWebOrders();
@@ -5654,7 +5654,7 @@ function loadReturnAsRefund(){
 }
 
 // Cashier/login helpers
-function getDefaultCustomerValue(){ if(!customers||customers.length===0) return ''; const w=customers.find(c=>(c.name||'').toUpperCase().includes('WALKIN') || (c.customer_name||'').toLowerCase()==='walk-in customer'); return w?w.name:(customers[0]&&customers[0].name?customers[0].name:''); }
+function getDefaultCustomerValue(){ return 'CUST-WALKIN'; }
 function setDefaultCustomer(){ const b=document.getElementById('customerSelect'), t=document.getElementById('topCustomerSelect'); const v=getDefaultCustomerValue(); if(v){ if(b) b.value=v; if(t) t.value=v; } }
 async function attemptLogin(){
   const codeEl = document.getElementById('cashierCodeInput');

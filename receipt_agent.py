@@ -11,9 +11,11 @@ Two modes:
 Then POST JSON to /print with `text` and optional `hex` sequences.
 """
 
+import io
 import logging
 import os
 import re
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterable, Sequence
@@ -26,6 +28,13 @@ try:
 except ImportError:
     _SERIAL_AVAILABLE = False
     SerialException = OSError
+
+try:
+    from PIL import Image as _PILImage
+    _PIL_AVAILABLE = True
+except ImportError:
+    _PIL_AVAILABLE = False
+    logging.warning("Pillow not installed — picking note images will be skipped")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -69,6 +78,60 @@ def _escpos_barcode_code39_hex(value: str, height: int = 80, width: int = 2, hri
     cmds.append(("1d 6b 04 " + data.hex(" ") + " 00").strip())
 
     return cmds
+
+
+def _escpos_image_bytes(image_url: str, max_width: int = 120) -> bytes:
+    """Download image_url and return ESC/POS GS v 0 raster bitmap bytes.
+
+    Resizes to max_width dots wide (capped square), converts to 1-bit with
+    Floyd-Steinberg dithering so it looks reasonable on thermal paper.
+    Returns empty bytes if PIL is unavailable or anything goes wrong.
+    """
+    if not _PIL_AVAILABLE or not image_url:
+        return b""
+    try:
+        req = urllib.request.Request(image_url, headers={"User-Agent": "ERPPos/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw_data = resp.read()
+
+        img = _PILImage.open(io.BytesIO(raw_data)).convert("RGB").convert("L")
+
+        # Resize to max_width, cap height to square to avoid huge tall images
+        w, h = img.size
+        if w > max_width:
+            h = max(1, int(h * max_width / w))
+            w = max_width
+            img = img.resize((w, h), _PILImage.LANCZOS)
+        if h > max_width:
+            w = max(1, int(w * max_width / h))
+            img = img.resize((w, max_width), _PILImage.LANCZOS)
+            w, h = img.size
+
+        # 1-bit with Floyd-Steinberg dithering (Pillow default for convert("1"))
+        img = img.convert("1")
+
+        # Pack pixels into ESC/POS raster format (MSB first, 1=black dot)
+        width_bytes = (w + 7) // 8
+        px = img.load()
+        raster = bytearray()
+        for y in range(h):
+            for bx in range(width_bytes):
+                byte = 0
+                for bit in range(8):
+                    x = bx * 8 + bit
+                    if x < w and not px[x, y]:   # 0 / False = black
+                        byte |= (0x80 >> bit)
+                raster.append(byte)
+
+        # GS v 0 — raster bit image: 1D 76 30 m xL xH yL yH [data]
+        xL = width_bytes & 0xFF
+        xH = (width_bytes >> 8) & 0xFF
+        yL = h & 0xFF
+        yH = (h >> 8) & 0xFF
+        return bytes([0x1D, 0x76, 0x30, 0x00, xL, xH, yL, yH]) + bytes(raster)
+    except Exception as exc:
+        logging.debug("[picking-note] image convert failed (%s): %s", image_url, exc)
+        return b""
 
 
 def _format_amount_label(amount: object, currency: str | None = "GBP") -> str:
@@ -367,12 +430,12 @@ def print_picking_note():
     Expected payload:
       order_number  - e.g. "#1001"
       customer_name - customer display name
-      items         - list of dicts with keys: name, brand, colour, size, barcode
-                      (image omitted — likely too low quality on thermal printer)
-
-    TODO: Build ESC/POS formatted text block per item (name, brand, colour, size, barcode line).
-    TODO: Print Code 39 barcode per item using _escpos_barcode_code39_hex().
-    TODO: Assess image quality on the printer before enabling — likely impractical on thermal.
+      date          - order date string
+      items         - list of dicts with keys:
+                        item_name, item_code, qty, barcode,
+                        colour, size, style_code, image_url  (all optional)
+                      image_url is fetched and printed as a ~120-dot raster thumbnail
+                      before each item; silently skipped if unreachable or PIL missing
     """
     if request.method == "OPTIONS":
         return jsonify(ok=True)
@@ -398,11 +461,30 @@ def print_picking_note():
             _write_text(printer, f"Date:     {date}\n")
         _write_text(printer, sep)
         for item in items:
-            name    = (item.get("item_name") or item.get("item_code") or "")[:32]
-            barcode = (item.get("barcode") or item.get("item_code") or "").strip()
-            qty     = item.get("qty", 1)
+            name       = (item.get("item_name") or item.get("item_code") or "")[:32]
+            barcode    = (item.get("barcode") or item.get("item_code") or "").strip()
+            qty        = item.get("qty", 1)
+            colour     = (item.get("colour") or "").strip()
+            size       = (item.get("size") or "").strip()
+            style_code = (item.get("style_code") or "").strip()
+            image_url  = (item.get("image_url") or "").strip()
             _write_text(printer, thin)
+            # Print thumbnail image if available
+            if image_url:
+                img_bytes = _escpos_image_bytes(image_url)
+                if img_bytes:
+                    printer.write(img_bytes)
+                    printer.write(b"\n")
             _write_text(printer, f"{name}\n")
+            if style_code:
+                _write_text(printer, f"Style: {style_code}\n")
+            detail_parts = []
+            if colour:
+                detail_parts.append(f"Colour: {colour}")
+            if size:
+                detail_parts.append(f"Size: {size}")
+            if detail_parts:
+                _write_text(printer, "  ".join(detail_parts) + "\n")
             _write_text(printer, f"Qty: {int(qty) if float(qty) == int(qty) else qty}\n")
             if barcode:
                 _write_text(printer, f"SKU: {barcode}\n")
