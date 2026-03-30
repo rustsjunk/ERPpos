@@ -6530,7 +6530,30 @@ function handleGlobalScan(code){
       return;
     }
 
-    // 3) Default: route to the barcode input for adding items
+    // 3) If search overlay is open, look up the barcode and open the product matrix
+    if(__isOverlayVisible('searchOverlay')){
+      hideSearchOverlay();
+      try {
+        const r = await fetch(`/api/lookup-barcode?code=${encodeURIComponent(value)}`);
+        if(r.ok){
+          const d = await r.json();
+          if(d && d.status === 'success' && d.variant){
+            const v = d.variant;
+            const templateId = v.parent_id || v.item_id;
+            await openProductByTemplateId(templateId, {
+              name: templateId,
+              item_name: v.name,
+              brand: v.brand,
+              item_group: v.item_group,
+            });
+            return;
+          }
+        }
+      } catch(_){}
+      // Barcode not found — fall through to normal add-to-cart
+    }
+
+    // 4) Default: route to the barcode input for adding items
     const scanInput = document.getElementById('barcodeInput');
     if(scanInput){
       if (barcodeScanInProgress) return;

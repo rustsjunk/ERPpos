@@ -2,6 +2,7 @@ from flask import Flask, render_template, request, jsonify, send_file
 from dotenv import load_dotenv
 import requests
 import os
+import copy
 import sqlite3
 from pathlib import Path
 import json as _json
@@ -3576,6 +3577,11 @@ def api_sales_status():
 
 _web_orders_cache: dict = {'orders': [], 'ts': 0.0}
 _WEB_ORDERS_CACHE_TTL = 30  # seconds — matches the 30 s poll interval on the frontend
+# Local printed-order registry — keyed by order id (ERPNext name), value is ISO timestamp.
+# This is the authoritative source for the printed flag on this POS terminal and is merged
+# into every /api/web-orders response so the flag shows instantly without relying on the
+# ERPDash → SQLite → response chain being error-free.
+_printed_orders: dict = {}
 
 @app.route('/api/web-orders')
 def api_web_orders():
@@ -3586,10 +3592,21 @@ def api_web_orders():
     Results are cached for 30 s so the overlay opens instantly on repeated opens.
     Returns empty list when ERPDash is unreachable or not configured.
     """
+    def _apply_printed(orders):
+        """Merge the local printed registry into an orders list (in-place)."""
+        for o in orders:
+            local_pa = _printed_orders.get(o.get('id') or '')
+            if local_pa:
+                o['printed_at'] = local_pa
+                o['status'] = 'printed'
+        return orders
+
     now = time.time()
     if ERPDASH_URL:
         if now - _web_orders_cache['ts'] < _WEB_ORDERS_CACHE_TTL:
-            return jsonify(orders=_web_orders_cache['orders']), 200
+            # Return cached orders but always re-apply local printed flags so a
+            # print that happened within the cache window is reflected immediately.
+            return jsonify(orders=_apply_printed(copy.deepcopy(_web_orders_cache['orders']))), 200
         try:
             r = requests.get(f'{ERPDASH_URL}/api/website/orders/rich', timeout=10)
             if r.ok:
@@ -3607,12 +3624,14 @@ def api_web_orders():
                         'printed_at':    o.get('printed_at'),
                         'items':         o.get('items') or [],
                     })
+                _apply_printed(orders)
                 _web_orders_cache['orders'] = orders
                 _web_orders_cache['ts'] = now
                 return jsonify(orders=orders), 200
         except Exception:
             if _web_orders_cache['orders']:
-                return jsonify(orders=_web_orders_cache['orders']), 200
+                import copy
+                return jsonify(orders=_apply_printed(copy.deepcopy(_web_orders_cache['orders']))), 200
     return jsonify(orders=[]), 200
 
 
@@ -3630,6 +3649,12 @@ def api_web_order_printed(order_id):
 @app.route('/api/web-orders/<order_id>/print-picking', methods=['POST'])
 def api_web_order_print_picking(order_id):
     """Fetch order from ERPDash, send picking note to receipt agent, mark as printed."""
+    # Record as printed immediately in the local registry so the next /api/web-orders
+    # response reflects it even if the ERPDash mark-printed call later fails.
+    printed_at_iso = datetime.utcnow().isoformat() + 'Z'
+    _printed_orders[order_id] = printed_at_iso
+    _web_orders_cache['ts'] = 0.0  # bust cache so the next poll fetches fresh data
+
     # Fetch rich order data from ERPDash
     order = None
     if ERPDASH_URL:
@@ -3661,9 +3686,6 @@ def api_web_order_print_picking(order_id):
             requests.post(f'{ERPDASH_URL}/api/web-orders/{order_id}/mark-printed', timeout=5)
         except Exception:
             pass
-
-    # Bust the cache so the next poll immediately reflects the printed status
-    _web_orders_cache['ts'] = 0.0
 
     return jsonify(ok=True), 200
 
@@ -4319,6 +4341,8 @@ def api_lookup_barcode():
         SELECT i.item_id,
                i.name,
                i.brand,
+               i.item_group,
+               i.parent_id,
                i.vat_rate,
                i.custom_style_code,
                (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
@@ -4337,6 +4361,8 @@ def api_lookup_barcode():
                 SELECT i.item_id,
                        i.name,
                        i.brand,
+                       i.item_group,
+                       i.parent_id,
                        i.vat_rate,
                        i.custom_style_code,
                        (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS rate,
@@ -4353,6 +4379,8 @@ def api_lookup_barcode():
     attrs = _variant_attrs_dict(conn, row['item_id'])
     style_code = (row['custom_style_code'] or '').strip() if row['custom_style_code'] else ''
     brand = row['brand'] if row['brand'] else None
+    item_group = row['item_group'] if row['item_group'] else None
+    parent_id = row['parent_id'] if row['parent_id'] else None
     out = {
       'item_id': row['item_id'],
       'name': row['name'],
@@ -4360,7 +4388,8 @@ def api_lookup_barcode():
       'vat_rate': float(row['vat_rate']) if row['vat_rate'] is not None else None,
       'qty': float(row['qty']) if row['qty'] is not None else 0.0,
       'brand': brand,
-      'item_group': brand,
+      'item_group': item_group,
+      'parent_id': parent_id,
       'attributes': attrs,
       'style_code': style_code
     }
