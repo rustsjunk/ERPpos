@@ -5678,6 +5678,7 @@ async function attemptLogin(){
     hideLogin();
     resetIdleTimer();
     enforceTillOpenState();
+    layawayRefreshBadge();
   }catch(e){
     err('login error', e);
     if(errEl){ errEl.textContent='Unable to contact database'; errEl.style.display='block'; }
@@ -6616,7 +6617,9 @@ let _layawayCurrentRef = null; // ref of layaway open in detail view
 
 async function layawayRefreshBadge() {
   try {
-    const r = await fetch('/api/layaways/badge');
+    if (!currentCashier) return;
+    const url = `/api/layaways/badge?cashier=${encodeURIComponent(currentCashier.code)}`;
+    const r = await fetch(url);
     if (!r.ok) return;
     const d = await r.json();
     const badge = document.getElementById('layawayBadge');

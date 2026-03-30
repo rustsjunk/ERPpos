@@ -5292,17 +5292,24 @@ def api_layaways_list():
 
 @app.route('/api/layaways/badge')
 def api_layaways_badge():
-    """Return count of active layaways that have passed their expiry date."""
+    """Return count of active expired layaways created by the given cashier."""
     conn = _db_connect()
     if not conn:
         return jsonify({'count': 0})
     try:
         _lay_ensure_tables(conn)
         today = datetime.utcnow().strftime('%Y-%m-%d')
-        # Compare date-only so layaways expiring any time today show as expired all day
-        row = conn.execute(
-            "SELECT COUNT(*) AS c FROM layaways WHERE status='active' AND DATE(expires_at) <= ?", (today,)
-        ).fetchone()
+        cashier = (request.args.get('cashier') or '').strip()
+        if cashier:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM layaways WHERE status='active' AND created_by=? AND DATE(expires_at) <= ?",
+                (cashier, today)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM layaways WHERE status='active' AND DATE(expires_at) <= ?",
+                (today,)
+            ).fetchone()
         return jsonify({'count': int(row['c'] if row else 0)})
     except Exception:
         return jsonify({'count': 0})
