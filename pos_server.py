@@ -2909,26 +2909,15 @@ def api_cashier_login():
     conn = _db_connect()
     if not conn:
         return jsonify({'status': 'error', 'message': 'Database not available'}), 500
-    try:
-        _maybe_sync_cashiers(conn)
-    except Exception:
-        pass
     row = conn.execute(
         "SELECT code, name FROM cashiers WHERE active=1 AND (code = ? OR code = ltrim(?, '0'))",
         (code, code)
     ).fetchone()
     if not row and code.lstrip('0'):
-        # Optional: try stripped form
         stripped = code.lstrip('0')
         row = conn.execute("SELECT code, name FROM cashiers WHERE active=1 AND code = ?", (stripped,)).fetchone()
     if not row:
         return jsonify({'status': 'error', 'message': 'Invalid code'}), 401
-    try:
-        ingested = _ingest_new_local_invoices(conn)
-        if ingested:
-            app.logger.info("Ingested %s local invoice(s) into SQLite during cashier login", ingested)
-    except Exception:
-        pass
     session_id = _register_cashier_session(row['code'])
     if session_id:
         app.logger.info("Cashier %s session started (active=%d)", row['code'], _active_session_count())
@@ -2940,6 +2929,19 @@ def api_cashier_login():
         'session_ttl': SESSION_TTL_SECONDS
     }
     _ensure_idle_worker()
+    # Run expensive post-login tasks in the background so the response is instant
+    def _post_login_tasks():
+        try:
+            _maybe_sync_cashiers(conn)
+        except Exception:
+            pass
+        try:
+            ingested = _ingest_new_local_invoices(conn)
+            if ingested:
+                app.logger.info("Ingested %s local invoice(s) into SQLite (post-login)", ingested)
+        except Exception:
+            pass
+    threading.Thread(target=_post_login_tasks, daemon=True).start()
     return jsonify(payload)
 
 
@@ -3572,15 +3574,22 @@ def api_sales_status():
     return jsonify({'status': 'success', 'counts': counts, 'invoices_pending': pending})
 
 
+_web_orders_cache: dict = {'orders': [], 'ts': 0.0}
+_WEB_ORDERS_CACHE_TTL = 30  # seconds — matches the 30 s poll interval on the frontend
+
 @app.route('/api/web-orders')
 def api_web_orders():
     """Proxy pending web (Shopify) orders from ERPDash for display on the POS.
 
     Calls /api/website/orders/rich on ERPDash to get orders with line items,
     then maps to the format the POS overlay expects.
+    Results are cached for 30 s so the overlay opens instantly on repeated opens.
     Returns empty list when ERPDash is unreachable or not configured.
     """
+    now = time.time()
     if ERPDASH_URL:
+        if now - _web_orders_cache['ts'] < _WEB_ORDERS_CACHE_TTL:
+            return jsonify(orders=_web_orders_cache['orders']), 200
         try:
             r = requests.get(f'{ERPDASH_URL}/api/website/orders/rich', timeout=10)
             if r.ok:
@@ -3597,9 +3606,12 @@ def api_web_orders():
                         'status':        o.get('status'),
                         'items':         o.get('items') or [],
                     })
+                _web_orders_cache['orders'] = orders
+                _web_orders_cache['ts'] = now
                 return jsonify(orders=orders), 200
         except Exception:
-            pass
+            if _web_orders_cache['orders']:
+                return jsonify(orders=_web_orders_cache['orders']), 200
     return jsonify(orders=[]), 200
 
 
@@ -5248,12 +5260,13 @@ def api_layaways_list():
     try:
         _lay_ensure_tables(conn)
         status_filter = (request.args.get('status') or '').strip()
-        now = _utcnow_z()
+        today = datetime.utcnow().strftime('%Y-%m-%d')
         if status_filter == 'expired':
-            # 'expired' is not a stored status — it means active layaways past their expiry date
+            # 'expired' is not a stored status — it means active layaways whose expiry date
+            # is today or earlier (date-only so they show all day, not just after the exact time)
             rows = conn.execute(
-                "SELECT * FROM layaways WHERE status='active' AND expires_at <= ? ORDER BY expires_at ASC",
-                (now,)
+                "SELECT * FROM layaways WHERE status='active' AND DATE(expires_at) <= ? ORDER BY expires_at ASC",
+                (today,)
             ).fetchall()
         elif status_filter:
             rows = conn.execute(
@@ -5285,9 +5298,10 @@ def api_layaways_badge():
         return jsonify({'count': 0})
     try:
         _lay_ensure_tables(conn)
-        now = _utcnow_z()
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        # Compare date-only so layaways expiring any time today show as expired all day
         row = conn.execute(
-            "SELECT COUNT(*) AS c FROM layaways WHERE status='active' AND expires_at <= ?", (now,)
+            "SELECT COUNT(*) AS c FROM layaways WHERE status='active' AND DATE(expires_at) <= ?", (today,)
         ).fetchone()
         return jsonify({'count': int(row['c'] if row else 0)})
     except Exception:

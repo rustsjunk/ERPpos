@@ -960,9 +960,6 @@ const receiptBuilder = (() => {
       const cashierLine = [info.cashier.code||'', info.cashier.name||''].filter(Boolean).join(' ').trim();
       meta.push(['Cashier', cashierLine]);
     }
-    if(info.customer){
-      meta.push(['Customer', info.customer]);
-    }
     meta.forEach(([label, value])=>{ if(value) write(padLine(`${label}:`, value)); });
     if(gift){
       write(centerText('*** GIFT RECEIPT ***'));

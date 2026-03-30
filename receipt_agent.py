@@ -433,9 +433,7 @@ def print_picking_note():
       date          - order date string
       items         - list of dicts with keys:
                         item_name, item_code, qty, barcode,
-                        colour, size, style_code, image_url  (all optional)
-                      image_url is fetched and printed as a ~120-dot raster thumbnail
-                      before each item; silently skipped if unreachable or PIL missing
+                        colour, size, style_code  (all optional)
     """
     if request.method == "OPTIONS":
         return jsonify(ok=True)
@@ -467,14 +465,7 @@ def print_picking_note():
             colour     = (item.get("colour") or "").strip()
             size       = (item.get("size") or "").strip()
             style_code = (item.get("style_code") or "").strip()
-            image_url  = (item.get("image_url") or "").strip()
             _write_text(printer, thin)
-            # Print thumbnail image if available
-            if image_url:
-                img_bytes = _escpos_image_bytes(image_url)
-                if img_bytes:
-                    printer.write(img_bytes)
-                    printer.write(b"\n")
             _write_text(printer, f"{name}\n")
             if style_code:
                 _write_text(printer, f"Style: {style_code}\n")
