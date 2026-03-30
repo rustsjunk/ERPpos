@@ -64,10 +64,8 @@ def _escpos_barcode_code39_hex(value: str, height: int = 80, width: int = 2, hri
 
     cmds = []
 
-    # Initialize (ESC @)
-    cmds.append("1b 40")
-    cmds.append("1d 4c 18 00")
-
+    # Center alignment (ESC a 1) — must be set before the barcode command
+    cmds.append("1b 61 01")
     # Barcode params
     cmds.append(f"1d 68 {height:02x}")  # GS h n
     cmds.append(f"1d 77 {width:02x}")   # GS w n
@@ -76,6 +74,8 @@ def _escpos_barcode_code39_hex(value: str, height: int = 80, width: int = 2, hri
     # Print Code39: GS k m d1..dk NUL (for m=4)
     # Format: 1D 6B 04 <data bytes> 00
     cmds.append(("1d 6b 04 " + data.hex(" ") + " 00").strip())
+    # Restore left alignment after barcode
+    cmds.append("1b 61 00")
 
     return cmds
 
@@ -448,18 +448,34 @@ def print_picking_note():
 
     @_with_printer
     def _send(printer) -> None:
-        sep  = "=" * 32 + "\n"
-        thin = "-" * 32 + "\n"
-        _write_text(printer, sep)
-        _write_text(printer, "         PICKING NOTE\n")
-        _write_text(printer, sep)
-        _write_text(printer, f"Order:    {order_number}\n")
-        _write_text(printer, f"Customer: {customer_name}\n")
+        ESC = "\x1b"
+        GS  = "\x1d"
+        center   = f"{ESC}\x61\x01"   # ESC a 1 — centre align
+        left     = f"{ESC}\x61\x00"   # ESC a 0 — left align
+        dbl      = f"{ESC}!\x10"      # ESC ! 0x10 — double height
+        dbl_wide = f"{ESC}!\x30"      # ESC ! 0x30 — double height + double width
+        bold_on  = f"{ESC}\x45\x01"
+        bold_off = f"{ESC}\x45\x00"
+        normal   = f"{ESC}!\x00"
+
+        sep  = "=" * 32
+        thin = "-" * 32
+
+        # ── Header ────────────────────────────────────────────────────────────
+        _write_text(printer, f"{center}{sep}\n")
+        _write_text(printer, f"{dbl_wide}  PICKING NOTE{normal}\n")
+        _write_text(printer, f"{center}{sep}\n")
+
+        # ── Order info (double-height for readability) ─────────────────────
+        _write_text(printer, f"{left}{dbl}{bold_on}Order:{normal}{bold_off}    {order_number}\n")
+        _write_text(printer, f"{dbl}{bold_on}Customer:{normal}{bold_off} {customer_name}\n")
         if date:
-            _write_text(printer, f"Date:     {date}\n")
-        _write_text(printer, sep)
+            _write_text(printer, f"{dbl}{bold_on}Date:{normal}{bold_off}     {date}\n")
+        _write_text(printer, f"{center}{sep}\n{left}")
+
+        # ── Items ──────────────────────────────────────────────────────────
         for item in items:
-            name       = (item.get("item_name") or item.get("item_code") or "")[:32]
+            name       = (item.get("item_name") or item.get("item_code") or "")[:28]
             barcode    = (item.get("barcode") or item.get("item_code") or "").strip()
             qty        = item.get("qty", 1)
             colour     = (item.get("colour") or "").strip()
@@ -467,28 +483,30 @@ def print_picking_note():
             style_code = (item.get("style_code") or "").strip()
             brand      = (item.get("brand") or "").strip()
             item_group = (item.get("item_group") or "").strip()
-            _write_text(printer, thin)
-            _write_text(printer, f"{name}\n")
+
+            _write_text(printer, f"{thin}\n")
+            # Item name — double height + bold
+            _write_text(printer, f"{dbl}{bold_on}{name}{bold_off}{normal}\n")
             if brand:
-                _write_text(printer, f"Brand: {brand}\n")
+                _write_text(printer, f"{dbl}Brand:  {brand}{normal}\n")
             if item_group:
-                _write_text(printer, f"Dept: {item_group}\n")
+                _write_text(printer, f"{dbl}Dept:   {item_group}{normal}\n")
             if style_code:
-                _write_text(printer, f"Style: {style_code}\n")
-            detail_parts = []
+                _write_text(printer, f"{dbl}Style:  {style_code}{normal}\n")
             if colour:
-                detail_parts.append(f"Colour: {colour}")
+                _write_text(printer, f"{dbl}Colour: {colour}{normal}\n")
             if size:
-                detail_parts.append(f"Size: {size}")
-            if detail_parts:
-                _write_text(printer, "  ".join(detail_parts) + "\n")
-            _write_text(printer, f"Qty: {int(qty) if float(qty) == int(qty) else qty}\n")
+                _write_text(printer, f"{dbl}Size:   {size}{normal}\n")
+            qty_int = int(qty) if float(qty) == int(qty) else qty
+            _write_text(printer, f"{dbl_wide}{bold_on}Qty: {qty_int}{bold_off}{normal}\n")
+
             if barcode:
-                _write_text(printer, f"SKU: {barcode}\n")
+                _write_text(printer, f"{dbl}SKU: {barcode}{normal}\n")
                 safe_barcode = re.sub(r"[^A-Z0-9\-\.\$\/\+\% ]", "", barcode.upper())
                 if safe_barcode:
                     _write_custom_hex(printer, _escpos_barcode_code39_hex(safe_barcode))
-        _write_text(printer, sep)
+
+        _write_text(printer, f"{center}{sep}\n{left}")
         printer.write(b"\n" * 4)
         _write_cut(printer)
 

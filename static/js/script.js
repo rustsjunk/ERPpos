@@ -6504,7 +6504,7 @@ function __scheduleScanFlush(){
   }, SCAN_COMPLETE_DELAY_MS);
 }
 
-function handleGlobalScan(code){
+async function handleGlobalScan(code){
   try{
     const value = String(code||'').trim();
     if(!value) return;
