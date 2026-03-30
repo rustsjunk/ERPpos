@@ -13,6 +13,7 @@ Then POST JSON to /print with `text` and optional `hex` sequences.
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterable, Sequence
@@ -357,6 +358,68 @@ def print_voucher():
 
     return jsonify(ok=True, voucher_code=safe_code)
 
+
+
+@app.route("/print-picking-note", methods=["POST", "OPTIONS"])
+def print_picking_note():
+    """Print a picking note for a web (Shopify) order.
+
+    Expected payload:
+      order_number  - e.g. "#1001"
+      customer_name - customer display name
+      items         - list of dicts with keys: name, brand, colour, size, barcode
+                      (image omitted — likely too low quality on thermal printer)
+
+    TODO: Build ESC/POS formatted text block per item (name, brand, colour, size, barcode line).
+    TODO: Print Code 39 barcode per item using _escpos_barcode_code39_hex().
+    TODO: Assess image quality on the printer before enabling — likely impractical on thermal.
+    """
+    if request.method == "OPTIONS":
+        return jsonify(ok=True)
+
+    payload = request.get_json(force=True) or {}
+    order_number = payload.get("order_number", "")
+    customer_name = payload.get("customer_name", "")
+    items = payload.get("items", [])
+
+    date = payload.get("date", "")
+    logging.info("[picking-note] order=%s customer=%s items=%d", order_number, customer_name, len(items))
+
+    @_with_printer
+    def _send(printer) -> None:
+        sep  = "=" * 32 + "\n"
+        thin = "-" * 32 + "\n"
+        _write_text(printer, sep)
+        _write_text(printer, "         PICKING NOTE\n")
+        _write_text(printer, sep)
+        _write_text(printer, f"Order:    {order_number}\n")
+        _write_text(printer, f"Customer: {customer_name}\n")
+        if date:
+            _write_text(printer, f"Date:     {date}\n")
+        _write_text(printer, sep)
+        for item in items:
+            name    = (item.get("item_name") or item.get("item_code") or "")[:32]
+            barcode = (item.get("barcode") or item.get("item_code") or "").strip()
+            qty     = item.get("qty", 1)
+            _write_text(printer, thin)
+            _write_text(printer, f"{name}\n")
+            _write_text(printer, f"Qty: {int(qty) if float(qty) == int(qty) else qty}\n")
+            if barcode:
+                _write_text(printer, f"SKU: {barcode}\n")
+                safe_barcode = re.sub(r"[^A-Z0-9\-\.\$\/\+\% ]", "", barcode.upper())
+                if safe_barcode:
+                    _write_custom_hex(printer, _escpos_barcode_code39_hex(safe_barcode))
+        _write_text(printer, sep)
+        printer.write(b"\n" * 4)
+        _write_cut(printer)
+
+    try:
+        _send()
+    except Exception as exc:
+        logging.warning("[picking-note] print failed: %s", exc)
+        return jsonify(ok=False, error=str(exc)), 500
+
+    return jsonify(ok=True)
 
 
 @app.get("/health")

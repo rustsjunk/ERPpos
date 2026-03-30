@@ -72,6 +72,7 @@ let currentCashierSession = null;
 let sessionPingTimer = null;
 let sessionPingIntervalMs = 60 * 1000;
 let _lastSyncCounts = { queued: 0, failed: 0, invoicesPending: 0 };
+let _lastWebOrders = [];
 const FEATURED_ITEM_LIMIT = 12;
 const RECENT_SALES_LIMIT = 3;
 const giftVoucherItemCode = (document.documentElement && document.documentElement.dataset
@@ -1781,8 +1782,9 @@ document.addEventListener('DOMContentLoaded',()=>{
   window.addEventListener('error', e=>{ err('window error', e.message||e, e.error||null); });
   window.addEventListener('unhandledrejection', e=>{ err('unhandled rejection', e.reason||e); });
   focusBarcodeInput();
-  // Start sync status polling to show pending/failed counts
+  // Start sync status polling (updates admin panel) and web orders polling (updates bell)
   try { pollSyncStatus(); setInterval(pollSyncStatus, 30000); } catch(_){}
+  try { pollWebOrders(); setInterval(pollWebOrders, 30000); } catch(_){}
 });
 
 async function pollSyncStatus(){
@@ -1795,17 +1797,37 @@ async function pollSyncStatus(){
     const queued = Number(counts.queued||0);
     const failed = Number(counts.failed||0);
     const invoicesPending = Number(d.invoices_pending||0);
-    const pendingTotal = queued + invoicesPending;
     _lastSyncCounts = { queued, failed, invoicesPending };
-    const notif = document.getElementById('notifIcon')
-    if(notif){
-      const base = '\u{1F514}'; // bell icon
-      let txt = base;
-      const totalBadge = (failed>0? `${pendingTotal} (!${failed})` : String(pendingTotal));
-      if(pendingTotal>0){ txt = `${base} ${totalBadge}`; }
-      notif.textContent = txt;
-      notif.title = `Pending sync: ${pendingTotal} | Failed: ${failed}`;
+    // Update sync status in admin panel
+    const syncEl = document.getElementById('erpSyncStatus');
+    if(syncEl){
+      if(queued===0 && failed===0 && invoicesPending===0){
+        syncEl.textContent = 'All sales synced.';
+      } else {
+        const parts = [];
+        if(queued>0) parts.push(`Queued: ${queued}`);
+        if(invoicesPending>0) parts.push(`Invoices pending: ${invoicesPending}`);
+        if(failed>0) parts.push(`Failed: ${failed}`);
+        syncEl.textContent = parts.join(' | ');
+        syncEl.style.color = failed>0 ? '#c0392b' : '';
+      }
     }
+  }catch(e){ /* ignore */ }
+}
+
+async function pollWebOrders(){
+  try{
+    const r = await fetch('/api/web-orders');
+    if(!r.ok) return;
+    const d = await r.json();
+    const orders = d.orders || [];
+    const notif = document.getElementById('notifIcon');
+    if(notif){
+      const base = '\u{1F514}';
+      notif.textContent = orders.length > 0 ? `${base} ${orders.length}` : base;
+      notif.title = orders.length > 0 ? `${orders.length} pending web order(s)` : 'No pending web orders';
+    }
+    _lastWebOrders = orders;
   }catch(e){ /* ignore */ }
 }
 
@@ -2388,19 +2410,9 @@ function bindEvents(){
   const shuffleFeaturedBtn=document.getElementById('shuffleFeaturedBtn');
   if(shuffleFeaturedBtn){ shuffleFeaturedBtn.addEventListener('click', ()=>renderFeaturedPanel(true)); }
   const notifIcon = document.getElementById('notifIcon');
-  if(notifIcon){ notifIcon.addEventListener('click', ()=>{
-    const { queued, failed, invoicesPending } = _lastSyncCounts;
-    const pending = queued + invoicesPending;
-    const lines = ['ERP Sync Status'];
-    if(pending === 0 && failed === 0){
-      lines.push('All sales synced.');
-    } else {
-      if(queued > 0)  lines.push(`Queued: ${queued} sale(s) waiting to sync`);
-      if(invoicesPending > 0) lines.push(`Invoices pending: ${invoicesPending}`);
-      if(failed > 0)  lines.push(`Failed: ${failed} sale(s) — check ERP connection`);
-    }
-    alert(lines.join('\n'));
-  }); }
+  if(notifIcon){ notifIcon.addEventListener('click', ()=>{ showWebOrdersOverlay(); }); }
+  const webOrdersCloseBtn = document.getElementById('webOrdersCloseBtn');
+  if(webOrdersCloseBtn){ webOrdersCloseBtn.addEventListener('click', ()=>{ hideWebOrdersOverlay(); }); }
   if(settingsBtn&&menuOverlay){ settingsBtn.addEventListener('click',()=>{ showMenu(); }); }
   if(menuClose&&menuOverlay){ menuClose.addEventListener('click',()=>{ menuOverlay.style.display='none'; }); }
   if(openSettingsBtn){ openSettingsBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView){ settingsView.style.display='block'; populateSettingsForm(); } }); }
@@ -4704,6 +4716,66 @@ async function completeSaleFromOverlay() {
 
 // Hold / Paused Transactions
 function hidePausedOverlay(){ const o=document.getElementById('pausedOverlay'); if(o) o.style.display='none'; }
+
+// ---- Web Orders (Shopify) ----
+function hideWebOrdersOverlay(){ const o=document.getElementById('webOrdersOverlay'); if(o) o.style.display='none'; }
+async function showWebOrdersOverlay(){
+  const o=document.getElementById('webOrdersOverlay');
+  if(!o) return;
+  o.style.display='flex';
+  await pollWebOrders();
+  renderWebOrders(_lastWebOrders);
+}
+function renderWebOrders(orders){
+  const list=document.getElementById('webOrdersList');
+  if(!list) return;
+  if(!orders || orders.length===0){
+    list.innerHTML='<p class="text-muted small">No pending web orders.</p>';
+    return;
+  }
+  list.innerHTML = orders.map(o=>{
+    const printed = o.status==='printed';
+    const itemRows = (o.items||[]).map(i=>`
+      <tr>
+        <td style="padding:2px 6px;">${i.item_name||i.item_code}</td>
+        <td style="padding:2px 6px;text-align:center;">${i.qty}</td>
+        <td style="padding:2px 6px;color:#666;">${i.barcode||i.item_code||''}</td>
+      </tr>`).join('');
+    const itemsTable = o.items && o.items.length ? `
+      <table style="width:100%;font-size:0.8rem;margin:6px 0;border-collapse:collapse;">
+        <thead><tr style="border-bottom:1px solid #ddd;">
+          <th style="padding:2px 6px;text-align:left;">Item</th>
+          <th style="padding:2px 6px;">Qty</th>
+          <th style="padding:2px 6px;text-align:left;">SKU</th>
+        </tr></thead>
+        <tbody>${itemRows}</tbody>
+      </table>` : '<p class="small text-muted" style="margin:4px 0;">No items</p>';
+    return `
+      <div class="border rounded p-2 mb-2" style="${printed?'background:#fffde7;':''}">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <span class="fw-bold">${o.order_number||o.id}</span>
+            <span class="text-muted ms-2">${o.customer_name||'Unknown customer'}</span>
+          </div>
+          <span class="small text-muted">${o.date||''}</span>
+        </div>
+        <div class="small text-muted">£${(o.outstanding||0).toFixed(2)} outstanding &bull; ${o.status||'pending'}</div>
+        ${itemsTable}
+        <button class="btn btn-sm btn-outline-secondary mt-1" onclick="printPickingNote('${o.id}')"
+          ${printed?'style="background:#e0a800;border-color:#e0a800;"':''}>
+          ${printed?'Reprint Picking Note':'Print Picking Note'}
+        </button>
+      </div>`;
+  }).join('');
+}
+async function printPickingNote(orderId){
+  try{
+    await fetch('/api/web-orders/'+orderId+'/print-picking', {method:'POST'});
+    await pollWebOrders();
+    renderWebOrders(_lastWebOrders);
+  }catch(e){ alert('Could not print picking note.'); }
+}
+
 async function openPausedOverlay(){
   const o=document.getElementById('pausedOverlay');
   if(!o) return;

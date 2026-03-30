@@ -541,6 +541,10 @@
                 <pre id="adminStatusOut" class="p-2 bg-light" style="max-height: 220px; overflow: auto;"></pre>
 
                 <hr class="my-3">
+                <div class="mb-2 h6">ERP Sync Status</div>
+                <div id="erpSyncStatus" class="small text-muted mb-3">—</div>
+
+                <hr class="my-3">
                 <div class="mb-2 h6">Invoice Queue &amp; Till Agent</div>
                 <div id="invoiceQueueStats" class="small text-muted mb-2">Click Refresh to load stats.</div>
                 <div class="d-grid gap-2 mb-2">
@@ -682,6 +686,23 @@
             <div class="d-grid gap-2">
                 <button id="cashMenuZReadBtn" class="btn btn-light">Z-Read (Summary/Print)</button>
                 <button id="cashMenuFloatBtn" class="btn btn-light">Closing Float (Denominations)</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Web Orders Overlay (Shopify) -->
+    <div id="webOrdersOverlay" class="search-overlay" style="display:none;">
+        <div class="search-modal" style="max-width: 700px;">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="h5 m-0">&#128722; Web Orders</div>
+                <button id="webOrdersCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
+            </div>
+            <div id="webOrdersList">
+                <!-- Orders rendered here by JS -->
+                <!-- Each card shows: order number, customer name, items (name/brand/colour/size/barcode) -->
+                <!-- Yellow background when status === 'printed' -->
+                <!-- Buttons: Print Picking Note -->
+                <p class="text-muted small">No pending web orders.</p>
             </div>
         </div>
     </div>

@@ -2697,12 +2697,17 @@ def add_no_cache_headers(response):
         del response.headers['Expires']
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
+    _erpnext_origin = ''
+    if ERPNEXT_URL:
+        from urllib.parse import urlparse as _urlparse
+        _p = _urlparse(ERPNEXT_URL)
+        _erpnext_origin = f' {_p.scheme}://{_p.netloc}'
     response.headers['Content-Security-Policy'] = (
         "default-src 'self'; "
         "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
         "style-src 'self' https://cdn.jsdelivr.net https://fonts.googleapis.com 'unsafe-inline'; "
         "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data: blob:; "
+        f"img-src 'self' data: blob: https://cdn.jsdelivr.net{_erpnext_origin}; "
         "connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;"
     )
     return response
@@ -3565,6 +3570,85 @@ def api_sales_status():
     except Exception:
         pass
     return jsonify({'status': 'success', 'counts': counts, 'invoices_pending': pending})
+
+
+@app.route('/api/web-orders')
+def api_web_orders():
+    """Proxy pending web (Shopify) orders from ERPDash for display on the POS.
+
+    Calls /api/website/orders/rich on ERPDash to get orders with line items,
+    then maps to the format the POS overlay expects.
+    Returns empty list when ERPDash is unreachable or not configured.
+    """
+    if ERPDASH_URL:
+        try:
+            r = requests.get(f'{ERPDASH_URL}/api/website/orders/rich', timeout=10)
+            if r.ok:
+                data = r.json()
+                orders = []
+                for o in data.get('orders') or []:
+                    orders.append({
+                        'id':            o.get('name'),
+                        'order_number':  o.get('shopify_order_number') or o.get('name'),
+                        'customer_name': o.get('customer'),
+                        'date':          o.get('date'),
+                        'total':         o.get('total'),
+                        'outstanding':   o.get('outstanding'),
+                        'status':        o.get('status'),
+                        'items':         o.get('items') or [],
+                    })
+                return jsonify(orders=orders), 200
+        except Exception:
+            pass
+    return jsonify(orders=[]), 200
+
+
+@app.route('/api/web-orders/<order_id>/printed', methods=['POST'])
+def api_web_order_printed(order_id):
+    """Mark a web order as printed (picking note produced at till)."""
+    if ERPDASH_URL:
+        try:
+            requests.post(f'{ERPDASH_URL}/api/web-orders/{order_id}/mark-printed', timeout=5)
+        except Exception:
+            pass
+    return jsonify(ok=True), 200
+
+
+@app.route('/api/web-orders/<order_id>/print-picking', methods=['POST'])
+def api_web_order_print_picking(order_id):
+    """Fetch order from ERPDash, send picking note to receipt agent, mark as printed."""
+    # Fetch rich order data from ERPDash
+    order = None
+    if ERPDASH_URL:
+        try:
+            r = requests.get(f'{ERPDASH_URL}/api/website/orders/rich', timeout=10)
+            if r.ok:
+                for o in r.json().get('orders') or []:
+                    if o.get('name') == order_id:
+                        order = o
+                        break
+        except Exception:
+            pass
+
+    receipt_url = RECEIPT_AGENT_URL
+    if receipt_url and order:
+        try:
+            picking_url = receipt_url.rstrip('/').rsplit('/print', 1)[0] + '/print-picking-note'
+            requests.post(picking_url, json={
+                'order_number':  order.get('shopify_order_number') or order_id,
+                'customer_name': order.get('customer', ''),
+                'date':          order.get('date', ''),
+                'items':         order.get('items') or [],
+            }, timeout=15)
+        except Exception as exc:
+            logging.warning('[web-orders] picking note print failed: %s', exc)
+
+    if ERPDASH_URL:
+        try:
+            requests.post(f'{ERPDASH_URL}/api/web-orders/{order_id}/mark-printed', timeout=5)
+        except Exception:
+            pass
+    return jsonify(ok=True), 200
 
 
 @app.route('/api/admin/sync/scan-acks', methods=['POST'])
