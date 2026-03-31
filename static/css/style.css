@@ -747,6 +747,30 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     #itemsGrid {
         grid-template-columns: repeat(auto-fill, minmax(clamp(120px, 30vw, 200px), 1fr)) !important;
     }
+
+    /* Compact main layout gaps */
+    .pos-layout { row-gap: 12px; }
+    #itemSearch { margin-bottom: 12px; }
+    .product-panel { margin-top: 0; }
+
+    /* Tighter cart rows */
+    .cart-item { padding: 6px 8px; gap: 6px; }
+    .cart-item-quantity { gap: 6px; }
+
+    /* Shrink recent sales panel — don't force a tall min-height */
+    .recent-items-card .card-body { min-height: 140px; gap: 0.4rem; }
+    .recent-sales-list { min-height: 80px; gap: 0.5rem; }
+
+    /* Shorter product image aspect ratio (65% → 50%) */
+    .item-card-media { padding-top: 50%; }
+    .item-card-body { padding: 0.6rem; }
+
+    /* Slimmer barcode bar */
+    .barcode-bar { padding: 8px 0; }
+
+    /* Cart card header less tall */
+    #cartCard .card-header { padding: 0.5rem 1rem; }
+    #cartCard .card-header h3 { font-size: 1rem; margin: 0; }
 }
 
 /* Very small 4:3 screens (800x600 and below) */

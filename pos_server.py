@@ -50,6 +50,8 @@ try:
 except Exception:
     pass
 
+SHOP_NAME = _env_string('SHOP_NAME', 'Russells')
+
 # Behavior flags
 USE_MOCK = (_env_string('USE_MOCK', '1') == '1')  # default to mock POS with no ERP dependency
 POS_DB_PATH = _env_string('POS_DB_PATH', 'pos.db')
@@ -2722,7 +2724,8 @@ def index():
         receipt_agent_url=RECEIPT_AGENT_URL or '',
         receipt_default_port=RECEIPT_DEFAULT_PORT,
         gift_voucher_item=POS_GIFT_VOUCHER_ITEM,
-        plastic_bag_item=POS_PLASTIC_BAG_ITEM
+        plastic_bag_item=POS_PLASTIC_BAG_ITEM,
+        shop_name=SHOP_NAME,
     )
 
 
@@ -5787,11 +5790,15 @@ def api_layaway_pull_from_erp():
         now = datetime.utcnow().replace(microsecond=0).isoformat() + 'Z'
         default_expires = (datetime.utcnow() + __import__('datetime').timedelta(days=90)).strftime('%Y-%m-%d')
 
+        # Track which refs ERPNext knows about (to detect orphaned local records)
+        erp_refs: set = set()
+
         for lay in layaways:
             ref = lay.get('layaway_ref')
             if not ref:
                 errors += 1
                 continue
+            erp_refs.add(ref)
             try:
                 existing = conn.execute(
                     "SELECT layaway_id, paid_total, status FROM layaways WHERE layaway_id = ?", (ref,)
@@ -5842,9 +5849,9 @@ def api_layaway_pull_from_erp():
                     remote_status = lay.get('local_status') or 'active'
                     local_paid = float(existing['paid_total'] or 0)
                     local_status = existing['status']
-                    # Only update status if ERPNext says completed and local isn't already completed/cancelled
+                    # Update status if ERPNext says completed or cancelled and local hasn't settled yet
                     status_update = (
-                        remote_status == 'completed'
+                        remote_status in ('completed', 'cancelled')
                         and local_status not in ('completed', 'cancelled')
                     )
                     paid_update = abs(remote_paid - local_paid) > 0.005
@@ -5884,6 +5891,21 @@ def api_layaway_pull_from_erp():
             except Exception as exc:
                 app.logger.warning('pull-from-erp: error on %s: %s', ref, exc)
                 errors += 1
+
+        # Any locally-active layaway whose ERP SO was synced but is now absent from
+        # the snapshot was cancelled/deleted in ERPNext outside of our flow — mark it cancelled.
+        if erp_refs:
+            orphan_rows = conn.execute(
+                "SELECT layaway_id FROM layaways WHERE status='active' AND erp_so_name IS NOT NULL AND erp_so_name != ''"
+            ).fetchall()
+            for row in orphan_rows:
+                if row['layaway_id'] not in erp_refs:
+                    conn.execute(
+                        "UPDATE layaways SET status='cancelled', sync_status='synced' WHERE layaway_id=?",
+                        (row['layaway_id'],)
+                    )
+                    updated += 1
+            conn.commit()
 
         return jsonify({
             'status': 'ok',

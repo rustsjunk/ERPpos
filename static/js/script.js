@@ -6813,6 +6813,18 @@ async function openLayawayStore() {
   const overlay = document.getElementById('layawayStoreOverlay');
   if (overlay) overlay.style.display = 'flex';
   await renderLayawayList();
+  // Silently sync from ERPNext in the background; re-render if anything changed
+  _silentLayawaySync();
+}
+
+async function _silentLayawaySync() {
+  try {
+    const r = await fetch('/api/layaways/pull-from-erp', { method: 'POST' });
+    const d = await r.json();
+    if (d.status === 'ok' && (d.updated > 0 || d.added > 0)) {
+      renderLayawayList(); // something changed — refresh the list
+    }
+  } catch (_) { /* silent — no ERPNext connection is fine */ }
 }
 
 function closeLayawayStore() {
@@ -7502,8 +7514,53 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
     return;
   }
 
-  // ── Collection receipt (fully paid) ────────────────────────────────────────
-  if (event === 'completed') {
+  // ── Payment receipt lines (used for both deposits and final collection) ─────
+  const expiryStr     = formatLayawayDate(lay.expires_at);
+  const isCompleted   = event === 'completed';
+  const dateStr       = formatLayawayDate(lay.created_at || new Date().toISOString());
+  const todayStr      = formatLayawayDate(new Date().toISOString());
+
+  const customerLines = [
+    '================================',
+    isCompleted ? '      LAYAWAY — PAID IN FULL' : '          LAYAWAY RECEIPT',
+    '================================',
+    `Ref:  ${lay.layaway_id}`,
+    `Date: ${isCompleted ? todayStr : dateStr}`,
+    '--------------------------------',
+    ...itemLines,
+    '--------------------------------',
+    `Agreed Total:  ${totalStr}`,
+    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
+    `Total Paid:    ${paidStr}`,
+    isCompleted ? 'Balance Due:   £0.00' : `Balance Due:   ${balStr}`,
+    '--------------------------------',
+    isCompleted ? '     THANK YOU — COLLECTED' : `Expires:       ${expiryStr}`,
+    isCompleted ? '' : '--------------------------------',
+    isCompleted ? '' : `Barcode: ${lay.layaway_id}`,
+    '================================',
+  ].filter(l => l !== '');
+
+  const storeCopyLines = [
+    '================================',
+    isCompleted ? '    LAYAWAY — STORE COLLECTED' : '       LAYAWAY — STORE COPY',
+    '================================',
+    `Ref:      ${lay.layaway_id}`,
+    `Customer: ${lay.customer_tag || ''}`,
+    `Date:     ${isCompleted ? todayStr : dateStr}`,
+    '--------------------------------',
+    ...itemLines,
+    '--------------------------------',
+    `Agreed Total:  ${totalStr}`,
+    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
+    `Total Paid:    ${paidStr}`,
+    isCompleted ? 'Balance Due:   £0.00' : `Balance Due:   ${balStr}`,
+    '--------------------------------',
+    isCompleted ? '' : `Expires:       ${expiryStr}`,
+    '================================',
+  ].filter(l => l !== '');
+
+  // ── Collection: print store collection note + customer receipt + store copy ─
+  if (isCompleted) {
     const payments = lay.payments || [];
     const payHistLines = payments.map(p =>
       `  ${formatLayawayDate(p.paid_at)}  ${p.method.padEnd(8)} £${(p.amount || 0).toFixed(2)}`
@@ -7514,7 +7571,7 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
       '================================',
       `Ref:      ${lay.layaway_id}`,
       `Customer: ${lay.customer_tag || ''}`,
-      `Date:     ${formatLayawayDate(new Date().toISOString())}`,
+      `Date:     ${todayStr}`,
       '--------------------------------',
       ...itemLines,
       '--------------------------------',
@@ -7528,53 +7585,16 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
       '     THANK YOU — COLLECTED',
       '================================',
     ].filter(l => l !== '');
+    // 1. Store collection note (internal record with full payment history)
     await triggerReceiptPrint({ lines: collectionLines, title: `Collected ${lay.layaway_id}` });
+    // 2. Customer receipt (give to customer as proof of purchase)
+    await triggerReceiptPrint({ lines: customerLines, title: `Receipt ${lay.layaway_id}` });
+    // 3. Store copy of the final receipt
+    await triggerReceiptPrint({ lines: storeCopyLines, title: `Store Copy ${lay.layaway_id}` });
     return;
   }
 
-  // ── Deposit / instalment receipts ──────────────────────────────────────────
-  const expiryStr = formatLayawayDate(lay.expires_at);
-
-  const customerLines = [
-    '================================',
-    '          LAYAWAY RECEIPT',
-    '================================',
-    `Ref: ${lay.layaway_id}`,
-    `Date: ${formatLayawayDate(lay.created_at || new Date().toISOString())}`,
-    '--------------------------------',
-    ...itemLines,
-    '--------------------------------',
-    `Agreed Total:  ${totalStr}`,
-    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
-    `Total Paid:    ${paidStr}`,
-    `Balance Due:   ${balStr}`,
-    '--------------------------------',
-    `Expires:       ${expiryStr}`,
-    '--------------------------------',
-    `Barcode: ${lay.layaway_id}`,
-    '================================',
-  ].filter(l => l !== '');
-
-  const storeCopyLines = [
-    '================================',
-    '       LAYAWAY — STORE COPY',
-    '================================',
-    `Ref:      ${lay.layaway_id}`,
-    `Customer: ${lay.customer_tag || ''}`,
-    `Date: ${formatLayawayDate(lay.created_at || new Date().toISOString())}`,
-    '--------------------------------',
-    ...itemLines,
-    '--------------------------------',
-    `Agreed Total:  ${totalStr}`,
-    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
-    `Total Paid:    ${paidStr}`,
-    `Balance Due:   ${balStr}`,
-    '--------------------------------',
-    `Expires:       ${expiryStr}`,
-    '================================',
-  ].filter(l => l !== '');
-
-  // Print customer copy then store tally
+  // ── Deposit / instalment: customer copy + store copy ────────────────────────
   await triggerReceiptPrint({ lines: customerLines, title: `Layaway ${lay.layaway_id}` });
   await triggerReceiptPrint({ lines: storeCopyLines, title: `Store Copy ${lay.layaway_id}` });
 }

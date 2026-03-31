@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Background: emerald green rounded square -->
+  <rect width="32" height="32" rx="7" fill="#059669"/>
+  <!-- Subtle inner highlight -->
+  <rect x="1" y="1" width="30" height="15" rx="6" fill="white" opacity="0.08"/>
+  <!-- Letter R — bold serif -->
+  <text x="16" y="23"
+        text-anchor="middle"
+        font-family="Georgia,'Times New Roman',serif"
+        font-weight="700"
+        font-size="20"
+        fill="white"
+        letter-spacing="-0.5">R</text>
+  <!-- Small receipt/till line marks it as POS -->
+  <rect x="10" y="27.5" width="12" height="1.5" rx="0.75" fill="white" opacity="0.5"/>
+</svg>
