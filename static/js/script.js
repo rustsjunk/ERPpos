@@ -1609,7 +1609,8 @@ function _ensureZAggToday(){
       discounts: { sales:0, returns:0 },
       tenders: { Cash:0, Card:0, Voucher:0, Other:0 },
       perCashier: {},
-      perGroup: {}
+      perGroup: {},
+      perBrand: {}
     };
   }
   return settings.z_agg[d];
@@ -1644,6 +1645,12 @@ function updateZAggWithSale(ctx){
       g.qty += (ln.refund?-qty:qty);
       g.amount += lineNet;
       agg.perGroup[groupKey] = g;
+      if(!agg.perBrand) agg.perBrand = {};
+      const brandKey = ln.brand || 'Unbranded';
+      const b = agg.perBrand[brandKey] || { qty:0, amount:0 };
+      b.qty += (ln.refund?-qty:qty);
+      b.amount += lineNet;
+      agg.perBrand[brandKey] = b;
     });
     agg.totals.gross += gross;
     agg.totals.net += Number(ctx.net||0);
@@ -2461,6 +2468,10 @@ function bindEvents(){
   if(cashMenuFloatBtn){ cashMenuFloatBtn.addEventListener('click', ()=>{ if(cashMenuOverlay) cashMenuOverlay.style.display='none'; showClosingOverlay(); }); }
   if(openAdminBtn){ openAdminBtn.addEventListener('click',()=>{ if(menuView) menuView.style.display='none'; if(settingsView) settingsView.style.display='none'; if(adminView) adminView.style.display='block'; refreshSerialPortOptions().catch(e=>warn('refresh serial ports failed', e)); }); }
   if(adminBackBtn){ adminBackBtn.addEventListener('click',()=>{ if(adminView) adminView.style.display='none'; if(menuView) menuView.style.display='block'; }); }
+  const adminZReadBtn = document.getElementById('adminZReadBtn');
+  if(adminZReadBtn){ adminZReadBtn.addEventListener('click', ()=>{ if(adminView) adminView.style.display='none'; if(menuView) menuView.style.display='none'; const mo=document.getElementById('menuOverlay'); if(mo) mo.style.display='none'; printZRead(); }); }
+  const adminCashOutBtn = document.getElementById('adminCashOutBtn');
+  if(adminCashOutBtn){ adminCashOutBtn.addEventListener('click', ()=>{ if(adminView) adminView.style.display='none'; const mo=document.getElementById('menuOverlay'); if(mo) mo.style.display='none'; showPettyCash('out'); }); }
   // Opening/Closing overlays
   const openingOverlay=document.getElementById('openingOverlay');
   const openingCloseBtn=document.getElementById('openingCloseBtn');
@@ -2838,7 +2849,14 @@ function bindEvents(){
   if (pausedBtn){ pausedBtn.addEventListener('click', e=>{ e.stopPropagation(); if(menu) menu.classList.remove('open'); openPausedOverlay(); }); }
   const badgeWrap=document.querySelector('.cashier-wrap');
   if(badgeWrap){ badgeWrap.addEventListener('click',e=>{ if(e.target!==badge && !currentCashier){ e.stopPropagation(); log('cashier wrap clicked'); showLogin(); } }); }
-  if(logout){ logout.addEventListener('click',e=>{ e.stopPropagation(); if(menu) menu.classList.remove('open'); logoutToLogin(); }); }
+  if(logout){ logout.addEventListener('click',e=>{
+    e.stopPropagation();
+    if(menu) menu.classList.remove('open');
+    if(cart && cart.length > 0){
+      if(!confirm(`There ${cart.length === 1 ? 'is 1 item' : `are ${cart.length} items`} in the current cart.\nLog out anyway? (Items will be lost)`)) return;
+    }
+    logoutToLogin();
+  }); }
   const trainingBtn=document.getElementById('cashierTrainingBtn');
   if(trainingBtn){ trainingBtn.addEventListener('click',e=>{ e.stopPropagation(); if(!currentCashier) return; const levels=settings.cashier_training_levels||{}; const cur=getActiveCashierTrainingLevel(); const next=(cur+1)%4; levels[currentCashier.code]=next; settings.cashier_training_levels=levels; saveSettings(); updateCashierTrainingBtn(); if(typeof TrainingWheels!=='undefined') TrainingWheels.init(next); }); }
   document.addEventListener('click',e=>{ const wrap=document.querySelector('.cashier-wrap'); if(menu&&wrap&&!wrap.contains(e.target)) menu.classList.remove('open'); });
@@ -3075,6 +3093,19 @@ function bindEvents(){
   const discountValueLabel = document.getElementById('discountValueLabel');
   const discountKeypad = document.getElementById('discountKeypad');
   if(openDiscountBtn){ openDiscountBtn.addEventListener('click', openDiscountOverlay); }
+  const mainDiscountBtn = document.getElementById('mainDiscountBtn');
+  if(mainDiscountBtn){ mainDiscountBtn.addEventListener('click', openDiscountOverlay); }
+  const mainBagBtn = document.getElementById('mainBagBtn');
+  if(mainBagBtn){
+    if(!plasticBagItemCode){ mainBagBtn.style.display = 'none'; }
+    else {
+      mainBagBtn.addEventListener('click', ()=>{
+        const item = items.find(x => x.item_code === plasticBagItemCode || x.name === plasticBagItemCode);
+        if(!item){ alert('Plastic bag item not found in catalogue. Check POS_PLASTIC_BAG_ITEM setting.'); return; }
+        addSimpleItemToCart(item);
+      });
+    }
+  }
   if(discountCloseBtn){ discountCloseBtn.addEventListener('click', commitDiscountsAndClose); }
   if(discountOverlay){ discountOverlay.addEventListener('click', e=>{ if(e.target===discountOverlay) hideDiscountOverlay(); }); document.addEventListener('keydown', e=>{ if(e.key==='Escape') hideDiscountOverlay(); }); }
   if(discountSelectAllBtn){ discountSelectAllBtn.addEventListener('click', ()=>{ discountItemsList?.querySelectorAll('input[type="checkbox"]').forEach(cb=>cb.checked=true); }); }
@@ -3691,23 +3722,23 @@ function renderBrowseBrands(){
     g.appendChild(msg);
     return;
   }
+  // Wrap in a compact brand grid container
+  const grid = document.createElement('div');
+  grid.className = 'brand-chip-grid';
   list.forEach(name=>{
-    const card=document.createElement('div');
-    card.className='product-card browse-card';
-    const title=document.createElement('div');
-    title.className='browse-card-title';
-    title.textContent=name;
-    const meta=document.createElement('div');
-    meta.className='browse-card-meta';
-    meta.textContent='Tap to view products';
-    card.appendChild(title);
-    card.appendChild(meta);
-    card.addEventListener('click', ()=>{
+    const chip = document.createElement('button');
+    chip.className = 'brand-chip';
+    chip.type = 'button';
+    chip.textContent = name;
+    chip.addEventListener('click', ()=>{
       selectedBrand = name;
       setSearchStage('items');
+      const inp = document.getElementById('searchInputBig');
+      if (inp) setTimeout(() => inp.focus(), 50);
     });
-    g.appendChild(card);
+    grid.appendChild(chip);
   });
+  g.appendChild(grid);
 }
 function renderSearchItems(){
   const g=document.getElementById('searchGrid');
@@ -3884,9 +3915,7 @@ function handleSearchOverlayKeydown(e){
       processBarcodeScan(val);
       return;
     }
-    if(searchNavIndex >= 0 && searchNavIndex < searchNavItems.length){
-      handleSearchVariantClick(searchNavItems[searchNavIndex]);
-    }
+    // Manual typing: Enter does nothing — user clicks the item they want.
     return;
   }
   if(!searchNavRows.length) return;
@@ -4181,6 +4210,7 @@ function addQueuedVariantsToCart(){
     addVariantToCart(entry.item || currentProduct, entry.variant, entry.variantRec, entry.qty);
   });
   resetVariantQueue();
+  hideProductOverlay();
 }
 
 function refreshVariantCellHighlights(){
@@ -4275,15 +4305,45 @@ function renderCheckoutCart() {
     const details = document.createElement('div');
     const name = document.createElement('div');
     name.className = 'name';
-    name.textContent = item.item_name;
+    // Build structured name: strip variant suffix, show brand separately
+    let baseName = item.item_name;
+    const v = item.variant || {};
+    const colorVal = v.Color || v.Colour || v.color || v.colour || '';
+    const sizeVal = v.Size || v.size || '';
+    const widthVal = v.Width || v.width || v.Fit || '';
+    const vparts = [colorVal, widthVal, sizeVal].filter(Boolean);
+    if(vparts.length){
+      const suffix = ' - ' + vparts.join(' - ');
+      if(baseName.endsWith(suffix)) baseName = baseName.slice(0, -suffix.length).trim();
+    }
+    if(item.brand){
+      const brandTag = document.createElement('span');
+      brandTag.className = 'item-brand-tag';
+      brandTag.textContent = item.brand;
+      name.appendChild(brandTag);
+      name.appendChild(document.createTextNode(' '));
+    }
+    name.appendChild(document.createTextNode(baseName));
     const meta = document.createElement('div');
     meta.className = 'meta';
     const base = (item.original_rate!=null)? Number(item.original_rate) : Number(item.rate);
     const perDisc = Math.max(0, base - Number(item.rate||0));
     const perPct = base>0 ? (perDisc/base*100) : 0;
-    meta.textContent = `${item.qty} x ${money(item.rate)}${isRefund ? ' (refund)' : ''}` + (perDisc>0 ? ` (was ${money(base)}, -${perPct.toFixed(1)}%)` : '');
+    meta.textContent = `${item.qty} × ${money(item.rate)}${isRefund ? ' (refund)' : ''}` + (perDisc>0 ? ` (was ${money(base)}, -${perPct.toFixed(1)}%)` : '');
     details.appendChild(name);
     details.appendChild(meta);
+    // Attributes sub-line: style code, colour, size
+    const attrs = [];
+    if(item.style_code) attrs.push(item.style_code);
+    if(colorVal) attrs.push(colorVal);
+    if(widthVal) attrs.push(widthVal);
+    if(sizeVal) attrs.push(`Sz ${sizeVal}`);
+    if(attrs.length){
+      const attrEl = document.createElement('div');
+      attrEl.className = 'meta';
+      attrEl.textContent = attrs.join(' · ');
+      details.appendChild(attrEl);
+    }
     const refundBtn = document.createElement('button');
     refundBtn.type = 'button';
     refundBtn.className = 'checkout-refund-btn' + (isRefund ? ' active' : '');
@@ -5952,6 +6012,7 @@ async function printZRead(){
     const tenders = Object.assign({Cash:cashSales, Card:cardSales, Voucher:voucher, Other:0}, agg.tenders||{});
     const perCashier = agg.perCashier || {};
     const perGroup = agg.perGroup || {};
+    const perBrand = agg.perBrand || {};
     const tenderLines = Object.entries(tenders)
       .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
       .map(([k,v])=>`  ${k}: ${money(v)}`);
@@ -5960,6 +6021,10 @@ async function printZRead(){
       .map(([k,v])=>`  ${k}: ${money(v)}`);
     const groupLines = Object.entries(perGroup)
       .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
+      .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
+    const brandLines = Object.entries(perBrand)
+      .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
+      .sort((a,b)=>Number(b[1].amount||0)-Number(a[1].amount||0))
       .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
     const pc = agg.petty_cash || { in:0, out:0 };
     const expectedCash = opening + cashSales + (pc.in||0) - (pc.out||0);
@@ -5991,6 +6056,9 @@ async function printZRead(){
       '',
       'By Cashier',
       ...(cashierLines.length ? cashierLines : ['  No data']),
+      '',
+      'By Brand',
+      ...(brandLines.length ? brandLines : ['  No data']),
       '',
       'By Item Group',
       ...(groupLines.length ? groupLines : ['  No data'])
@@ -7482,33 +7550,35 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
   const balStr   = `£${balance.toFixed(2)}`;
   const payStr   = paymentAmount > 0 ? `£${paymentAmount.toFixed(2)}` : '£0.00';
 
+  const SEP  = '----------------------------------------';
+  const SEP2 = '- - - - - - - - - - - - - - - - - - - -';
+  const ESC = '\x1B'; const BIG = ESC + '!' + '\x30'; const NORM = ESC + '!' + '\x00';
+
   const itemLines = (lay.items || []).map(it =>
-    `${it.item_name || it.item_code}  x${it.qty}  £${(it.original_rate * it.qty).toFixed(2)}`
+    `${it.item_name || it.item_code}  x${it.qty}  £${((it.original_rate || 0) * it.qty).toFixed(2)}`
   );
 
   // ── Cancellation receipt ───────────────────────────────────────────────────
   if (event === 'cancelled') {
     const payments = lay.payments || [];
     const payHistLines = payments.map(p =>
-      `  ${formatLayawayDate(p.paid_at)}  ${p.method.padEnd(8)} £${(p.amount || 0).toFixed(2)}`
+      `  ${formatLayawayDate(p.paid_at)}  ${(p.method||'').padEnd(8)} £${(p.amount || 0).toFixed(2)}`
     );
     const cancelLines = [
-      '================================',
-      '      LAYAWAY — CANCELLED',
-      '================================',
+      SEP,
+      `${BIG}LAYAWAY CANCELLED${NORM}`,
+      SEP,
       `Ref:      ${lay.layaway_id}`,
       `Customer: ${lay.customer_tag || ''}`,
       `Date:     ${formatLayawayDate(new Date().toISOString())}`,
-      '--------------------------------',
+      SEP2,
       ...itemLines,
-      '--------------------------------',
-      ...(payHistLines.length > 0 ? ['Payments Made:', ...payHistLines, '--------------------------------'] : []),
+      SEP2,
+      ...(payHistLines.length > 0 ? ['Payments Made:', ...payHistLines, SEP2] : []),
       `Total Was: ${totalStr}`,
       `Paid:      ${paidStr}`,
-      ...(paymentAmount > 0.005 ? [`REFUND DUE: £${paymentAmount.toFixed(2)}`] : ['No refund due']),
-      '================================',
-      '     LAYAWAY CANCELLED',
-      '================================',
+      ...(paymentAmount > 0.005 ? [`${BIG}REFUND DUE: £${paymentAmount.toFixed(2)}${NORM}`] : ['No refund due']),
+      SEP,
     ];
     await triggerReceiptPrint({ lines: cancelLines, title: `Cancelled ${lay.layaway_id}` });
     return;
@@ -7521,69 +7591,68 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
   const todayStr      = formatLayawayDate(new Date().toISOString());
 
   const customerLines = [
-    '================================',
-    isCompleted ? '      LAYAWAY — PAID IN FULL' : '          LAYAWAY RECEIPT',
-    '================================',
+    SEP,
+    `${BIG}${isCompleted ? 'LAYAWAY — PAID IN FULL' : 'LAYAWAY RECEIPT'}${NORM}`,
+    SEP,
     `Ref:  ${lay.layaway_id}`,
     `Date: ${isCompleted ? todayStr : dateStr}`,
-    '--------------------------------',
+    SEP2,
     ...itemLines,
-    '--------------------------------',
+    SEP2,
     `Agreed Total:  ${totalStr}`,
     paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
     `Total Paid:    ${paidStr}`,
     isCompleted ? 'Balance Due:   £0.00' : `Balance Due:   ${balStr}`,
-    '--------------------------------',
-    isCompleted ? '     THANK YOU — COLLECTED' : `Expires:       ${expiryStr}`,
-    isCompleted ? '' : '--------------------------------',
+    SEP2,
+    isCompleted ? `${BIG}THANK YOU — COLLECTED${NORM}` : `Expires: ${expiryStr}`,
     isCompleted ? '' : `Barcode: ${lay.layaway_id}`,
-    '================================',
+    SEP,
   ].filter(l => l !== '');
 
   const storeCopyLines = [
-    '================================',
-    isCompleted ? '    LAYAWAY — STORE COLLECTED' : '       LAYAWAY — STORE COPY',
-    '================================',
+    SEP,
+    `${BIG}${isCompleted ? 'STORE — COLLECTED' : 'LAYAWAY — STORE COPY'}${NORM}`,
+    SEP,
     `Ref:      ${lay.layaway_id}`,
     `Customer: ${lay.customer_tag || ''}`,
     `Date:     ${isCompleted ? todayStr : dateStr}`,
-    '--------------------------------',
+    SEP2,
     ...itemLines,
-    '--------------------------------',
+    SEP2,
     `Agreed Total:  ${totalStr}`,
     paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
     `Total Paid:    ${paidStr}`,
     isCompleted ? 'Balance Due:   £0.00' : `Balance Due:   ${balStr}`,
-    '--------------------------------',
-    isCompleted ? '' : `Expires:       ${expiryStr}`,
-    '================================',
+    isCompleted ? '' : SEP2,
+    isCompleted ? '' : `Expires: ${expiryStr}`,
+    SEP,
   ].filter(l => l !== '');
 
   // ── Collection: print store collection note + customer receipt + store copy ─
   if (isCompleted) {
     const payments = lay.payments || [];
     const payHistLines = payments.map(p =>
-      `  ${formatLayawayDate(p.paid_at)}  ${p.method.padEnd(8)} £${(p.amount || 0).toFixed(2)}`
+      `  ${formatLayawayDate(p.paid_at)}  ${(p.method||'').padEnd(8)} £${(p.amount || 0).toFixed(2)}`
     );
     const collectionLines = [
-      '================================',
-      '      LAYAWAY — COLLECTED',
-      '================================',
+      SEP,
+      `${BIG}LAYAWAY — COLLECTED${NORM}`,
+      SEP,
       `Ref:      ${lay.layaway_id}`,
       `Customer: ${lay.customer_tag || ''}`,
       `Date:     ${todayStr}`,
-      '--------------------------------',
+      SEP2,
       ...itemLines,
-      '--------------------------------',
+      SEP2,
       'Payment History:',
       ...payHistLines,
-      '--------------------------------',
+      SEP2,
       `Total:    ${totalStr}`,
       `PAID:     ${paidStr}`,
       paymentAmount > 0 ? `Last pmt: ${payStr} (${paymentMethod})` : '',
-      '================================',
-      '     THANK YOU — COLLECTED',
-      '================================',
+      SEP,
+      `${BIG}THANK YOU — COLLECTED${NORM}`,
+      SEP,
     ].filter(l => l !== '');
     // 1. Store collection note (internal record with full payment history)
     await triggerReceiptPrint({ lines: collectionLines, title: `Collected ${lay.layaway_id}` });
@@ -7600,11 +7669,13 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
 }
 
 async function triggerReceiptPrint(payload) {
-  const text = (payload.lines || []).join('\n');
+  const rawText = (payload.lines || []).join('\n');
+  const text = decorateWithReceiptLayout(rawText);
   const label = payload.title || 'Receipt';
   if (receiptAgentClient && receiptAgentClient.isReady()) {
     try {
-      await receiptAgentClient.printText(text, { line_feeds: 5, cut: true });
+      const ok = await sendTextToReceiptAgent(text, { line_feeds: 5 });
+      if (ok) await cutReceiptIfReady();
       console.log(`[layaway] Printed: ${label}`);
     } catch (e) {
       console.warn(`[layaway] Print failed (${label}):`, e.message);

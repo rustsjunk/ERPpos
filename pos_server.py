@@ -5558,7 +5558,7 @@ def api_layaway_payment(ref: str):
 
         # Update paid amount; auto-complete if now fully paid
         was_zero = already_paid == 0
-        new_expires = _lay_expiry(1) if was_zero else row['expires_at']
+        new_expires = row['expires_at'] if auto_completed else _lay_expiry(new_paid)
         new_status = 'completed' if auto_completed else 'active'
         conn.execute(
             "UPDATE layaways SET paid=?, expires_at=?, status=?, sync_status='pending' WHERE layaway_id=?",

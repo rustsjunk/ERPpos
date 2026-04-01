@@ -884,6 +884,7 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     width: 48px; height: 48px; border-radius: 8px; background: #f1f3f5; background-size: cover; background-position: center;
 }
 .checkout-item .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.item-brand-tag { display:inline-block; font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; background:#e0e7ff; color:#3730a3; border-radius:4px; padding:1px 5px; margin-right:2px; vertical-align:middle; }
 .checkout-item .meta { color: #6c757d; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .checkout-item .price { font-weight: 600; text-align: right; }
 .checkout-item.refund .name { color: #c92a2a; }
@@ -1100,13 +1101,28 @@ body.dark-mode .search-row.active { background: #1b2a3d; }
     justify-content: center;
     min-height: 90px;
 }
-.browse-card-title {
+.browse-card-title { font-weight: 600; }
+.browse-card-meta { font-size: 0.8rem; color: #6c757d; }
+/* Compact brand chip grid */
+.brand-chip-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 4px 0;
+}
+.brand-chip {
+    padding: 6px 14px;
+    border: 1px solid #dee2e6;
+    border-radius: 999px;
+    background: #fff;
+    font-size: 0.82rem;
     font-weight: 600;
+    color: #374151;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.12s, background 0.12s, color 0.12s;
 }
-.browse-card-meta {
-    font-size: 0.8rem;
-    color: #6c757d;
-}
+.brand-chip:hover { border-color: #6366f1; background: #eef2ff; color: #4f46e5; }
 .product-img {
     width: 100%;
     aspect-ratio: 1 / 1; /* ensure square */
