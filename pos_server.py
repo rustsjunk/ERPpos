@@ -501,6 +501,32 @@ def _record_queue_entry(queue_conn: sqlite3.Connection, main_conn: Optional[sqli
     except Exception:
         exists = None
     if exists:
+        # Sale already in main DB — ensure the outbox entry exists so push_outbox can post it
+        try:
+            ob = main_conn.execute(
+                "SELECT id FROM outbox WHERE ref_id=? AND kind='sale'", (sale_id,)
+            ).fetchone()
+            if not ob and exists['queue_status'] not in ('posted',):
+                sale_payload = _build_sale_payload(payload, sale_id)
+                erp_payload = {
+                    'sale_id': sale_id,
+                    'invoice_name': sale_id,
+                    'lines': sale_payload.get('lines', []),
+                    'payments': sale_payload.get('payments', []),
+                    'customer': sale_payload.get('customer_id') or 'Walk-in Customer',
+                    'customer_id': sale_payload.get('customer_id'),
+                    'cashier': sale_payload.get('cashier'),
+                    'voucher_redeem': sale_payload.get('voucher_redeem', []),
+                    'pos_voucher_code': sale_payload.get('pos_voucher_code'),
+                }
+                main_conn.execute(
+                    "INSERT INTO outbox (kind, ref_id, created_utc, payload_json) VALUES ('sale',?,?,?)",
+                    (sale_id, _utcnow_z(), _json.dumps(erp_payload, separators=(',', ':')))
+                )
+                main_conn.commit()
+                app.logger.info('Created missing outbox entry for existing sale %s', sale_id)
+        except Exception as exc:
+            app.logger.warning('Could not create outbox entry for sale %s: %s', sale_id, exc)
         queue_conn.execute(
             "UPDATE pos_sales_queue SET sale_id=?, status='queued', updated_utc=?, error=NULL WHERE id=?",
             (sale_id, _utcnow_z(), row['id'])
@@ -645,6 +671,10 @@ _SESSION_LOCK = threading.Lock()
 _IDLE_TASK_THREAD: Optional[threading.Thread] = None
 _IDLE_TASK_LOCK = threading.Lock()
 
+# Backoff state for ERPNext outbox push (avoids hammering a struggling ERPNext)
+_OUTBOX_BACKOFF_UNTIL: float = 0.0
+_OUTBOX_FAIL_STREAK: int = 0
+
 # Optional SQLite service helpers
 LAYAWAY_ERP_KEY = os.getenv('LAYAWAY_ERP_KEY', '') or os.getenv('POS_RECEIPT_KEY', '')
 
@@ -745,15 +775,13 @@ def _ensure_idle_worker():
 
 
 def _idle_maintenance_loop():
-    """Periodically run maintenance tasks whenever no cashier sessions are active."""
+    """Periodically run maintenance tasks. Queue drain runs always; heavy ERP sync only when tills are idle."""
     while True:
         try:
             time.sleep(IDLE_TASK_INTERVAL)
         except Exception:
             continue
         if not IDLE_TASKS_ENABLED:
-            continue
-        if _has_active_cashier_sessions():
             continue
         try:
             _run_idle_maintenance_tasks()
@@ -798,25 +826,38 @@ def _run_idle_maintenance_tasks():
                 summary.append(f"ingested {ingested} invoice(s)")
         except Exception as exc:
             app.logger.warning("Idle invoice ingest failed: %s", exc)
-        if not USE_MOCK and _has_erp_credentials():
-            try:
-                ps.sync_cycle(conn, warehouse=POS_WAREHOUSE, price_list=POS_PRICE_LIST, loops=1)
-                summary.append("synced ERP catalog")
-            except Exception as exc:
-                app.logger.warning("Idle ERP sync failed: %s", exc)
-        if not USE_MOCK and _has_erp_credentials():
-            try:
-                updated = _maybe_sync_cashiers(conn)
-                if updated:
-                    summary.append(f"synced cashiers={updated}")
-            except Exception as exc:
-                app.logger.warning("Idle cashier sync failed: %s", exc)
+        # Heavy ERP sync tasks only run when no cashiers are active (avoid load during trading hours)
+        if not _has_active_cashier_sessions():
+            if not USE_MOCK and _has_erp_credentials():
+                try:
+                    ps.sync_cycle(conn, warehouse=POS_WAREHOUSE, price_list=POS_PRICE_LIST, loops=1)
+                    summary.append("synced ERP catalog")
+                except Exception as exc:
+                    app.logger.warning("Idle ERP sync failed: %s", exc)
+            if not USE_MOCK and _has_erp_credentials():
+                try:
+                    updated = _maybe_sync_cashiers(conn)
+                    if updated:
+                        summary.append(f"synced cashiers={updated}")
+                except Exception as exc:
+                    app.logger.warning("Idle cashier sync failed: %s", exc)
+        # Outbox push runs always but backs off when ERPNext is struggling
         if not POS_QUEUE_ONLY and not USE_MOCK and _has_erp_credentials():
-            try:
-                ps.push_outbox(conn)
-                summary.append("pushed outbox")
-            except Exception as exc:
-                app.logger.warning("Idle outbox push failed: %s", exc)
+            global _OUTBOX_BACKOFF_UNTIL, _OUTBOX_FAIL_STREAK
+            if time.time() >= _OUTBOX_BACKOFF_UNTIL:
+                try:
+                    ps.push_outbox(conn)
+                    summary.append("pushed outbox")
+                    _OUTBOX_FAIL_STREAK = 0
+                    _OUTBOX_BACKOFF_UNTIL = 0.0
+                except Exception as exc:
+                    _OUTBOX_FAIL_STREAK += 1
+                    backoff = min(_OUTBOX_FAIL_STREAK * IDLE_TASK_INTERVAL, 3600)
+                    _OUTBOX_BACKOFF_UNTIL = time.time() + backoff
+                    app.logger.warning("Idle outbox push failed (streak=%d, backoff=%ds): %s", _OUTBOX_FAIL_STREAK, backoff, exc)
+            else:
+                remaining = int(_OUTBOX_BACKOFF_UNTIL - time.time())
+                app.logger.debug("Outbox push skipped, backing off (%ds remaining)", remaining)
         # Layaway outbox runs independently of mock mode and POS_QUEUE_ONLY — uses X-POS-KEY via ERPDASH_URL
         if ERPDASH_URL or ERPNEXT_URL:
             try:
@@ -824,20 +865,21 @@ def _run_idle_maintenance_tasks():
                 ps.push_layaway_outbox(conn)
             except Exception as exc:
                 app.logger.warning("[layaway-sync] Idle layaway outbox push failed: %s", exc)
-        if not USE_MOCK and ERP_PULL_SALES_ENABLED and _has_erp_credentials():
-            try:
-                pulled, matched, inserted = _reconcile_erp_sales_invoices(conn)
-                if pulled or matched or inserted:
-                    summary.append(f"erp sales pulled={pulled} matched={matched} new={inserted}")
-            except Exception as exc:
-                app.logger.warning("Idle ERP sales reconciliation failed: %s", exc)
-        if not USE_MOCK and ERP_PULL_VOUCHERS_ENABLED and _has_erp_credentials():
-            try:
-                pulled, updated, inserted = _reconcile_erp_gift_vouchers(conn)
-                if pulled or updated or inserted:
-                    summary.append(f"erp vouchers pulled={pulled} updated={updated} new={inserted}")
-            except Exception as exc:
-                app.logger.warning("Idle ERP voucher reconciliation failed: %s", exc)
+        if not _has_active_cashier_sessions():
+            if not USE_MOCK and ERP_PULL_SALES_ENABLED and _has_erp_credentials():
+                try:
+                    pulled, matched, inserted = _reconcile_erp_sales_invoices(conn)
+                    if pulled or matched or inserted:
+                        summary.append(f"erp sales pulled={pulled} matched={matched} new={inserted}")
+                except Exception as exc:
+                    app.logger.warning("Idle ERP sales reconciliation failed: %s", exc)
+            if not USE_MOCK and ERP_PULL_VOUCHERS_ENABLED and _has_erp_credentials():
+                try:
+                    pulled, updated, inserted = _reconcile_erp_gift_vouchers(conn)
+                    if pulled or updated or inserted:
+                        summary.append(f"erp vouchers pulled={pulled} updated={updated} new={inserted}")
+                except Exception as exc:
+                    app.logger.warning("Idle ERP voucher reconciliation failed: %s", exc)
         if summary:
             app.logger.info("Idle maintenance completed (%s)", ", ".join(summary))
         try:
@@ -1554,6 +1596,14 @@ def _ensure_schema(conn: sqlite3.Connection):
     ).fetchone()
     if not row:
         ps.init_db(conn, SCHEMA_PATH)
+    # Migrate sales table: add payload_json column if missing (added after initial schema)
+    try:
+        sales_cols = {r['name'] for r in conn.execute("PRAGMA table_info(sales)").fetchall()}
+        if 'payload_json' not in sales_cols:
+            conn.execute("ALTER TABLE sales ADD COLUMN payload_json TEXT")
+            conn.commit()
+    except Exception:
+        pass
     # Search indexes for faster lookup
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_name ON items(name)")
@@ -3604,51 +3654,50 @@ def api_web_orders():
                 o['status'] = 'printed'
         return orders
 
-    now = time.time()
-    if ERPDASH_URL:
+    try:
+        now = time.time()
+        if not ERPDASH_URL:
+            return jsonify(orders=[]), 200
+
         if now - _web_orders_cache['ts'] < _WEB_ORDERS_CACHE_TTL:
-            # Return cached orders but always re-apply local printed flags so a
-            # print that happened within the cache window is reflected immediately.
+            # Cache is warm — re-apply printed flags and return immediately.
             return jsonify(orders=_apply_printed(copy.deepcopy(_web_orders_cache['orders']))), 200
+
         try:
-            # Pass a since cursor so erpdash doesn't fetch orders from years ago.
-            # Use the last successful fetch date minus 1 day as a safety overlap,
-            # defaulting to 90 days ago on first run.
-            import datetime as _dt
-            since_ts = _web_orders_cache.get('since_ts')
-            if since_ts:
-                since_date = (_dt.datetime.utcfromtimestamp(since_ts) - _dt.timedelta(days=1)).strftime('%Y-%m-%d')
-            else:
-                since_date = (_dt.datetime.utcnow() - _dt.timedelta(days=90)).strftime('%Y-%m-%d')
             r = requests.get(
                 f'{ERPDASH_URL}/api/website/orders/rich',
-                params={'since': since_date},
                 timeout=10,
             )
-            if r.ok:
-                data = r.json()
-                orders = []
-                for o in data.get('orders') or []:
-                    orders.append({
-                        'id':            o.get('name'),
-                        'order_number':  o.get('shopify_order_number') or o.get('name'),
-                        'customer_name': o.get('customer'),
-                        'date':          o.get('date'),
-                        'total':         o.get('total'),
-                        'outstanding':   o.get('outstanding'),
-                        'status':        o.get('status'),
-                        'printed_at':    o.get('printed_at'),
-                        'items':         o.get('items') or [],
-                    })
-                _apply_printed(orders)
-                _web_orders_cache['orders'] = orders
-                _web_orders_cache['ts'] = now
-                _web_orders_cache['since_ts'] = now
-                return jsonify(orders=orders), 200
         except Exception:
-            if _web_orders_cache['orders']:
-                import copy
-                return jsonify(orders=_apply_printed(copy.deepcopy(_web_orders_cache['orders']))), 200
+            r = None
+
+        if r is not None and r.ok:
+            data = r.json()
+            orders = []
+            for o in data.get('orders') or []:
+                orders.append({
+                    'id':            o.get('name'),
+                    'order_number':  o.get('shopify_order_number') or o.get('name'),
+                    'customer_name': o.get('customer'),
+                    'date':          o.get('date'),
+                    'total':         o.get('total'),
+                    'outstanding':   o.get('outstanding'),
+                    'status':        o.get('status'),
+                    'printed_at':    o.get('printed_at'),
+                    'items':         o.get('items') or [],
+                })
+            _apply_printed(orders)
+            _web_orders_cache['orders'] = orders
+            _web_orders_cache['ts'] = now
+            return jsonify(orders=orders), 200
+
+        # Fetch failed or non-OK — serve stale cache if available.
+        if _web_orders_cache['orders']:
+            return jsonify(orders=_apply_printed(copy.deepcopy(_web_orders_cache['orders']))), 200
+
+    except Exception:
+        app.logger.exception('api_web_orders failed')
+
     return jsonify(orders=[]), 200
 
 
@@ -3792,6 +3841,27 @@ def api_invoice_queue_retry():
     return jsonify({'status': 'success', 'moved': moved, 'errors': errors})
 
 
+@app.route('/api/admin/invoice-queue/requeue-sent', methods=['POST'])
+def api_invoice_queue_requeue_sent():
+    """Move invoices from posted_remote/ back to invoices/ so the till agent re-posts them.
+    Use this when the till agent was previously posting to the wrong destination."""
+    inv_base = Path('invoices')
+    sent_dir = inv_base / 'posted_remote'
+    moved = 0
+    errors = []
+    if sent_dir.is_dir():
+        for f in list(sent_dir.glob('*.json')):
+            try:
+                dest = inv_base / f.name
+                if dest.exists():
+                    dest = inv_base / f'{f.stem}_{int(time.time())}.json'
+                f.rename(dest)
+                moved += 1
+            except Exception as exc:
+                errors.append(str(exc))
+    return jsonify({'status': 'success', 'moved': moved, 'errors': errors})
+
+
 @app.route('/api/admin/trapped-sales', methods=['GET'])
 def api_trapped_sales():
     """Return all non-posted sales with lines, payments, last error, and a local item diagnosis."""
@@ -3876,19 +3946,64 @@ def api_trapped_sales_retry():
     if sale_row['queue_status'] == 'posted':
         return jsonify({'status': 'error', 'message': 'Sale already posted'}), 400
 
-    try:
-        payload = json.loads(sale_row['payload_json'])
-    except Exception:
-        return jsonify({'status': 'error', 'message': 'Failed to parse sale payload'}), 500
+    # payload_json may be NULL if the column was added after the DB was created;
+    # fall back to the outbox table which always has the canonical payload.
+    payload = None
+    raw = sale_row['payload_json']
+    if raw:
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = None
+    if payload is None:
+        ob_payload_row = conn.execute(
+            "SELECT payload_json FROM outbox WHERE ref_id=? AND kind='sale' ORDER BY id DESC LIMIT 1",
+            (sale_id,)
+        ).fetchone()
+        if ob_payload_row and ob_payload_row['payload_json']:
+            try:
+                payload = json.loads(ob_payload_row['payload_json'])
+            except Exception:
+                payload = None
+    if payload is None:
+        # Try pos_sales_queue SQLite
+        try:
+            q_conn = _queue_db_connect()
+            if q_conn:
+                q_row = q_conn.execute(
+                    "SELECT payload_json FROM pos_sales_queue WHERE invoice_name=? OR sale_id=? ORDER BY id DESC LIMIT 1",
+                    (sale_id, sale_id)
+                ).fetchone()
+                q_conn.close()
+                if q_row and q_row['payload_json']:
+                    payload = json.loads(q_row['payload_json'])
+        except Exception:
+            payload = None
+    if payload is None:
+        # Try queue file directories (ready, pending, failed)
+        for dir_key in ('ready', 'pending', 'failed'):
+            try:
+                queue_path = _POS_QUEUE_DIR_STATES.get(dir_key)
+                if queue_path:
+                    candidate = queue_path / f"{sale_id}.json"
+                    if candidate.exists():
+                        payload = _json.loads(candidate.read_text(encoding='utf-8'))
+                        break
+            except Exception:
+                continue
+    if payload is None:
+        return jsonify({'status': 'error', 'message': 'No payload found for this sale — cannot retry'}), 500
 
     # Ensure there is an outbox entry so last_error is persisted
     ob_row = conn.execute(
         "SELECT id FROM outbox WHERE ref_id=? AND kind='sale' ORDER BY id DESC LIMIT 1", (sale_id,)
     ).fetchone()
     if not ob_row:
+        payload_json_str = _json.dumps(payload, separators=(',', ':'))
+        created_utc = payload.get('created_utc') or _utcnow_z()
         conn.execute(
             "INSERT INTO outbox (kind, ref_id, created_utc, payload_json) VALUES ('sale',?,?,?)",
-            (sale_id, sale_row['payload_json'] and json.loads(sale_row['payload_json']).get('created_utc', ''), sale_row['payload_json'])
+            (sale_id, created_utc, payload_json_str)
         )
         conn.commit()
         ob_row = conn.execute(
@@ -5815,7 +5930,7 @@ def api_layaway_pull_from_erp():
             erp_refs.add(ref)
             try:
                 existing = conn.execute(
-                    "SELECT layaway_id, paid_total, status FROM layaways WHERE layaway_id = ?", (ref,)
+                    "SELECT layaway_id, paid, status FROM layaways WHERE layaway_id = ?", (ref,)
                 ).fetchone()
 
                 if existing is None:
@@ -5823,7 +5938,7 @@ def api_layaway_pull_from_erp():
                     items_json = _json.dumps(lay.get('items') or [])
                     conn.execute(
                         """INSERT INTO layaways
-                            (layaway_id, customer_tag, erp_so_name, items, total, paid_total,
+                            (layaway_id, customer_tag, erp_so_name, items, total, paid,
                              status, created_at, expires_at, created_by, sync_status)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced')""",
                         (
@@ -5861,7 +5976,7 @@ def api_layaway_pull_from_erp():
                     # Update if paid_total or status differ
                     remote_paid = float(lay.get('paid_total') or 0)
                     remote_status = lay.get('local_status') or 'active'
-                    local_paid = float(existing['paid_total'] or 0)
+                    local_paid = float(existing['paid'] or 0)
                     local_status = existing['status']
                     # Update status if ERPNext says completed or cancelled and local hasn't settled yet
                     status_update = (
@@ -5872,7 +5987,7 @@ def api_layaway_pull_from_erp():
                     if paid_update or status_update:
                         new_status = remote_status if status_update else local_status
                         conn.execute(
-                            "UPDATE layaways SET paid_total = ?, status = ?, erp_so_name = COALESCE(NULLIF(erp_so_name,''), ?) WHERE layaway_id = ?",
+                            "UPDATE layaways SET paid = ?, status = ?, erp_so_name = COALESCE(NULLIF(erp_so_name,''), ?) WHERE layaway_id = ?",
                             (remote_paid, new_status, lay.get('so_name') or '', ref),
                         )
                         # Insert any payment records not yet locally present

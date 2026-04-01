@@ -7706,8 +7706,8 @@ async function triggerReceiptPrint(payload) {
   const label = payload.title || 'Receipt';
   if (receiptAgentClient && receiptAgentClient.isReady()) {
     try {
-      const ok = await sendTextToReceiptAgent(text, { line_feeds: 5 });
-      if (ok) await cutReceiptIfReady();
+      // Send text and cut in one request so the cut is guaranteed to follow the text
+      await sendTextToReceiptAgent(text, { line_feeds: 5, cut: true });
       console.log(`[layaway] Printed: ${label}`);
     } catch (e) {
       console.warn(`[layaway] Print failed (${label}):`, e.message);

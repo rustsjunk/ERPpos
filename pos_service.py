@@ -826,10 +826,18 @@ def _erp_request(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     req = urllib.request.Request(url, data=data, method="POST", headers={
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Authorization": f"token {ERP_API_KEY}:{ERP_API_SECRET}" if ERP_API_KEY and ERP_API_SECRET else ""
+        "Authorization": f"token {ERP_API_KEY}:{ERP_API_SECRET}" if ERP_API_KEY and ERP_API_SECRET else "",
     })
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code} from ERPNext: {body[:500]}") from e
 
 def _erp_resource_request(path: str, payload: Optional[Dict[str, Any]], method: str = "POST") -> Dict[str, Any]:
     if not ERP_BASE:
@@ -841,6 +849,7 @@ def _erp_resource_request(path: str, payload: Optional[Dict[str, Any]], method: 
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "Expect": "",
     }
     if ERP_API_KEY and ERP_API_SECRET:
         headers["Authorization"] = f"token {ERP_API_KEY}:{ERP_API_SECRET}"

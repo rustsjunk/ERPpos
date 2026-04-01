@@ -246,8 +246,7 @@ def _write_text(ser: Serial, text: str) -> None:
     if not text:
         return
     data = text.encode("ascii", errors="ignore")
-    # DEBUG: log as hex
-    logging.info("[AGENT] TEXT HEX: %s", data.hex(" "))
+    logging.debug("[AGENT] TEXT HEX: %s", data.hex(" "))
     ser.write(data)
 
 
@@ -289,12 +288,7 @@ def print_receipt():
         hex_commands = list(hex_commands)
     extra_line_feeds = int(payload.get("line_feeds", LINE_FEEDS))
     cut = payload.get("cut", CUT_AFTER_PRINT)
-    cleaned_preview = text.strip().replace("\n", "\\n")
-    logging.info(
-        "Preparing receipt: text len=%d snippet=%s",
-        len(text),
-        cleaned_preview[:120]
-    )
+    logging.debug("Preparing receipt: text len=%d", len(text))
     if hex_commands:
         logging.info("Printing extra hex commands: %s", hex_commands)
 

@@ -28,11 +28,15 @@ def start_till_agent():
     env = os.environ.copy()
     env.setdefault('INVOICES_DIR', os.path.join(os.getcwd(), 'invoices'))
     if not env.get('TILL_POST_URL'):
-        host = env.get('HOST', '127.0.0.1')
-        port = env.get('PORT', '5000')
-        if host in ('0.0.0.0', '::'):
-            host = '127.0.0.1'
-        env['TILL_POST_URL'] = f"http://{host}:{port}/api/pos/sales"
+        erpdash_url = (env.get('ERPDASH_URL') or '').rstrip('/')
+        if erpdash_url:
+            env['TILL_POST_URL'] = f"{erpdash_url}/api/pos/sales"
+        else:
+            host = env.get('HOST', '127.0.0.1')
+            port = env.get('PORT', '5000')
+            if host in ('0.0.0.0', '::'):
+                host = '127.0.0.1'
+            env['TILL_POST_URL'] = f"http://{host}:{port}/api/pos/sales"
     return subprocess.Popen([sys.executable, script_path], env=env)
 
 
