@@ -4482,13 +4482,13 @@ function updateCashSection() {
   if (cashEnteredEl) cashEnteredEl.textContent = money(Number(cashInput||0));
   const dueOther = document.getElementById('amountDueOther');
   if (dueOther) dueOther.textContent = money(remaining);
-  const cashEntryDisplayEl = document.getElementById('cashEntryDisplay');
-  const cashEntryDueEl = document.getElementById('cashEntryDueDisplay');
-  if (cashEntryDisplayEl) cashEntryDisplayEl.textContent = money(cashVal || 0);
-  if (cashEntryDueEl) cashEntryDueEl.textContent = money(remaining);
   const changeVal = isRefund ? 0 : Math.max(0, paid - targetAmount);
   if (changeEl) changeEl.textContent = money(changeVal);
   const cashVal = Number(cashInput || 0);
+  const cashEntryDisplayEl = document.getElementById('cashEntryDisplay');
+  const cashEntryDueEl = document.getElementById('cashEntryDueDisplay');
+  if (cashEntryDisplayEl) cashEntryDisplayEl.textContent = money(cashVal);
+  if (cashEntryDueEl) cashEntryDueEl.textContent = money(remaining);
   if (cashBtn){
     const labelAmount = Math.abs(cashVal||0);
     cashBtn.textContent = isRefund ? `Refund ${money(labelAmount)}` : `${money(cashVal)} Cash`;
