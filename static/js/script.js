@@ -3121,8 +3121,8 @@ function bindEvents(){
   }
   if(discountCloseBtn){ discountCloseBtn.addEventListener('click', commitDiscountsAndClose); }
   if(discountOverlay){ discountOverlay.addEventListener('click', e=>{ if(e.target===discountOverlay) hideDiscountOverlay(); }); document.addEventListener('keydown', e=>{ if(e.key==='Escape') hideDiscountOverlay(); }); }
-  if(discountSelectAllBtn){ discountSelectAllBtn.addEventListener('click', ()=>{ discountItemsList?.querySelectorAll('input[type="checkbox"]').forEach(cb=>cb.checked=true); }); }
-  if(discountDeselectAllBtn){ discountDeselectAllBtn.addEventListener('click', ()=>{ discountItemsList?.querySelectorAll('input[type="checkbox"]').forEach(cb=>cb.checked=false); }); }
+  if(discountSelectAllBtn){ discountSelectAllBtn.addEventListener('click', ()=>{ discountItemsList?.querySelectorAll('.disc-item-card').forEach(c=>c.classList.add('disc-selected')); }); }
+  if(discountDeselectAllBtn){ discountDeselectAllBtn.addEventListener('click', ()=>{ discountItemsList?.querySelectorAll('.disc-item-card').forEach(c=>c.classList.remove('disc-selected')); }); }
   if(applyDiscountBtn){ applyDiscountBtn.addEventListener('click', applyDiscountsToSelected); }
   const updateValueLabel=()=>{
     if(!discountValueLabel) return;
@@ -4482,6 +4482,10 @@ function updateCashSection() {
   if (cashEnteredEl) cashEnteredEl.textContent = money(Number(cashInput||0));
   const dueOther = document.getElementById('amountDueOther');
   if (dueOther) dueOther.textContent = money(remaining);
+  const cashEntryDisplayEl = document.getElementById('cashEntryDisplay');
+  const cashEntryDueEl = document.getElementById('cashEntryDueDisplay');
+  if (cashEntryDisplayEl) cashEntryDisplayEl.textContent = money(cashVal || 0);
+  if (cashEntryDueEl) cashEntryDueEl.textContent = money(remaining);
   const changeVal = isRefund ? 0 : Math.max(0, paid - targetAmount);
   if (changeEl) changeEl.textContent = money(changeVal);
   const cashVal = Number(cashInput || 0);
@@ -5485,7 +5489,10 @@ function openDiscountOverlay(){
     // if original_rate exists, use that as baseline for display/percent
     base: Number((it.original_rate!=null?it.original_rate:it.rate)||0),
     curr: Number(it.rate||0),
-    refund: !!it.refund
+    refund: !!it.refund,
+    image: it.image || findItemImageUrl(it.item_code),
+    colour: it.color || it.custom_simple_colour || (it.variant && (it.variant.Color || it.variant.Colour || it.variant.color || it.variant.colour)) || '',
+    size: it.size || (it.variant && (it.variant.Size || it.variant.size)) || ''
   }));
   renderDiscountItems();
   resetDiscountValueInput();
@@ -5507,6 +5514,10 @@ function hideDiscountOverlay(){
 function renderDiscountItems(){
   const list=document.getElementById('discountItemsList');
   if(!list) return;
+  // Preserve which codes are currently selected
+  const prevSelected = new Set(
+    Array.from(list.querySelectorAll('.disc-item-card.disc-selected')).map(el=>el.dataset.code)
+  );
   list.innerHTML='';
   // Ensure summary element exists
   if(!__discountSummaryEl){
@@ -5519,26 +5530,64 @@ function renderDiscountItems(){
     }
   }
   const rows = Array.isArray(__discountWork)?__discountWork:[];
-  rows.forEach((it, idx)=>{
-    const id = `disc_${idx}`;
+  rows.forEach((it)=>{
     const isRefund = !!it.refund;
-    const row = document.createElement('label');
-    row.className = 'list-group-item d-flex justify-content-between align-items-center';
-    if(isRefund) row.classList.add('refund');
     const base = Number(it.base||it.orig||0);
     const curr = Number(it.curr||0);
     const perAmt = Math.max(0, (base - curr) * it.qty);
     const perPct = base>0 ? ((base - curr)/base*100) : 0;
-    row.innerHTML = `
-      <div class="form-check">
-        <input class="form-check-input" type="checkbox" id="${id}" data-code="${it.code}">
-        <span class="ms-2">${it.name}${isRefund?' (refund)': ''}</span>
-      </div>
-      <div class="text-end small ${perAmt>0?'text-danger':'text-muted'}">
-        <div>${it.qty} ? ${money(curr)}${perAmt>0?` (was ${money(base)})`:''}</div>
-        ${perAmt>0?`<div class="fw-semibold">-${money(perAmt)} (${perPct.toFixed(1)}%)</div>`:`<div class="fw-semibold">${money(it.qty*curr)}</div>`}
-      </div>`;
-    list.appendChild(row);
+    const card = document.createElement('div');
+    card.className = 'disc-item-card' + (isRefund?' disc-refund':'');
+    card.dataset.code = it.code;
+    if(prevSelected.has(it.code)) card.classList.add('disc-selected');
+    // Image area
+    const imgArea = document.createElement('div');
+    imgArea.className = 'disc-item-img';
+    const thumb = it.image ? thumbUrl(it.image, 120, 120) : '';
+    if(thumb){
+      const img = document.createElement('img');
+      img.src = thumb;
+      img.alt = it.name || it.code;
+      img.loading = 'lazy';
+      imgArea.appendChild(img);
+    } else {
+      imgArea.textContent = (it.name||it.code||'')[0] || '?';
+    }
+    // Info area
+    const info = document.createElement('div');
+    info.className = 'disc-item-info';
+    const nameLine = document.createElement('div');
+    nameLine.className = 'disc-item-name';
+    nameLine.textContent = it.name || it.code;
+    info.appendChild(nameLine);
+    if(it.colour || it.size){
+      const meta = document.createElement('div');
+      meta.className = 'disc-item-meta';
+      meta.textContent = [it.colour, it.size].filter(Boolean).join(' · ');
+      info.appendChild(meta);
+    }
+    const priceLine = document.createElement('div');
+    priceLine.className = 'disc-item-price' + (perAmt>0?' text-danger':'');
+    priceLine.innerHTML = perAmt>0
+      ? `${money(curr)} <s class="text-muted">${money(base)}</s>`
+      : money(curr);
+    info.appendChild(priceLine);
+    if(perAmt>0){
+      const discLine = document.createElement('div');
+      discLine.className = 'disc-item-saving';
+      discLine.textContent = `-${money(perAmt)} (${perPct.toFixed(1)}%)`;
+      info.appendChild(discLine);
+    }
+    const qtyLine = document.createElement('div');
+    qtyLine.className = 'disc-item-qty text-muted';
+    qtyLine.textContent = `qty: ${it.qty}`;
+    info.appendChild(qtyLine);
+    card.appendChild(imgArea);
+    card.appendChild(info);
+    card.addEventListener('click', ()=>{
+      card.classList.toggle('disc-selected');
+    });
+    list.appendChild(card);
   });
   // Summary totals
   if(__discountSummaryEl){
@@ -5562,8 +5611,8 @@ function applyDiscountsToSelected(){
   const mode = (modeSet&&modeSet.checked)?'set':(modePct&&modePct.checked)?'percent':'amount';
   if(!(raw>0) && mode!=='set'){ alert('Enter a discount value greater than 0'); return; }
   if(mode==='set' && !(raw>=0)){ alert('Enter a set price (>= 0)'); return; }
-  const chosen = Array.from(list.querySelectorAll('input.form-check-input[type="checkbox"]:checked'))
-    .map(cb=>cb.getAttribute('data-code'))
+  const chosen = Array.from(list.querySelectorAll('.disc-item-card.disc-selected'))
+    .map(card=>card.dataset.code)
     .filter(Boolean);
   if(!chosen.length){ alert('Select at least one item'); return; }
   (__discountWork||[]).forEach(it=>{
