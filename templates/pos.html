@@ -629,7 +629,19 @@
             <div class="row g-3">
                 <div class="col-12 col-lg-7">
                     <div class="card p-3">
-                        <div class="fw-semibold mb-2">Denominations</div>
+                        <div class="fw-semibold mb-2 d-flex align-items-center justify-content-between flex-wrap gap-2">
+                            <span>Cash Count</span>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <input type="radio" class="btn-check" name="floatEntryMode" id="floatDenomMode" value="denom" autocomplete="off" checked>
+                                <label class="btn btn-outline-secondary" for="floatDenomMode">By Denomination</label>
+                                <input type="radio" class="btn-check" name="floatEntryMode" id="floatDirectMode" value="direct" autocomplete="off">
+                                <label class="btn btn-outline-secondary" for="floatDirectMode">Direct Total</label>
+                            </div>
+                        </div>
+                        <div id="floatDirectEntry" style="display:none;" class="mb-3">
+                            <label class="form-label mb-1">Total Cash in Till (&pound;)</label>
+                            <input type="number" id="floatDirectTotal" step="0.01" min="0" class="form-control form-control-lg" placeholder="0.00" inputmode="decimal">
+                        </div>
                         <div id="denomsGrid" class="row g-2">
                             <div class="col-6 col-md-4"><label class="form-label">&pound;50</label><input data-denom="50" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="Qty"></div>
                             <div class="col-6 col-md-4"><label class="form-label">&pound;20</label><input data-denom="20" type="number" min="0" step="1" class="form-control form-control-sm denom-qty" placeholder="Qty"></div>
@@ -660,7 +672,7 @@
                             </div></div>
                             <hr>
                             <div class="d-flex justify-content-between"><div>Expected Till</div><div id="sumExpected">Ã‚Â£0.00</div></div>
-                            <div class="d-flex justify-content-between"><div>Counted (denoms)</div><div id="sumCounted">Ã‚Â£0.00</div></div>
+                            <div class="d-flex justify-content-between"><div>Counted</div><div id="sumCounted">Ã‚Â£0.00</div></div>
                             <div class="d-flex justify-content-between fw-semibold"><div>Variance</div><div id="sumVariance">Ã‚Â£0.00</div></div>
                         </div>
                         <div id="reconResult" class="mt-2" style="display:none;"></div>

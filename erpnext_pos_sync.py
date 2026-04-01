@@ -23,10 +23,15 @@ from frappe.utils import nowdate
 
 @frappe.whitelist()
 def pos_ingest(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Idempotently create and submit a Sales Invoice from a POS payload.
+    """Idempotently create and submit Sales Invoice(s) from a POS payload.
 
-    Accepts either direct JSON body or 'payload' param. Ensures
-    Sales Invoice.pos_receipt_id is unique to prevent duplicates.
+    Handles three cases:
+    - Pure sale: single Sales Invoice with all positive qty items.
+    - Pure return: single Sales Invoice with is_return=1 and positive qty items
+      (quantities are stored positive; ERPNext flips sign for returns).
+    - Mixed exchange (some returned, some purchased): splits into two invoices —
+      a return invoice (suffixed -RTN) and a sale invoice (suffixed -SALE).
+      Payments go on the sale invoice; the return is a standalone credit note.
     """
     if payload is None:
         payload = frappe.request.get_json(silent=True) or {}
@@ -40,36 +45,100 @@ def pos_ingest(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not items:
         frappe.throw(_("No items to post"))
 
-    existing = frappe.db.get_value("Sales Invoice", {"pos_receipt_id": receipt_id}, "name")
-    if existing:
-        return {"ok": True, "name": existing, "idempotent": True}
+    sale_items = [i for i in items if i["qty"] > 0]
+    return_items = [
+        {"item_code": i["item_code"], "qty": abs(i["qty"]), "rate": i["rate"]}
+        for i in items if i["qty"] < 0
+    ]
+    is_mixed = bool(sale_items and return_items)
+    is_pure_return = bool(return_items and not sale_items)
 
+    results = []
+
+    # --- Sale invoice (or sole invoice for pure-sale transactions) ---
+    if not is_pure_return:
+        sale_rid = f"{receipt_id}-SALE" if is_mixed else receipt_id
+        existing = frappe.db.get_value("Sales Invoice", {"pos_receipt_id": sale_rid}, "name")
+        if existing:
+            results.append({"type": "sale", "name": existing, "idempotent": True})
+        else:
+            si = _build_invoice(
+                customer=customer,
+                items=sale_items if is_mixed else items,
+                payments=payments,
+                receipt_id=sale_rid,
+                payload=payload,
+                is_return=False,
+            )
+            si.insert(ignore_permissions=True)
+            si.submit()
+            results.append({"type": "sale", "name": si.name})
+
+    # --- Return invoice (pure return or exchange return leg) ---
+    if return_items or is_pure_return:
+        rtn_rid = f"{receipt_id}-RTN" if is_mixed else receipt_id
+        existing = frappe.db.get_value("Sales Invoice", {"pos_receipt_id": rtn_rid}, "name")
+        if existing:
+            results.append({"type": "return", "name": existing, "idempotent": True})
+        else:
+            rtn_items = return_items if return_items else [
+                {"item_code": i["item_code"], "qty": abs(i["qty"]), "rate": i["rate"]}
+                for i in items
+            ]
+            # Payments on the return leg only for pure returns; exchange payments sit on sale
+            rtn_payments = payments if is_pure_return else []
+            si = _build_invoice(
+                customer=customer,
+                items=rtn_items,
+                payments=rtn_payments,
+                receipt_id=rtn_rid,
+                payload=payload,
+                is_return=True,
+            )
+            si.insert(ignore_permissions=True)
+            si.submit()
+            results.append({"type": "return", "name": si.name})
+
+    # Backward-compatible response shape for pure-sale (single invoice)
+    if len(results) == 1:
+        r = results[0]
+        return {"ok": True, "name": r["name"], "idempotent": r.get("idempotent", False)}
+    return {"ok": True, "results": results}
+
+
+def _build_invoice(
+    customer: str,
+    items: List[Dict],
+    payments: List[Dict],
+    receipt_id: str,
+    payload: Dict[str, Any],
+    is_return: bool,
+) -> Any:
+    """Construct (but do not insert/submit) a Sales Invoice frappe doc."""
     si = frappe.new_doc("Sales Invoice")
     si.update({
         "customer": customer,
         "is_pos": 1,
+        "is_return": 1 if is_return else 0,
         "posting_date": nowdate(),
-        "pos_receipt_id": receipt_id,  # Custom Data field (Unique)
-        "pos_voucher_code": payload.get("pos_voucher_code") or _voucher_code_concat(payload.get("voucher_redeem"))
+        "pos_receipt_id": receipt_id,
+        "pos_voucher_code": (
+            payload.get("pos_voucher_code")
+            or _voucher_code_concat(payload.get("voucher_redeem"))
+        ),
     })
-
     for it in items:
         si.append("items", {
             "item_code": it["item_code"],
             "qty": it["qty"],
             "rate": it["rate"],
         })
-
     for p in payments:
         si.append("payments", {
             "mode_of_payment": p["mode_of_payment"],
             "amount": p["amount"],
         })
-
-    si.insert(ignore_permissions=True)
-    si.submit()
-
-    return {"ok": True, "name": si.name}
+    return si
 
 
 @frappe.whitelist()

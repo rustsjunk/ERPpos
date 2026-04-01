@@ -2524,6 +2524,19 @@ function bindEvents(){
     input.addEventListener('input', ()=>{ computeReconciliation(true); });
     input.addEventListener('focus', ()=>{ try{ input.select(); }catch(_){ } });
   });
+  document.querySelectorAll('input[name="floatEntryMode"]').forEach(r=>{
+    r.addEventListener('change', ()=>{
+      const isDirect = document.getElementById('floatDirectMode')?.checked;
+      const directEntry = document.getElementById('floatDirectEntry');
+      const denomsGrid = document.getElementById('denomsGrid');
+      if(directEntry) directEntry.style.display = isDirect ? '' : 'none';
+      if(denomsGrid)  denomsGrid.style.display  = isDirect ? 'none' : '';
+      computeReconciliation(false);
+      if(isDirect) setTimeout(()=>{ document.getElementById('floatDirectTotal')?.focus(); }, 50);
+    });
+  });
+  const floatDirectTotal = document.getElementById('floatDirectTotal');
+  if(floatDirectTotal) floatDirectTotal.addEventListener('input', ()=>{ computeReconciliation(true); });
   if(closingCloseBtn){ closingCloseBtn.addEventListener('click', ()=>{ if(closingOverlay) closingOverlay.style.display='none'; }); }
   if(closingOverlay){ closingOverlay.addEventListener('click', e=>{ if(e.target===closingOverlay) closingOverlay.style.display='none'; }); }
   if(reconcileBtn){ reconcileBtn.addEventListener('click', ()=>{ computeReconciliation(true); }); }
@@ -5338,11 +5351,16 @@ function showClosingOverlay(){
 function computeReconciliation(reveal){
   const payouts = Number(document.getElementById('sumPayoutsInput')?.value||0) || 0;
   let counted = 0;
-  document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{
-    const qty = Number(el.value||0) || 0;
-    const denom = Number(el.getAttribute('data-denom')||0) || 0;
-    counted += qty * denom;
-  });
+  const directMode = document.getElementById('floatDirectMode')?.checked;
+  if (directMode) {
+    counted = Number(document.getElementById('floatDirectTotal')?.value || 0) || 0;
+  } else {
+    document.querySelectorAll('#denomsGrid .denom-qty').forEach(el=>{
+      const qty = Number(el.value||0) || 0;
+      const denom = Number(el.getAttribute('data-denom')||0) || 0;
+      counted += qty * denom;
+    });
+  }
   const opening = Number(settings.opening_float||0);
   const cashSales = Number(settings.net_cash||0);
   const cardSales = Number(settings.net_card||0);
@@ -7544,127 +7562,141 @@ function showLayawayCompletionScreen(lay, lastPayment, lastMethod, change) {
 
 
 async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
-  const balance = (lay.total || 0) - (lay.paid || 0);
-  const totalStr = `£${(lay.total || 0).toFixed(2)}`;
-  const paidStr  = `£${(lay.paid  || 0).toFixed(2)}`;
-  const balStr   = `£${balance.toFixed(2)}`;
-  const payStr   = paymentAmount > 0 ? `£${paymentAmount.toFixed(2)}` : '£0.00';
+  const balance  = Math.max(0, (lay.total || 0) - (lay.paid || 0));
+  const totalAmt = (lay.total || 0).toFixed(2);
+  const paidAmt  = (lay.paid  || 0).toFixed(2);
+  const balAmt   = balance.toFixed(2);
+  const payAmt   = paymentAmount > 0 ? paymentAmount.toFixed(2) : '0.00';
 
-  const SEP  = '----------------------------------------';
-  const SEP2 = '- - - - - - - - - - - - - - - - - - - -';
-  const ESC = '\x1B'; const BIG = ESC + '!' + '\x30'; const NORM = ESC + '!' + '\x00';
+  const W    = RECEIPT_LINE_WIDTH;
+  const SEP  = '-'.repeat(W);
+  const SEP2 = ('- ').repeat(W >> 1).trimEnd();
+  const ESC  = '\x1B';
+  const BIG  = ESC + '!' + '\x30';  // double height + width
+  const WIDE = ESC + '!' + '\x20';  // double width only
+  const NORM = ESC + '!' + '\x00';
 
-  const itemLines = (lay.items || []).map(it =>
-    `${it.item_name || it.item_code}  x${it.qty}  £${((it.original_rate || 0) * it.qty).toFixed(2)}`
-  );
+  // Right-align value against label, padded to receipt width
+  const rpad = (label, value) => {
+    const l = String(label || '');
+    const v = String(value || '');
+    return l + ' '.repeat(Math.max(1, W - l.length - v.length)) + v;
+  };
+
+  const itemLines = (lay.items || []).map(it => {
+    const name = (it.item_name || it.item_code || '').substring(0, 26);
+    const amt  = `\xA3${((it.original_rate || it.rate || 0) * (it.qty || 1)).toFixed(2)}`;
+    return rpad(`  x${it.qty || 1}  ${name}`, amt);
+  });
+
+  const expiryStr   = formatLayawayDate(lay.expires_at);
+  const isCompleted = event === 'completed';
+  const dateStr     = formatLayawayDate(lay.created_at || new Date().toISOString());
+  const todayStr    = formatLayawayDate(new Date().toISOString());
 
   // ── Cancellation receipt ───────────────────────────────────────────────────
   if (event === 'cancelled') {
-    const payments = lay.payments || [];
-    const payHistLines = payments.map(p =>
-      `  ${formatLayawayDate(p.paid_at)}  ${(p.method||'').padEnd(8)} £${(p.amount || 0).toFixed(2)}`
+    const payHistLines = (lay.payments || []).map(p =>
+      rpad(`  ${formatLayawayDate(p.paid_at)}  ${(p.method||'').padEnd(6)}`, `\xA3${(p.amount || 0).toFixed(2)}`)
     );
-    const cancelLines = [
+    await triggerReceiptPrint({ lines: [
       SEP,
       `${BIG}LAYAWAY CANCELLED${NORM}`,
       SEP,
-      `Ref:      ${lay.layaway_id}`,
-      `Customer: ${lay.customer_tag || ''}`,
-      `Date:     ${formatLayawayDate(new Date().toISOString())}`,
+      rpad('Ref:', lay.layaway_id),
+      rpad('Customer:', lay.customer_tag || ''),
+      rpad('Date:', todayStr),
       SEP2,
       ...itemLines,
       SEP2,
-      ...(payHistLines.length > 0 ? ['Payments Made:', ...payHistLines, SEP2] : []),
-      `Total Was: ${totalStr}`,
-      `Paid:      ${paidStr}`,
-      ...(paymentAmount > 0.005 ? [`${BIG}REFUND DUE: £${paymentAmount.toFixed(2)}${NORM}`] : ['No refund due']),
+      ...(payHistLines.length ? ['Payments Made:', ...payHistLines, SEP2] : []),
+      rpad('Total Was:', `\xA3${totalAmt}`),
+      rpad('Total Paid:', `\xA3${paidAmt}`),
+      SEP2,
+      paymentAmount > 0.005
+        ? `${BIG}REFUND DUE: \xA3${payAmt}${NORM}`
+        : 'No refund due',
       SEP,
-    ];
-    await triggerReceiptPrint({ lines: cancelLines, title: `Cancelled ${lay.layaway_id}` });
+    ], title: `Cancelled ${lay.layaway_id}` });
     return;
   }
 
-  // ── Payment receipt lines (used for both deposits and final collection) ─────
-  const expiryStr     = formatLayawayDate(lay.expires_at);
-  const isCompleted   = event === 'completed';
-  const dateStr       = formatLayawayDate(lay.created_at || new Date().toISOString());
-  const todayStr      = formatLayawayDate(new Date().toISOString());
-
+  // ── Customer copy ──────────────────────────────────────────────────────────
   const customerLines = [
     SEP,
-    `${BIG}${isCompleted ? 'LAYAWAY — PAID IN FULL' : 'LAYAWAY RECEIPT'}${NORM}`,
+    `${BIG}${isCompleted ? 'LAYAWAY \u2014 PAID IN FULL' : 'LAYAWAY RECEIPT'}${NORM}`,
     SEP,
-    `Ref:  ${lay.layaway_id}`,
-    `Date: ${isCompleted ? todayStr : dateStr}`,
+    rpad('Ref:', lay.layaway_id),
+    rpad('Date:', isCompleted ? todayStr : dateStr),
     SEP2,
     ...itemLines,
     SEP2,
-    `Agreed Total:  ${totalStr}`,
-    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
-    `Total Paid:    ${paidStr}`,
-    isCompleted ? 'Balance Due:   £0.00' : `Balance Due:   ${balStr}`,
+    rpad('Agreed Total:', `\xA3${totalAmt}`),
+    paymentAmount > 0 ? rpad(`Paid Today (${paymentMethod}):`, `\xA3${payAmt}`) : null,
+    rpad('Total Paid:', `\xA3${paidAmt}`),
+    isCompleted
+      ? `${WIDE}Balance Due:         \xA30.00${NORM}`
+      : `${WIDE}${rpad('Balance Due:', `\xA3${balAmt}`)}${NORM}`,
     SEP2,
-    isCompleted ? `${BIG}THANK YOU — COLLECTED${NORM}` : `Expires: ${expiryStr}`,
-    isCompleted ? '' : `Barcode: ${lay.layaway_id}`,
+    isCompleted ? `${BIG}THANK YOU \u2014 COLLECTED${NORM}` : rpad('Expires:', expiryStr),
+    !isCompleted ? rpad('Barcode:', lay.layaway_id) : null,
     SEP,
-  ].filter(l => l !== '');
+  ].filter(l => l != null);
 
+  // ── Store copy ─────────────────────────────────────────────────────────────
   const storeCopyLines = [
     SEP,
-    `${BIG}${isCompleted ? 'STORE — COLLECTED' : 'LAYAWAY — STORE COPY'}${NORM}`,
+    `${BIG}${isCompleted ? 'STORE \u2014 COLLECTED' : 'LAYAWAY \u2014 STORE COPY'}${NORM}`,
     SEP,
-    `Ref:      ${lay.layaway_id}`,
-    `Customer: ${lay.customer_tag || ''}`,
-    `Date:     ${isCompleted ? todayStr : dateStr}`,
+    rpad('Ref:', lay.layaway_id),
+    rpad('Customer:', lay.customer_tag || ''),
+    rpad('Date:', isCompleted ? todayStr : dateStr),
     SEP2,
     ...itemLines,
     SEP2,
-    `Agreed Total:  ${totalStr}`,
-    paymentAmount > 0 ? `Paid Today:    ${payStr} (${paymentMethod})` : '',
-    `Total Paid:    ${paidStr}`,
-    isCompleted ? 'Balance Due:   £0.00' : `Balance Due:   ${balStr}`,
-    isCompleted ? '' : SEP2,
-    isCompleted ? '' : `Expires: ${expiryStr}`,
+    rpad('Agreed Total:', `\xA3${totalAmt}`),
+    paymentAmount > 0 ? rpad(`Paid Today (${paymentMethod}):`, `\xA3${payAmt}`) : null,
+    rpad('Total Paid:', `\xA3${paidAmt}`),
+    isCompleted
+      ? `${WIDE}Balance Due:         \xA30.00${NORM}`
+      : `${WIDE}${rpad('Balance Due:', `\xA3${balAmt}`)}${NORM}`,
+    !isCompleted ? rpad('Expires:', expiryStr) : null,
     SEP,
-  ].filter(l => l !== '');
+  ].filter(l => l != null);
 
-  // ── Collection: print store collection note + customer receipt + store copy ─
+  // ── Collection: store note + customer receipt + store copy ─────────────────
   if (isCompleted) {
-    const payments = lay.payments || [];
-    const payHistLines = payments.map(p =>
-      `  ${formatLayawayDate(p.paid_at)}  ${(p.method||'').padEnd(8)} £${(p.amount || 0).toFixed(2)}`
+    const payHistLines = (lay.payments || []).map(p =>
+      rpad(`  ${formatLayawayDate(p.paid_at)}  ${(p.method||'').padEnd(6)}`, `\xA3${(p.amount || 0).toFixed(2)}`)
     );
     const collectionLines = [
       SEP,
-      `${BIG}LAYAWAY — COLLECTED${NORM}`,
+      `${BIG}LAYAWAY \u2014 COLLECTED${NORM}`,
       SEP,
-      `Ref:      ${lay.layaway_id}`,
-      `Customer: ${lay.customer_tag || ''}`,
-      `Date:     ${todayStr}`,
+      rpad('Ref:', lay.layaway_id),
+      rpad('Customer:', lay.customer_tag || ''),
+      rpad('Date:', todayStr),
       SEP2,
       ...itemLines,
       SEP2,
       'Payment History:',
       ...payHistLines,
       SEP2,
-      `Total:    ${totalStr}`,
-      `PAID:     ${paidStr}`,
-      paymentAmount > 0 ? `Last pmt: ${payStr} (${paymentMethod})` : '',
+      rpad('Agreed Total:', `\xA3${totalAmt}`),
+      `${WIDE}${rpad('TOTAL PAID:', `\xA3${paidAmt}`)}${NORM}`,
+      paymentAmount > 0 ? rpad(`Last Payment (${paymentMethod}):`, `\xA3${payAmt}`) : null,
       SEP,
-      `${BIG}THANK YOU — COLLECTED${NORM}`,
+      `${BIG}THANK YOU \u2014 COLLECTED${NORM}`,
       SEP,
-    ].filter(l => l !== '');
-    // 1. Store collection note (internal record with full payment history)
+    ].filter(l => l != null);
     await triggerReceiptPrint({ lines: collectionLines, title: `Collected ${lay.layaway_id}` });
-    // 2. Customer receipt (give to customer as proof of purchase)
-    await triggerReceiptPrint({ lines: customerLines, title: `Receipt ${lay.layaway_id}` });
-    // 3. Store copy of the final receipt
-    await triggerReceiptPrint({ lines: storeCopyLines, title: `Store Copy ${lay.layaway_id}` });
+    await triggerReceiptPrint({ lines: customerLines,   title: `Receipt ${lay.layaway_id}` });
+    await triggerReceiptPrint({ lines: storeCopyLines,  title: `Store Copy ${lay.layaway_id}` });
     return;
   }
 
-  // ── Deposit / instalment: customer copy + store copy ────────────────────────
-  await triggerReceiptPrint({ lines: customerLines, title: `Layaway ${lay.layaway_id}` });
+  // ── Deposit / instalment ───────────────────────────────────────────────────
+  await triggerReceiptPrint({ lines: customerLines,  title: `Layaway ${lay.layaway_id}` });
   await triggerReceiptPrint({ lines: storeCopyLines, title: `Store Copy ${lay.layaway_id}` });
 }
 

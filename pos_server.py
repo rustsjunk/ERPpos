@@ -444,8 +444,8 @@ def _validate_pos_sale_payload(payload: Dict[str, Any]) -> Optional[str]:
             qty = float(item.get('qty') or 0)
         except (TypeError, ValueError):
             qty = 0
-        if qty <= 0:
-            return f'Item #{idx} must have positive qty'
+        if qty == 0:
+            return f'Item #{idx} must have non-zero qty'
         try:
             rate = float(item.get('rate') or 0)
         except (TypeError, ValueError):
@@ -3611,7 +3611,20 @@ def api_web_orders():
             # print that happened within the cache window is reflected immediately.
             return jsonify(orders=_apply_printed(copy.deepcopy(_web_orders_cache['orders']))), 200
         try:
-            r = requests.get(f'{ERPDASH_URL}/api/website/orders/rich', timeout=10)
+            # Pass a since cursor so erpdash doesn't fetch orders from years ago.
+            # Use the last successful fetch date minus 1 day as a safety overlap,
+            # defaulting to 90 days ago on first run.
+            import datetime as _dt
+            since_ts = _web_orders_cache.get('since_ts')
+            if since_ts:
+                since_date = (_dt.datetime.utcfromtimestamp(since_ts) - _dt.timedelta(days=1)).strftime('%Y-%m-%d')
+            else:
+                since_date = (_dt.datetime.utcnow() - _dt.timedelta(days=90)).strftime('%Y-%m-%d')
+            r = requests.get(
+                f'{ERPDASH_URL}/api/website/orders/rich',
+                params={'since': since_date},
+                timeout=10,
+            )
             if r.ok:
                 data = r.json()
                 orders = []
@@ -3630,6 +3643,7 @@ def api_web_orders():
                 _apply_printed(orders)
                 _web_orders_cache['orders'] = orders
                 _web_orders_cache['ts'] = now
+                _web_orders_cache['since_ts'] = now
                 return jsonify(orders=orders), 200
         except Exception:
             if _web_orders_cache['orders']:
