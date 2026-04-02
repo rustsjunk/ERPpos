@@ -99,6 +99,8 @@ let appliedPayments = [];
 let cashEntryDirty = false;
 let otherEntryDirty = false;
 let barcodeFeedbackTimer = null;
+// Search scan-speed detection
+let _searchInputStartTime = 0; // when first char was typed after input cleared
 let barcodeScanInProgress = false;
 
 // Currency conversion state
@@ -2893,6 +2895,9 @@ function bindEvents(){
     if(sb){
     sb.addEventListener('input', ()=>{
         const q = (sb.value || '').trim();
+        // Track when typing started (reset on empty, record on first char)
+        if(q && !_searchInputStartTime) _searchInputStartTime = Date.now();
+        else if(!q) _searchInputStartTime = 0;
         if(searchDebounceTimer){
           clearTimeout(searchDebounceTimer);
           searchDebounceTimer = null;
@@ -3663,6 +3668,7 @@ async function showSearchOverlay(q=''){
     } else {
       selectedBrand = '';
       i.value = '';
+      _searchInputStartTime = 0;
       await setSearchStage('brands');
     }
   setTimeout(()=>{ try{ i.focus(); i.select(); }catch(_){} }, 50);
@@ -3937,6 +3943,32 @@ function setSearchNavIndex(index, opts = {}){
   }
 }
 
+// Open size/variant matrix from a barcode scanned in the search overlay
+async function openProductFromBarcode(code) {
+  hideSearchOverlay();
+  // Try local item list first
+  const localItem = findItemByCode(code);
+  if(localItem){ openProduct(localItem); return; }
+  // Try server barcode lookup to get the template
+  try{
+    const r = await fetch(`/api/lookup-barcode?code=${encodeURIComponent(code)}`);
+    if(r.ok){
+      const d = await r.json();
+      if(d && d.status === 'success' && d.variant){
+        const v = d.variant;
+        const templateId = v.template_id || v.item_id || '';
+        const templateItem = (items||[]).find(it=>it.name===templateId||it.item_code===templateId)
+          || (searchItems||[]).find(it=>it.name===templateId||it.item_code===templateId);
+        if(templateItem){ openProduct(templateItem); return; }
+        await openProductByTemplateId(templateId, { name: templateId, item_name: v.name || code });
+        return;
+      }
+    }
+  }catch(_){}
+  // Fallback: standard barcode scan (adds to cart)
+  processBarcodeScan(code);
+}
+
 function handleSearchOverlayKeydown(e){
   const overlay = document.getElementById('searchOverlay');
   if(!overlay || overlay.style.display === 'none') return;
@@ -3948,21 +3980,25 @@ function handleSearchOverlayKeydown(e){
     const sb = document.getElementById('searchInputBig');
     const val = sb ? sb.value.trim() : '';
     if(!val) return;
-    // 8+ digit numeric value → always treat as barcode scan
-    if(/^\d{8,}$/.test(val)){
-      clearTimeout(searchDebounceTimer); searchDebounceTimer = null;
-      hideSearchOverlay();
-      processBarcodeScan(val);
+
+    // ── Timing-based scanner detection ──────────────────────────────
+    // A scanner fires all chars in a very short burst. Threshold: < 60ms per char.
+    const elapsed = _searchInputStartTime ? (Date.now() - _searchInputStartTime) : Infinity;
+    const msPerChar = val.length > 0 ? elapsed / val.length : Infinity;
+    const looksLikeScanner = val.length >= 6 && msPerChar < 60;
+
+    // Reset timing state ready for next input
+    _searchInputStartTime = 0;
+    clearTimeout(searchDebounceTimer); searchDebounceTimer = null;
+
+    if(looksLikeScanner){
+      // Scanner in search window → open size matrix, don't add to cart
+      if(sb) sb.value = '';
+      openProductFromBarcode(val);
       return;
     }
-    // Debounce still pending (scanner finishing) → barcode route
-    if(searchDebounceTimer){
-      clearTimeout(searchDebounceTimer); searchDebounceTimer = null;
-      hideSearchOverlay();
-      processBarcodeScan(val);
-      return;
-    }
-    // Manual typing: fetch immediately and stay on search
+
+    // ── Manual typing: stay in search, fetch immediately ────────────
     if(val.length >= SEARCH_MIN_CHARS){
       browseLoading = true;
       renderSearchItems();
