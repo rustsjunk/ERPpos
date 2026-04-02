@@ -1082,8 +1082,15 @@ const receiptBuilder = (() => {
 })();
 
 function decorateWithReceiptLayout(body, info = {}) {
-  const header = receiptBuilder.headerLinesFrom(info);
+  const ESC = '\x1B';
+  const rawHeader = receiptBuilder.headerLinesFrom(info);
   const footer = receiptBuilder.footerLinesFrom(info);
+  // Apply ESC/POS formatting: first line = double-width + centred (shop name), rest = centred
+  const header = rawHeader.map((line, i) => {
+    const centred = ESC + 'a' + '\x01' + line + ESC + 'a' + '\x00';
+    if(i === 0) return ESC + '!' + '\x20' + centred + ESC + '!' + '\x00';
+    return centred;
+  });
   return assembleLineSections(body, header, footer);
 }
 
@@ -3658,8 +3665,7 @@ async function showSearchOverlay(q=''){
       i.value = '';
       await setSearchStage('brands');
     }
-  setTimeout(()=>i.focus(),0);
-  setTimeout(()=>{ try{ o.focus(); }catch(_){ } }, 10);
+  setTimeout(()=>{ try{ i.focus(); i.select(); }catch(_){} }, 50);
 }
 function hideSearchOverlay(){ const o=document.getElementById('searchOverlay'); if(o) o.style.display='none'; }
 function itemMatchesSearch(item, needle){
@@ -3932,29 +3938,42 @@ function setSearchNavIndex(index, opts = {}){
 }
 
 function handleSearchOverlayKeydown(e){
-  if(SEARCH_VIEW_MODE !== 'variants') return;
   const overlay = document.getElementById('searchOverlay');
   if(!overlay || overlay.style.display === 'none') return;
   const key = e.key;
   if(key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'Enter') return;
-  // Prevent page from scrolling when search overlay is open
-  if(typeof e.preventDefault === 'function') e.preventDefault();
-  if(typeof e.stopPropagation === 'function') e.stopPropagation();
   if(key === 'Enter'){
+    e.preventDefault();
+    e.stopPropagation();
     const sb = document.getElementById('searchInputBig');
     const val = sb ? sb.value.trim() : '';
-    // If the debounce timer is still pending, the Enter arrived too fast for human typing —
-    // treat it as a barcode scanner completing a scan, route through the barcode handler.
-    if(searchDebounceTimer && val){
-      clearTimeout(searchDebounceTimer);
-      searchDebounceTimer = null;
+    if(!val) return;
+    // 8+ digit numeric value → always treat as barcode scan
+    if(/^\d{8,}$/.test(val)){
+      clearTimeout(searchDebounceTimer); searchDebounceTimer = null;
       hideSearchOverlay();
       processBarcodeScan(val);
       return;
     }
-    // Manual typing: Enter does nothing — user clicks the item they want.
+    // Debounce still pending (scanner finishing) → barcode route
+    if(searchDebounceTimer){
+      clearTimeout(searchDebounceTimer); searchDebounceTimer = null;
+      hideSearchOverlay();
+      processBarcodeScan(val);
+      return;
+    }
+    // Manual typing: fetch immediately and stay on search
+    if(val.length >= SEARCH_MIN_CHARS){
+      browseLoading = true;
+      renderSearchItems();
+      fetchBrowseItems({ brand: selectedBrand || null, q: val, force: true })
+        .then(list=>{ searchItems = list; browseLoading = false; renderSearchItems(); })
+        .catch(()=>{ browseLoading = false; renderSearchItems(); });
+    }
     return;
   }
+  // Arrow navigation (variants mode only)
+  if(SEARCH_VIEW_MODE !== 'variants') return;
   if(!searchNavRows.length) return;
   e.preventDefault();
   const delta = key === 'ArrowDown' ? 1 : -1;
@@ -5303,26 +5322,29 @@ async function printFloatReceipt(info) {
   try{
     if(!info) throw new Error('Missing float info');
     const ESC = '\x1B';
-    const big = ESC + '!' + '\x11';
-    const normal = ESC + '!' + '\x00';
+    const WIDE = ESC + '!' + '\x20';
+    const BOLD = ESC + '!' + '\x08';
+    const BIG  = ESC + '!' + '\x30';
+    const NORM = ESC + '!' + '\x00';
+    const SEP  = '='.repeat(RECEIPT_LINE_WIDTH);
+    const SEP2 = '-'.repeat(RECEIPT_LINE_WIDTH);
     const lines = [];
-    lines.push(`${big}${info.type} Float Receipt${normal}`);
-    lines.push(`Date: ${info.date || todayStr()}`);
-    if(settings.till_number){
-      lines.push(`Till: ${settings.till_number}`);
-    }
+    lines.push(SEP);
+    lines.push(`${BIG}${info.type} Float${NORM}`);
+    lines.push(SEP);
+    lines.push(`Date:    ${info.date || todayStr()}`);
+    if(settings.till_number) lines.push(`Till:    ${settings.till_number}`);
     if(currentCashier){
       const cashierName = String(currentCashier.name || currentCashier.code || '').trim();
-      if(cashierName){
-        lines.push(`Cashier: ${cashierName}`);
-      }
+      if(cashierName) lines.push(`Cashier: ${cashierName}`);
     }
-    lines.push('');
-    lines.push(`${big}Amount: ${money(info.amount)}${normal}`);
-    lines.push('');
-    lines.push(`Printed: ${new Date().toLocaleString()}`);
+    lines.push(SEP2);
+    lines.push(`${WIDE}Amount: ${money(info.amount)}${NORM}`);
+    lines.push(SEP2);
+    lines.push(`Printed: ${new Date().toLocaleTimeString()}`);
+    lines.push(SEP);
     const payload = decorateWithReceiptLayout(lines.join('\n'), info);
-    const ok = await sendTextToReceiptAgent(payload, { line_feeds: 5 });
+    const ok = await sendTextToReceiptAgent(payload, { line_feeds: 5, cut: true });
     if(!ok) throw new Error('Receipt agent not ready');
   }catch(e){
     err('float print failed', e);
@@ -5470,7 +5492,7 @@ async function printReconciliation(){
       `Card to check: ${money(cardSales)}`
     ];
     const decorated = decorateWithReceiptLayout(lines.join('\n'));
-    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5 });
+    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
     if(!ok) throw new Error('Receipt agent not ready');
     const closingOverlayEl = document.getElementById('closingOverlay'); if(closingOverlayEl) closingOverlayEl.style.display='none';
     return true;
@@ -6160,7 +6182,7 @@ async function printZRead(){
       ...(groupLines.length ? groupLines : ['  No data'])
     ];
     const decorated = decorateWithReceiptLayout(lines.join('\n'));
-    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5 });
+    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
     if(!ok) throw new Error('Receipt agent not ready');
 
     try{
@@ -6250,7 +6272,7 @@ async function printXRead(){
       ...(groupLines.length ? groupLines : ['  No data'])
     ];
     const decorated = decorateWithReceiptLayout(lines.join('\n'));
-    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5 });
+    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
     if(!ok) throw new Error('Receipt agent not ready');
   }catch(e){
     err('x-read print failed', e);

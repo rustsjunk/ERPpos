@@ -1108,21 +1108,27 @@ body.dark-mode .search-row.active { background: #1b2a3d; }
 .browse-card-meta { font-size: 0.8rem; color: #6c757d; }
 /* Compact brand chip grid */
 .brand-chip-grid {
-    display: flex;
-    flex-wrap: wrap;
+    grid-column: 1 / -1;          /* span all columns of the parent #searchGrid */
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
     gap: 8px;
     padding: 4px 0;
 }
 .brand-chip {
-    padding: 6px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 52px;
+    padding: 8px 6px;
     border: 1px solid #dee2e6;
-    border-radius: 999px;
+    border-radius: 8px;
     background: #fff;
     font-size: 0.82rem;
     font-weight: 600;
     color: #374151;
     cursor: pointer;
-    white-space: nowrap;
+    text-align: center;
+    word-break: break-word;
     transition: border-color 0.12s, background 0.12s, color 0.12s;
 }
 .brand-chip:hover { border-color: #6366f1; background: #eef2ff; color: #4f46e5; }
