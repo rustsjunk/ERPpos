@@ -7697,17 +7697,20 @@ function showLayawayCompletionScreen(lay, lastPayment, lastMethod, change) {
 }
 
 
-function code39BarcodeHex(value, height = 80, width = 2, hri = 2) {
-  // Build ESC/POS Code39 barcode hex commands (mirrors receipt_agent._escpos_barcode_code39_hex)
-  const bytes = Array.from(String(value).toUpperCase(), c => c.charCodeAt(0));
-  const dataHex = bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
+function code39BarcodeHex(value) {
+  // Mirrors pos_server._build_barcode_sequence_code39 — the sequence that works for normal receipts.
+  // Sanitise to Code39-safe chars (uppercase alphanumeric + - . $ / + % space)
+  const clean = String(value || '').toUpperCase().replace(/[^0-9A-Z \$%\*\+\-\.\/]/g, '').trim();
+  if (!clean) return [];
+  const valueHex = Array.from(clean, c => c.charCodeAt(0).toString(16).padStart(2, '0')).join(' ');
   return [
-    '1b 61 01',                                                 // ESC a 1 — centre
-    `1d 68 ${height.toString(16).padStart(2, '0')}`,           // GS h — barcode height
-    `1d 77 ${width.toString(16).padStart(2, '0')}`,            // GS w — barcode width
-    `1d 48 ${hri.toString(16).padStart(2, '0')}`,              // GS H — HRI below
-    `1d 6b 04 ${dataHex} 00`,                                  // GS k 4 <data> NUL — Code39
-    '1b 61 00',                                                 // ESC a 0 — left
+    '1b 40',                          // ESC @ — init (clears any leftover text formatting)
+    '1d 4c 18 00',                    // GS L — left margin 24 dots
+    '1d 68 50',                       // GS h — barcode height 80
+    '1d 77 02',                       // GS w — barcode width 2
+    '1d 48 02',                       // GS H — HRI below
+    `1d 6b 04 ${valueHex} 00`,        // GS k 4 <data> NUL — Code39
+    '0a',                             // LF — feed one line after barcode
   ];
 }
 
