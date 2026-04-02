@@ -4489,6 +4489,11 @@ function updateCashSection() {
   const cashEntryDueEl = document.getElementById('cashEntryDueDisplay');
   if (cashEntryDisplayEl) cashEntryDisplayEl.textContent = money(cashVal);
   if (cashEntryDueEl) cashEntryDueEl.textContent = money(remaining);
+  const otherAmtEl = document.getElementById('otherAmountInput');
+  const otherEntryDisplayEl = document.getElementById('otherEntryDisplay');
+  const otherEntryDueEl = document.getElementById('otherEntryDueDisplay');
+  if (otherEntryDisplayEl) otherEntryDisplayEl.textContent = money(Number((otherAmtEl && otherAmtEl.value) || 0));
+  if (otherEntryDueEl) otherEntryDueEl.textContent = money(remaining);
   if (cashBtn){
     const labelAmount = Math.abs(cashVal||0);
     cashBtn.textContent = isRefund ? `Refund ${money(labelAmount)}` : `${money(cashVal)} Cash`;

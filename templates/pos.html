@@ -192,25 +192,25 @@
                 <div class="col-12 col-lg-7">
                     <div id="checkoutCart" class="checkout-cart"></div>
                     <div class="mt-3">
-                        <div class="mb-2 fw-semibold">Tender Type</div>
-                        <div class="tender-grid mb-3">
-                            <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
-                            <button class="btn tender-btn" data-tender="card">Card</button>
-                            <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
-                            <button class="btn tender-btn" data-tender="other">Other</button>
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div class="fw-semibold">Applied Payments</div>
+                            <div id="paymentsTotal" class="fw-semibold text-end"></div>
                         </div>
-                        <div class="mb-3">
-                            <div class="d-flex justify-content-between align-items-center">
-                                <div class="fw-semibold">Applied Payments</div>
-                                <div id="paymentsTotal" class="fw-semibold text-end"></div>
-                            </div>
-                            <div id="appliedPaymentsList" class="applied-payments-list"></div>
-                        </div>
+                        <div id="appliedPaymentsList" class="applied-payments-list"></div>
                     </div>
                 </div>
                 <div class="col-12 col-lg-5">
                     <div class="tender-panel">
-                        <div id="cashSection" class="mb-3" style="display:none;">
+                        <div class="tender-type-bar">
+                            <div class="tender-grid">
+                                <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
+                                <button class="btn tender-btn" data-tender="card">Card</button>
+                                <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
+                                <button class="btn tender-btn" data-tender="other">Other</button>
+                            </div>
+                        </div>
+                        <div class="tender-body">
+                        <div id="cashSection" class="mb-2" style="display:none;">
                             <div class="cash-entry-display">
                                 <div class="cash-entry-entered" id="cashEntryDisplay">£0.00</div>
                                 <div class="cash-entry-meta">
@@ -218,7 +218,7 @@
                                     <span id="cashEntryDueDisplay" class="cash-entry-meta-val">£0.00</span>
                                 </div>
                             </div>
-                            <div id="cashKeypad" class="keypad-grid mt-2" style="display:block;">
+                            <div id="cashKeypad" class="keypad-grid compact mt-2" style="display:block;">
                                 <button class="key-btn" data-k="7">7</button>
                                 <button class="key-btn" data-k="8">8</button>
                                 <button class="key-btn" data-k="9">9</button>
@@ -238,7 +238,7 @@
                                 <div id="amountCashEntered"></div>
                                 <div id="amountChange"></div>
                             </div>
-                            <button id="applyCashBtn" class="btn btn-success btn-lg w-100 mt-3">Apply Cash</button>
+                            <button id="applyCashBtn" class="btn btn-success btn-lg w-100 mt-2">Apply Cash</button>
                             <div class="cash-controls mt-2 d-flex flex-wrap gap-2 align-items-center justify-content-end">
                                 <button id="toggleSubtractBtn" class="btn btn-outline-warning btn-sm">- Mode</button>
                                 <input type="number" step="0.01" id="cashInputField" class="form-control form-control-sm" placeholder="Enter cash amount" style="max-width: 160px;" />
@@ -246,9 +246,15 @@
                                 <button id="convertToEuroBtn" class="btn btn-outline-info btn-sm" title="Convert due amount to EUR and pay in Euros">&euro; Convert</button>
                                 <button id="clearCashBtn" class="btn btn-outline-danger btn-sm">Clear</button>
                             </div>
-
                         </div>
-                        <div id="otherSection" class="mb-3" style="display:none;">
+                        <div id="otherSection" class="mb-2" style="display:none;">
+                            <div class="cash-entry-display">
+                                <div class="cash-entry-entered" id="otherEntryDisplay">£0.00</div>
+                                <div class="cash-entry-meta">
+                                    <span id="otherLabel" class="cash-entry-meta-label">Card Amount</span>
+                                    <span id="otherEntryDueDisplay" class="cash-entry-meta-val">£0.00</span>
+                                </div>
+                            </div>
                             <div id="otherKeypad" class="keypad-grid compact mt-2" style="display:block;">
                                 <button class="key-btn" data-k="7">7</button>
                                 <button class="key-btn" data-k="8">8</button>
@@ -263,21 +269,15 @@
                                 <button class="key-btn" data-k="0">0</button>
                                 <button class="key-btn key-action" data-k="B">&#x232B;</button>
                             </div>
-                            <div class="cash-summary mt-2">
-                                <div class="d-flex justify-content-between">
-                                    <div>Due</div>
-                                    <div id="amountDueOther" class="fw-semibold"></div>
-                                </div>
-                            </div>
-                            <div class="input-group mt-2" style="max-width: 420px; margin-left:auto;">
-                                <span id="otherLabel" class="input-group-text">Amount</span>
-                                <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" />
-                                <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Fill remaining due">Remaining Amount</button>
-                                <button id="applyOtherBtn" class="btn btn-primary btn-sm" type="button">Apply</button>
+                            <div id="amountDueOther" class="d-none" aria-hidden="true"></div>
+                            <button id="applyOtherBtn" class="btn btn-success btn-lg w-100 mt-2" type="button">Apply Payment</button>
+                            <div class="mt-2 d-flex gap-2 align-items-center justify-content-end">
+                                <input type="number" step="0.01" id="otherAmountInput" class="form-control form-control-sm" placeholder="0.00" style="max-width: 120px;" />
+                                <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button">Fill Remaining</button>
                             </div>
                         </div>
                         <div class="d-grid gap-2 tender-actions">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
                                 <div class="fw-semibold text-muted">Remaining Due</div>
                                 <div id="tenderDue" class="fw-bold"></div>
                             </div>
@@ -289,6 +289,7 @@
                             <button id="putOnLayawayBtn" class="btn btn-outline-warning w-100" type="button" title="Put this sale on layaway / part-payment plan">Put on Layaway</button>
                             <button id="completeSaleBtn" class="btn btn-success btn-lg">Complete Sale</button>
                         </div>
+                        </div><!-- end tender-body -->
                     </div>
                 </div>
             </div>
