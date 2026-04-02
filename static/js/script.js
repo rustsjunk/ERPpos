@@ -7826,13 +7826,16 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
       SEP,
     ].filter(l => l != null);
     await triggerReceiptPrint({ lines: collectionLines, title: `Collected ${lay.layaway_id}` });
+    await waitFor(900);
     await triggerReceiptPrint({ lines: customerLines,   title: `Receipt ${lay.layaway_id}` });
+    await waitFor(900);
     await triggerReceiptPrint({ lines: storeCopyLines,  title: `Store Copy ${lay.layaway_id}` });
     return;
   }
 
   // ── Deposit / instalment ───────────────────────────────────────────────────
   await triggerReceiptPrint({ lines: customerLines,  title: `Layaway ${lay.layaway_id}` });
+  await waitFor(900);
   await triggerReceiptPrint({ lines: storeCopyLines, title: `Store Copy ${lay.layaway_id}` });
 }
 
@@ -7843,7 +7846,7 @@ async function triggerReceiptPrint(payload) {
   if (receiptAgentClient && receiptAgentClient.isReady()) {
     try {
       // Send text and cut in one request so the cut is guaranteed to follow the text
-      await sendTextToReceiptAgent(text, { line_feeds: 5, cut: true });
+      await sendTextToReceiptAgent(text, { line_feeds: 7, cut: true });
       console.log(`[layaway] Printed: ${label}`);
     } catch (e) {
       console.warn(`[layaway] Print failed (${label}):`, e.message);
