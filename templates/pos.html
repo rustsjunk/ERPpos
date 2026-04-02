@@ -189,26 +189,9 @@
                 <button id="checkoutCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
             </div>
             <div class="row g-3">
-                <div class="col-12 col-lg-7">
-                    <div id="checkoutCart" class="checkout-cart"></div>
-                    <div class="mt-3">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <div class="fw-semibold">Applied Payments</div>
-                            <div id="paymentsTotal" class="fw-semibold text-end"></div>
-                        </div>
-                        <div id="appliedPaymentsList" class="applied-payments-list"></div>
-                    </div>
-                </div>
+                <!-- LEFT: amount display + keypad + action buttons -->
                 <div class="col-12 col-lg-5">
                     <div class="tender-panel">
-                        <div class="tender-type-bar">
-                            <div class="tender-grid">
-                                <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
-                                <button class="btn tender-btn" data-tender="card">Card</button>
-                                <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
-                                <button class="btn tender-btn" data-tender="other">Other</button>
-                            </div>
-                        </div>
                         <div class="tender-body">
                         <div id="cashSection" class="mb-2" style="display:none;">
                             <div class="cash-entry-display">
@@ -276,6 +259,7 @@
                                 <button id="otherFullAmountBtn" class="btn btn-outline-secondary btn-sm" type="button">Fill Remaining</button>
                             </div>
                         </div>
+                        </div><!-- end tender-body -->
                         <div class="d-grid gap-2 tender-actions">
                             <div class="d-flex justify-content-between align-items-center mb-1">
                                 <div class="fw-semibold text-muted">Remaining Due</div>
@@ -289,7 +273,25 @@
                             <button id="putOnLayawayBtn" class="btn btn-outline-warning w-100" type="button" title="Put this sale on layaway / part-payment plan">Put on Layaway</button>
                             <button id="completeSaleBtn" class="btn btn-success btn-lg">Complete Sale</button>
                         </div>
-                        </div><!-- end tender-body -->
+                    </div>
+                </div>
+                <!-- RIGHT: cart items + applied payments + payment type selector -->
+                <div class="col-12 col-lg-7">
+                    <div id="checkoutCart" class="checkout-cart"></div>
+                    <div class="mt-3">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div class="fw-semibold">Applied Payments</div>
+                            <div id="paymentsTotal" class="fw-semibold text-end"></div>
+                        </div>
+                        <div id="appliedPaymentsList" class="applied-payments-list"></div>
+                    </div>
+                    <div class="tender-type-bar mt-3">
+                        <div class="tender-grid">
+                            <button id="tenderCashBtn" class="btn tender-btn" data-tender="cash">Cash</button>
+                            <button class="btn tender-btn" data-tender="card">Card</button>
+                            <button id="tenderVoucherBtn" class="btn tender-btn" data-tender="voucher">Voucher</button>
+                            <button class="btn tender-btn" data-tender="other">Other</button>
+                        </div>
                     </div>
                 </div>
             </div>

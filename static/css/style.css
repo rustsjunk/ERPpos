@@ -831,18 +831,21 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     min-height: 0;
     overflow: hidden;
 }
+
+/* RIGHT column: cart + applied payments + tender selector */
 .checkout-modal .col-lg-7 {
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
 }
-/* Cart items area is the only scrollable part */
+/* Cart items scroll, everything else is fixed height */
 #checkoutCart { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-/* Applied payments list: cap height so it doesn't crowd cart */
 .applied-payments-list { max-height: clamp(80px, 15vh, 180px); overflow-y: auto; }
-/* Tender type + applied payments: always visible, no scroll */
-.checkout-modal .col-lg-7 > .mt-3 { flex-shrink: 0; overflow: hidden; }
+.checkout-modal .col-lg-7 > .mt-3 { flex-shrink: 0; }
+.checkout-modal .col-lg-7 .tender-type-bar { flex-shrink: 0; }
+
+/* LEFT column: keypad + actions */
 .checkout-modal .col-lg-5 { display: flex; flex-direction: column; overflow: hidden; }
 .checkout-modal .tender-panel {
     flex: 1;
@@ -852,17 +855,13 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     overflow: hidden;
     font-size: clamp(0.9rem, 2vw, 1rem);
 }
-/* Tender type bar (Cash/Card/Voucher/Other) always stays visible */
-.checkout-modal .tender-type-bar {
-    flex-shrink: 0;
-}
-/* tender-body is the inner flex container — holds amount entry + actions */
+/* tender-body: scrollable keypad area */
 .checkout-modal .tender-body {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    overflow: hidden;
+    overflow-y: auto;
 }
 
 /* Responsive layout for 4:3 aspect ratio */
@@ -940,8 +939,7 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 #otherKeypad { order: 2; }
 #otherSection .input-group { order: 3; }
 /* Keep tender actions visible and always accessible */
-.tender-actions { 
-    margin-top: auto;
+.tender-actions {
     padding-top: clamp(8px, 1vh, 12px);
     flex-shrink: 0;
     border-top: 1px solid #eee;
