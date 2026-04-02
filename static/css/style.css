@@ -773,20 +773,11 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
     #cartCard .card-header h3 { font-size: 1rem; margin: 0; }
 }
 
-/* Very small 4:3 screens (800x600 and below) */
+/* Small 4:3 screens (800x600) — keep side-by-side, just tighten sizing */
 @media (max-width: 800px) and (max-aspect-ratio: 16 / 12) {
     .search-modal { padding: 10px; }
     .keypad-grid.compact { gap: 4px; }
     .keypad-grid.compact .key-btn { padding: 6px 0; font-size: 0.95rem; }
-    
-    /* Stack 2-column layouts to 1 column */
-    .checkout-modal .row { flex-direction: column; }
-    .checkout-modal .col-lg-7,
-    .checkout-modal .col-lg-5 { max-width: 100%; }
-    
-    /* Make all inputs full width */
-    #cashInputField { max-width: 100% !important; }
-    #otherAmountInput { max-width: 100% !important; }
     
     /* Hide unnecessary labels to save space */
     #barcodeInput { max-width: clamp(150px, 60vw, 240px) !important; }
@@ -833,7 +824,7 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 }
 
 /* RIGHT column: cart + applied payments + tender selector */
-.checkout-modal .col-lg-7 {
+.checkout-modal .col-md-7 {
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -841,19 +832,19 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 }
 /* Cart items scroll, everything else is fixed height */
 #checkoutCart { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.applied-payments-list { max-height: clamp(80px, 15vh, 180px); overflow-y: auto; }
-.checkout-modal .col-lg-7 > .mt-3 { flex-shrink: 0; }
-.checkout-modal .col-lg-7 .tender-type-bar { flex-shrink: 0; }
+.applied-payments-list { max-height: clamp(60px, 12vh, 150px); overflow-y: auto; }
+.checkout-modal .col-md-7 > .mt-3 { flex-shrink: 0; }
+.checkout-modal .col-md-7 .tender-type-bar { flex-shrink: 0; }
 
 /* LEFT column: keypad + actions */
-.checkout-modal .col-lg-5 { display: flex; flex-direction: column; overflow: hidden; }
+.checkout-modal .col-md-5 { display: flex; flex-direction: column; overflow: hidden; }
 .checkout-modal .tender-panel {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
-    font-size: clamp(0.9rem, 2vw, 1rem);
+    font-size: clamp(0.85rem, 1.8vw, 1rem);
 }
 /* tender-body: scrollable keypad area */
 .checkout-modal .tender-body {
@@ -864,23 +855,22 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     overflow-y: auto;
 }
 
-/* Responsive layout for 4:3 aspect ratio */
-@media (max-aspect-ratio: 13 / 10) {
-    .checkout-modal .col-lg-7,
-    .checkout-modal .col-lg-5 {
-        flex: 1;
-        max-width: 100%;
+/* Compact layout for 800x600 and 1024x768 — keep side-by-side */
+@media (max-height: 640px) {
+    .checkout-modal {
+        height: calc(100vh - 8px);
+        max-height: calc(100vh - 8px);
     }
-    
-    /* Stack vertically on extremely wide 4:3 or tall narrow screens */
-    @media (max-height: 500px) {
-        .checkout-modal .row {
-            flex-direction: column;
-        }
-        .checkout-modal .col-lg-7 {
-            margin-bottom: 12px;
-        }
-    }
+    .cash-entry-display { padding: 8px 12px 6px; }
+    .cash-entry-entered { font-size: clamp(1.4rem, 4vw, 2rem); }
+    .keypad-grid.compact .key-btn { padding: 5px 0; font-size: 0.9rem; }
+    .keypad-grid.compact { gap: 4px; }
+    .tender-actions { padding-top: 6px; }
+    .tender-actions .btn { padding: 6px 8px; font-size: 0.85rem; }
+    .tender-actions .btn-lg { padding: 7px 10px; font-size: 0.95rem; }
+    .checkout-item { padding: 4px 0; gap: 6px; }
+    .checkout-item .img { width: 36px; height: 36px; }
+    .applied-payments-list { max-height: clamp(50px, 10vh, 100px); }
 }
 .checkout-cart .checkout-item {
     display: grid;
