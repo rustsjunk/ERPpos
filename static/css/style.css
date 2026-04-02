@@ -821,6 +821,8 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     flex: 1 1 auto;
     min-height: 0;
     overflow: hidden;
+    flex-wrap: nowrap; /* columns must not wrap — height must be bounded by modal */
+    align-items: stretch;
 }
 
 /* RIGHT column: cart + applied payments + tender selector */
@@ -832,12 +834,12 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 }
 /* Cart items scroll, everything else is fixed height */
 #checkoutCart { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.applied-payments-list { max-height: clamp(60px, 12vh, 150px); overflow-y: auto; }
+.applied-payments-list { max-height: clamp(60px, 12vh, 130px); overflow-y: auto; }
 .checkout-modal .col-md-7 > .mt-3 { flex-shrink: 0; }
 .checkout-modal .col-md-7 .tender-type-bar { flex-shrink: 0; }
 
 /* LEFT column: keypad + actions */
-.checkout-modal .col-md-5 { display: flex; flex-direction: column; overflow: hidden; }
+.checkout-modal .col-md-5 { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .checkout-modal .tender-panel {
     flex: 1;
     display: flex;
@@ -846,9 +848,9 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
     overflow: hidden;
     font-size: clamp(0.85rem, 1.8vw, 1rem);
 }
-/* tender-body: scrollable keypad area */
+/* tender-body: scrollable keypad area — shrinks so tender-actions stays visible */
 .checkout-modal .tender-body {
-    flex: 1;
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -914,8 +916,8 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 .checkout-cart { max-height: none; overflow-y: visible; }
 .checkout-cart.limited { max-height: 40vh; overflow-y: auto; }
 /* Compact keypad for cash input */
-.keypad-grid.compact { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.keypad-grid.compact .key-btn { padding: 10px 0; font-size: 1.1rem; }
+.keypad-grid.compact { display: grid; grid-template-columns: repeat(3, 1fr); gap: clamp(4px, 0.8vh, 8px); }
+.keypad-grid.compact .key-btn { padding: clamp(5px, 1.2vh, 10px) 0; font-size: clamp(0.9rem, 2vh, 1.1rem); }
 /* Keypad vs denominations visibility control */
 #cashSection.show-keypad .denom-row { display: none !important; }
 #cashSection.show-keypad #cashKeypad { display: grid !important; }
@@ -930,20 +932,19 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 #otherSection .input-group { order: 3; }
 /* Keep tender actions visible and always accessible */
 .tender-actions {
-    padding-top: clamp(8px, 1vh, 12px);
+    padding-top: clamp(4px, 0.8vh, 10px);
     flex-shrink: 0;
     border-top: 1px solid #eee;
 }
+.tender-actions .d-grid { gap: clamp(4px, 0.8vh, 8px) !important; }
 
-/* Prevent buttons from getting cut off */
 .tender-actions .btn {
-    padding: clamp(8px, 1.5vh, 12px) clamp(12px, 2vw, 16px);
-    font-size: clamp(0.85rem, 1.8vw, 1rem);
+    padding: clamp(5px, 1vh, 9px) clamp(8px, 1.5vw, 14px);
+    font-size: clamp(0.8rem, 1.6vw, 0.95rem);
 }
-
 .tender-actions .btn-lg {
-    padding: clamp(10px, 1.8vh, 14px) clamp(16px, 3vw, 20px);
-    font-size: clamp(1rem, 2vw, 1.25rem);
+    padding: clamp(7px, 1.3vh, 12px) clamp(12px, 2vw, 18px);
+    font-size: clamp(0.95rem, 1.8vw, 1.15rem);
 }
 /* Prevent text overlapping modal edges */
 .search-modal .h5, .search-modal .fw-semibold, .search-modal .btn, .search-modal .form-control { 
@@ -1503,35 +1504,35 @@ body.dark-mode .lay-detail-summary { background: #252535; }
 .cash-entry-display {
     background: #1a1a2e;
     color: #fff;
-    border-radius: 10px;
-    padding: 14px 16px 10px;
+    border-radius: 8px;
+    padding: clamp(6px, 1.2vh, 10px) 12px;
     text-align: right;
     margin-bottom: 4px;
+    flex-shrink: 0;
 }
 .cash-entry-entered {
-    font-size: clamp(2rem, 5vw, 2.8rem);
+    font-size: clamp(1.4rem, 3.5vh, 2rem);
     font-weight: 700;
     letter-spacing: -0.02em;
-    line-height: 1.1;
-    min-height: 1.2em;
+    line-height: 1.15;
     word-break: break-all;
 }
 .cash-entry-meta {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 6px;
-    padding-top: 6px;
+    margin-top: 4px;
+    padding-top: 4px;
     border-top: 1px solid rgba(255,255,255,0.12);
 }
 .cash-entry-meta-label {
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     color: rgba(255,255,255,0.55);
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
 .cash-entry-meta-val {
-    font-size: 1rem;
+    font-size: 0.9rem;
     font-weight: 600;
     color: rgba(255,255,255,0.85);
 }

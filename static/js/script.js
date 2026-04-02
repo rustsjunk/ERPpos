@@ -2975,6 +2975,30 @@ function bindEvents(){
   if(co){
     if(cc) cc.addEventListener('click',hideCheckoutOverlay);
     co.addEventListener('click',e=>{ if(e.target===co) hideCheckoutOverlay(); });
+    // Physical keyboard entry when checkout is open
+    document.addEventListener('keydown', e=>{
+      if(!co || co.style.display==='none' || !co.style.display) return;
+      const tag = document.activeElement && document.activeElement.tagName;
+      if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT') return;
+      let k=null;
+      if(/^[0-9]$/.test(e.key)) k=e.key;
+      else if(e.key==='Backspace') k='B';
+      else if(e.key==='Delete') k='C';
+      else if(e.key==='Enter'){
+        if(currentTender==='cash') document.getElementById('applyCashBtn')?.click();
+        else if(currentTender==='card'||currentTender==='other') document.getElementById('applyOtherBtn')?.click();
+        return;
+      }
+      if(!k) return;
+      e.preventDefault();
+      if(currentTender==='cash'){
+        const t=document.getElementById('cashInputField');
+        const v=applyMoneyKey(t,k); cashInput=v; cashEntryDirty=true; updateCashSection();
+      } else if(currentTender==='card'||currentTender==='other'){
+        const t=document.getElementById('otherAmountInput');
+        applyMoneyKey(t,k); otherEntryDirty=true; updateCashSection();
+      }
+    });
     document.querySelectorAll('.tender-btn').forEach(b=>b.addEventListener('click',()=>selectTender(b.getAttribute('data-tender'))));
     co.querySelectorAll('.denom-btn').forEach(b=>b.addEventListener('click',()=>{ const a=Number(b.getAttribute('data-amount'))||0; addCashAmount(denomSubtract?-a:a); }));
     const sub=document.getElementById('toggleSubtractBtn');
