@@ -5351,9 +5351,15 @@ def _lay_ensure_tables(conn: sqlite3.Connection) -> None:
           expires_at    TEXT NOT NULL,
           created_by    TEXT,
           notes         TEXT,
-          sync_status   TEXT NOT NULL DEFAULT 'pending'
+          sync_status   TEXT NOT NULL DEFAULT 'pending',
+          pos_receipt_id TEXT
         )
     """)
+    # Migrate existing databases that predate pos_receipt_id column
+    try:
+        conn.execute("ALTER TABLE layaways ADD COLUMN pos_receipt_id TEXT")
+    except Exception:
+        pass  # column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS layaway_payments (
           payment_id    TEXT PRIMARY KEY,
@@ -5707,11 +5713,17 @@ def api_layaway_payment(ref: str):
 
         # If fully paid, also queue the completion (Sales Invoice)
         if auto_completed:
-            _lay_audit(conn, ref, 'completed', {'auto': True}, cashier_code)
+            pos_receipt_id = _generate_invoice_name(body.get('till_number'))
+            conn.execute(
+                "UPDATE layaways SET pos_receipt_id=? WHERE layaway_id=?",
+                (pos_receipt_id, ref)
+            )
+            _lay_audit(conn, ref, 'completed', {'auto': True, 'pos_receipt_id': pos_receipt_id}, cashier_code)
+            complete_payload = _json.dumps({'pos_receipt_id': pos_receipt_id}, separators=(',', ':'))
             conn.execute("""
                 INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
-                VALUES ('layaway_complete', ?, ?, '{}')
-            """, (ref, now))
+                VALUES ('layaway_complete', ?, ?, ?)
+            """, (ref, now, complete_payload))
 
         conn.commit()
         _schedule_layaway_sync()
@@ -5750,12 +5762,17 @@ def api_layaway_complete(ref: str):
             return jsonify({'status': 'error', 'message': f'Layaway is {row["status"]}'}), 400
 
         now = _utcnow_z()
-        conn.execute("UPDATE layaways SET status='completed', sync_status='pending' WHERE layaway_id=?", (ref,))
-        _lay_audit(conn, ref, 'completed', None, cashier_code)
+        pos_receipt_id = _generate_invoice_name(body.get('till_number'))
+        conn.execute(
+            "UPDATE layaways SET status='completed', sync_status='pending', pos_receipt_id=? WHERE layaway_id=?",
+            (pos_receipt_id, ref)
+        )
+        _lay_audit(conn, ref, 'completed', {'pos_receipt_id': pos_receipt_id}, cashier_code)
+        complete_payload = _json.dumps({'pos_receipt_id': pos_receipt_id}, separators=(',', ':'))
         conn.execute("""
             INSERT INTO outbox (kind, ref_id, created_utc, payload_json)
-            VALUES ('layaway_complete', ?, ?, '{}')
-        """, (ref, now))
+            VALUES ('layaway_complete', ?, ?, ?)
+        """, (ref, now, complete_payload))
         conn.commit()
         _schedule_layaway_sync()
         return jsonify({'status': 'success'})

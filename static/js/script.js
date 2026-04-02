@@ -7565,7 +7565,7 @@ function showLayawayPaymentConfirm(lay, tendered, actualPayment, method, change,
       const r = await fetch(`/api/layaways/${encodeURIComponent(lay.layaway_id)}/payment`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: tendered, method, cashier_code: cashierCode }),
+        body: JSON.stringify({ amount: tendered, method, cashier_code: cashierCode, till_number: settings.till_number || '' }),
       });
       const d = await r.json();
       if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
@@ -7697,6 +7697,20 @@ function showLayawayCompletionScreen(lay, lastPayment, lastMethod, change) {
 }
 
 
+function code39BarcodeHex(value, height = 80, width = 2, hri = 2) {
+  // Build ESC/POS Code39 barcode hex commands (mirrors receipt_agent._escpos_barcode_code39_hex)
+  const bytes = Array.from(String(value).toUpperCase(), c => c.charCodeAt(0));
+  const dataHex = bytes.map(b => b.toString(16).padStart(2, '0')).join(' ');
+  return [
+    '1b 61 01',                                                 // ESC a 1 — centre
+    `1d 68 ${height.toString(16).padStart(2, '0')}`,           // GS h — barcode height
+    `1d 77 ${width.toString(16).padStart(2, '0')}`,            // GS w — barcode width
+    `1d 48 ${hri.toString(16).padStart(2, '0')}`,              // GS H — HRI below
+    `1d 6b 04 ${dataHex} 00`,                                  // GS k 4 <data> NUL — Code39
+    '1b 61 00',                                                 // ESC a 0 — left
+  ];
+}
+
 async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
   const balance  = Math.max(0, (lay.total || 0) - (lay.paid || 0));
   const totalAmt = (lay.total || 0).toFixed(2);
@@ -7800,12 +7814,13 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
     SEP,
   ].filter(l => l != null);
 
-  // ── Collection: store note + customer receipt + store copy ─────────────────
+  // ── Collection: single customer receipt ────────────────────────────────────
   if (isCompleted) {
+    const posReceiptId = (lay.pos_receipt_id || '').trim();
     const payHistLines = (lay.payments || []).map(p =>
       rpad(`  ${formatLayawayDate(p.paid_at)}  ${(p.method||'').padEnd(6)}`, `\xA3${(p.amount || 0).toFixed(2)}`)
     );
-    const collectionLines = [
+    const completedLines = [
       SEP,
       `${BIG}LAYAWAY \u2014 COLLECTED${NORM}`,
       SEP,
@@ -7823,13 +7838,13 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
       paymentAmount > 0 ? rpad(`Last Payment (${paymentMethod}):`, `\xA3${payAmt}`) : null,
       SEP,
       `${BIG}THANK YOU \u2014 COLLECTED${NORM}`,
+      posReceiptId ? SEP2 : null,
+      posReceiptId ? rpad('Receipt ID:', posReceiptId) : null,
+      posReceiptId ? 'Scan barcode below to return items' : null,
       SEP,
     ].filter(l => l != null);
-    await triggerReceiptPrint({ lines: collectionLines, title: `Collected ${lay.layaway_id}` });
-    await waitFor(900);
-    await triggerReceiptPrint({ lines: customerLines,   title: `Receipt ${lay.layaway_id}` });
-    await waitFor(900);
-    await triggerReceiptPrint({ lines: storeCopyLines,  title: `Store Copy ${lay.layaway_id}` });
+    const hexCmds = posReceiptId ? code39BarcodeHex(posReceiptId) : [];
+    await triggerReceiptPrint({ lines: completedLines, hex: hexCmds, title: `Collected ${lay.layaway_id}` });
     return;
   }
 
@@ -7846,7 +7861,11 @@ async function triggerReceiptPrint(payload) {
   if (receiptAgentClient && receiptAgentClient.isReady()) {
     try {
       // Send text and cut in one request so the cut is guaranteed to follow the text
-      await sendTextToReceiptAgent(text, { line_feeds: 7, cut: true });
+      const opts = { line_feeds: 7, cut: true };
+      if (Array.isArray(payload.hex) && payload.hex.length) {
+        opts.hex = payload.hex;
+      }
+      await sendTextToReceiptAgent(text, opts);
       console.log(`[layaway] Printed: ${label}`);
     } catch (e) {
       console.warn(`[layaway] Print failed (${label}):`, e.message);

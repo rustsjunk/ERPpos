@@ -2477,8 +2477,11 @@ def erp_layaway_deposit(layaway_id: str, amount: float, method: str, reference_n
     return _lay_request(f"/api/layaway/{layaway_id}/deposit", body)
 
 
-def erp_layaway_complete(layaway_id: str) -> Dict[str, Any]:
-    return _lay_request(f"/api/layaway/{layaway_id}/complete", {})
+def erp_layaway_complete(layaway_id: str, payload: Dict[str, Any] = None) -> Dict[str, Any]:
+    body: Dict[str, Any] = {}
+    if payload and payload.get('pos_receipt_id'):
+        body['pos_receipt_id'] = payload['pos_receipt_id']
+    return _lay_request(f"/api/layaway/{layaway_id}/complete", body)
 
 
 def erp_layaway_cancel(layaway_id: str) -> Dict[str, Any]:
@@ -2694,7 +2697,7 @@ def _do_push_layaway_outbox(conn: sqlite3.Connection, limit: int) -> None:
                               "to allow ERPNext to update advance_paid ...", flush=True)
                         time.sleep(_complete_delay)
                 elif kind == "layaway_complete":
-                    erp_layaway_complete(ref)
+                    erp_layaway_complete(ref, payload)
                     conn.execute("UPDATE layaways SET sync_status='synced' WHERE layaway_id=?", (ref,))
                 elif kind == "layaway_cancel":
                     erp_layaway_cancel(ref)
