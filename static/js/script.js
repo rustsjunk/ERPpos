@@ -7201,30 +7201,40 @@ function renderLayawayDetailHTML(lay) {
 
   // Items table
   html += `<table class="table table-sm lay-items-table mt-3"><thead><tr><th>Item</th><th>Qty</th><th class="text-end">Price</th><th class="text-end">Collect?</th></tr></thead><tbody>`;
-  // Track remaining credit sequentially: each item shown as Collect consumes from the pool,
-  // preventing multiple items falsely appearing collectible when only one can be afforded.
-  let availableCredit = lay.paid || 0;
   items.forEach(it => {
-    const isCollected = !!it.collected;
-    const itemTotal   = (it.original_rate || 0) * (it.qty || 1);
-    const canCollect  = !isCollected && availableCredit >= itemTotal - 0.005;
-    if (canCollect) availableCredit -= itemTotal;
+    const isCollected  = !!it.collected;
+    const qty          = it.qty || 1;
+    const perUnit      = it.original_rate || 0;
+    const itemTotal    = perUnit * qty;
+    const paid         = lay.paid || 0;
+    // canCollectAll: enough paid for the whole row
+    const canCollectAll  = !isCollected && paid >= itemTotal - 0.005;
+    // canCollectOne: multi-unit row, enough paid for at least 1 unit but not all
+    const canCollectOne  = !isCollected && qty > 1 && paid >= perUnit - 0.005 && !canCollectAll;
     let collectCell;
     if (isCollected) {
       collectCell = '<span class="badge bg-secondary">Collected</span>';
-    } else if (canCollect) {
+    } else if (canCollectAll) {
       const safeName = (it.item_name || it.item_code || '').replace(/"/g, '&quot;');
       collectCell = `<button class="btn btn-success btn-sm lay-collect-btn"
         data-item-code="${it.item_code}"
         data-item-name="${safeName}"
-        data-item-total="${itemTotal.toFixed(2)}">Collect</button>`;
+        data-item-total="${itemTotal.toFixed(2)}"
+        data-collect-qty="${qty}">Collect</button>`;
+    } else if (canCollectOne) {
+      const safeName = (it.item_name || it.item_code || '').replace(/"/g, '&quot;');
+      collectCell = `<button class="btn btn-warning btn-sm lay-collect-btn"
+        data-item-code="${it.item_code}"
+        data-item-name="${safeName}"
+        data-item-total="${perUnit.toFixed(2)}"
+        data-collect-qty="1">Collect 1 of ${qty}</button>`;
     } else {
       collectCell = '<span class="badge bg-secondary">No</span>';
     }
     const rowClass = isCollected ? ' class="text-muted"' : '';
     html += `<tr${rowClass}>
       <td>${it.item_name || it.item_code}</td>
-      <td>${it.qty}</td>
+      <td>${qty}</td>
       <td class="text-end">£${itemTotal.toFixed(2)}</td>
       <td class="text-end">${collectCell}</td>
     </tr>`;
@@ -7292,6 +7302,7 @@ function bindLayawayDetailActions(lay) {
         btn.dataset.itemCode,
         btn.dataset.itemName,
         parseFloat(btn.dataset.itemTotal),
+        parseInt(btn.dataset.collectQty, 10) || 1,
         cashierCode,
       );
     });
@@ -7476,7 +7487,7 @@ function showLayawayCancelConfirm(lay, cashierCode) {
   });
 }
 
-function showLayawayCollectConfirm(lay, itemCode, itemName, itemTotal, cashierCode) {
+function showLayawayCollectConfirm(lay, itemCode, itemName, itemTotal, collectQty, cashierCode) {
   const body     = document.getElementById('layawayDetailBody');
   const title    = document.getElementById('layawayDetailTitle');
   const subtitle = document.getElementById('layawayDetailSubtitle');
@@ -7492,9 +7503,9 @@ function showLayawayCollectConfirm(lay, itemCode, itemName, itemTotal, cashierCo
   body.innerHTML = `
     <div class="alert alert-success">
       <strong>Collect Item</strong><br>
-      ${itemName} — £${itemTotal.toFixed(2)}
+      ${collectQty > 1 ? `${collectQty}× ` : ''}${itemName} — £${itemTotal.toFixed(2)}
     </div>
-    <p>The customer is taking this item home now.<br>
+    <p>The customer is taking ${collectQty > 1 ? `${collectQty} units of this item` : 'this item'} home now.<br>
     Remaining layaway balance after collection: <strong>£${newBalance.toFixed(2)}</strong></p>
     <div class="d-flex gap-2 mt-3">
       <button class="btn btn-secondary" id="layCollectBackBtn">Back</button>
@@ -7513,7 +7524,7 @@ function showLayawayCollectConfirm(lay, itemCode, itemName, itemTotal, cashierCo
       const resp = await fetch(`/api/layaways/${encodeURIComponent(lay.layaway_id)}/collect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ item_code: itemCode, cashier_code: cashierCode }),
+        body: JSON.stringify({ item_code: itemCode, collect_qty: collectQty, cashier_code: cashierCode }),
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Collection failed');

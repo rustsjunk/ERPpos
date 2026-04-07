@@ -5882,17 +5882,37 @@ def api_layaway_collect_item(ref: str):
         if not collect_item:
             return jsonify({'error': 'Item not in layaway or already collected'}), 404
 
-        item_total = float(collect_item.get('original_rate', 0)) * float(collect_item.get('qty', 1))
+        row_qty = int(collect_item.get('qty', 1))
+        per_unit = float(collect_item.get('original_rate', 0))
+
+        # collect_qty defaults to full row qty; clamp to valid range
+        collect_qty_raw = body.get('collect_qty')
+        collect_qty = int(collect_qty_raw) if collect_qty_raw is not None else row_qty
+        collect_qty = max(1, min(collect_qty, row_qty))
+
+        item_total = per_unit * collect_qty
 
         if float(row['paid'] or 0) < item_total - 0.005:
             return jsonify({'error': 'Insufficient payment to collect this item'}), 400
 
-        # Mark as collected
         now_utc = _utcnow_z()
-        collect_item['collected'] = True
-        collect_item['collected_at'] = now_utc
 
-        # Adjust paid: deduct item cost; remainder is credit towards remaining items
+        if collect_qty < row_qty:
+            # Partial collection: reduce existing row qty, append a collected row
+            collect_item['qty'] = row_qty - collect_qty
+            collected_row = dict(collect_item)
+            collected_row['qty'] = collect_qty
+            collected_row['collected'] = True
+            collected_row['collected_at'] = now_utc
+            items.append(collected_row)
+            audit_item = collected_row
+        else:
+            # Full row collection
+            collect_item['collected'] = True
+            collect_item['collected_at'] = now_utc
+            audit_item = collect_item
+
+        # Adjust paid: deduct collected cost; remainder is credit towards remaining items
         new_paid = max(0.0, float(row['paid'] or 0) - item_total)
         uncollected = [it for it in items if not it.get('collected')]
         new_total = sum(float(it.get('original_rate', 0)) * float(it.get('qty', 1)) for it in uncollected)
@@ -5904,7 +5924,8 @@ def api_layaway_collect_item(ref: str):
 
         _lay_audit(conn, ref, 'item_collected', {
             'item_code': item_code,
-            'item_name': collect_item.get('item_name', item_code),
+            'item_name': audit_item.get('item_name', item_code),
+            'collect_qty': collect_qty,
             'item_total': item_total,
             'new_paid': new_paid,
             'new_total': new_total,
@@ -5916,7 +5937,7 @@ def api_layaway_collect_item(ref: str):
             (
                 'layaway_collect', ref, now_utc,
                 _json.dumps({'layaway_ref': ref, 'item_code': item_code,
-                             'qty': collect_item.get('qty', 1)}),
+                             'qty': collect_qty}),
             ),
         )
         conn.commit()
@@ -6092,11 +6113,22 @@ def api_layaway_pull_from_erp():
                         and local_status not in ('completed', 'cancelled')
                     )
                     paid_update = abs(remote_paid - local_paid) > 0.005
+                    if paid_update and remote_paid < local_paid:
+                        # ERPNext shows less than local — could be a sync lag (outbox
+                        # PE not yet submitted). Only overwrite if no pending payment
+                        # outbox entries exist for this layaway.
+                        pending_pay = conn.execute(
+                            "SELECT 1 FROM outbox WHERE kind='layaway_payment' AND ref_id=?",
+                            (ref,),
+                        ).fetchone()
+                        if pending_pay:
+                            paid_update = False
                     if paid_update or status_update:
+                        new_paid_val = remote_paid if paid_update else local_paid
                         new_status = remote_status if status_update else local_status
                         conn.execute(
                             "UPDATE layaways SET paid = ?, status = ?, erp_so_name = COALESCE(NULLIF(erp_so_name,''), ?) WHERE layaway_id = ?",
-                            (remote_paid, new_status, lay.get('so_name') or '', ref),
+                            (new_paid_val, new_status, lay.get('so_name') or '', ref),
                         )
                         # Insert any payment records not yet locally present
                         for p in (lay.get('payments') or []):
