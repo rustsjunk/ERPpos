@@ -2742,7 +2742,7 @@ def _do_push_layaway_outbox(conn: sqlite3.Connection, limit: int) -> None:
 
             except Exception as exc:
                 err_str = str(exc)
-                is_503 = "503" in err_str
+                is_503 = "503" in err_str or "502" in err_str
                 if is_503 and attempt_n < 2:
                     print(f"[layaway-sync] 503 on {kind} {ref}, retry {attempt_n + 1}/3 in 2s ...", flush=True)
                     time.sleep(2)

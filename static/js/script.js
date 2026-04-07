@@ -7201,10 +7201,14 @@ function renderLayawayDetailHTML(lay) {
 
   // Items table
   html += `<table class="table table-sm lay-items-table mt-3"><thead><tr><th>Item</th><th>Qty</th><th class="text-end">Price</th><th class="text-end">Collect?</th></tr></thead><tbody>`;
+  // Track remaining credit sequentially: each item shown as Collect consumes from the pool,
+  // preventing multiple items falsely appearing collectible when only one can be afforded.
+  let availableCredit = lay.paid || 0;
   items.forEach(it => {
     const isCollected = !!it.collected;
     const itemTotal   = (it.original_rate || 0) * (it.qty || 1);
-    const canCollect  = !isCollected && (lay.paid || 0) >= itemTotal - 0.005;
+    const canCollect  = !isCollected && availableCredit >= itemTotal - 0.005;
+    if (canCollect) availableCredit -= itemTotal;
     let collectCell;
     if (isCollected) {
       collectCell = '<span class="badge bg-secondary">Collected</span>';
