@@ -1113,6 +1113,8 @@ def _layaway_reserved_qty(conn: sqlite3.Connection) -> Dict[str, float]:
     for row in rows:
         try:
             for it in _json.loads(row[0]):
+                if it.get('collected'):
+                    continue
                 code = (it.get('item_code') or it.get('item_id') or '').strip()
                 if code:
                     reserved[code] = reserved.get(code, 0.0) + float(it.get('qty') or 1)
@@ -5843,6 +5845,95 @@ def api_layaway_extend(ref: str):
         return jsonify({'status': 'success', 'expires_at': new_expires})
     except Exception as exc:
         return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route('/api/layaways/<ref>/collect', methods=['POST'])
+def api_layaway_collect_item(ref: str):
+    """Mark an item as collected by the customer.
+
+    Body: { item_code, cashier_code }
+    Updates paid/total, marks item collected in JSON, queues outbox for ERPDash SI creation.
+    """
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'error': 'DB unavailable'}), 503
+    try:
+        _lay_ensure_tables(conn)
+        body = request.get_json(force=True) or {}
+        item_code = (body.get('item_code') or '').strip()
+        cashier_code = (body.get('cashier_code') or '').strip()
+
+        if not item_code:
+            return jsonify({'error': 'item_code required'}), 400
+
+        row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        if not row:
+            return jsonify({'error': 'Not found'}), 404
+        if row['status'] != 'active':
+            return jsonify({'error': f'Layaway is {row["status"]}'}), 400
+
+        items = _json.loads(row['items'] or '[]')
+
+        # Find uncollected item
+        collect_item = next(
+            (it for it in items if it.get('item_code') == item_code and not it.get('collected')),
+            None,
+        )
+        if not collect_item:
+            return jsonify({'error': 'Item not in layaway or already collected'}), 404
+
+        item_total = float(collect_item.get('original_rate', 0)) * float(collect_item.get('qty', 1))
+
+        if float(row['paid'] or 0) < item_total - 0.005:
+            return jsonify({'error': 'Insufficient payment to collect this item'}), 400
+
+        # Mark as collected
+        now_utc = _utcnow_z()
+        collect_item['collected'] = True
+        collect_item['collected_at'] = now_utc
+
+        # Adjust paid: deduct item cost; remainder is credit towards remaining items
+        new_paid = max(0.0, float(row['paid'] or 0) - item_total)
+        uncollected = [it for it in items if not it.get('collected')]
+        new_total = sum(float(it.get('original_rate', 0)) * float(it.get('qty', 1)) for it in uncollected)
+
+        conn.execute(
+            "UPDATE layaways SET items=?, paid=?, total=? WHERE layaway_id=?",
+            (_json.dumps(items), new_paid, new_total, ref),
+        )
+
+        _lay_audit(conn, ref, 'item_collected', {
+            'item_code': item_code,
+            'item_name': collect_item.get('item_name', item_code),
+            'item_total': item_total,
+            'new_paid': new_paid,
+            'new_total': new_total,
+        }, cashier_code)
+
+        conn.execute(
+            "INSERT INTO outbox (kind, ref_id, created_utc, payload_json, attempts) "
+            "VALUES (?,?,?,?,0)",
+            (
+                'layaway_collect', ref, now_utc,
+                _json.dumps({'layaway_ref': ref, 'item_code': item_code,
+                             'qty': collect_item.get('qty', 1)}),
+            ),
+        )
+        conn.commit()
+        _schedule_layaway_sync()
+
+        # Return updated layaway
+        updated_row = conn.execute("SELECT * FROM layaways WHERE layaway_id=?", (ref,)).fetchone()
+        payments = conn.execute(
+            "SELECT * FROM layaway_payments WHERE layaway_id=? ORDER BY paid_at ASC", (ref,)
+        ).fetchall()
+        lay_dict = dict(updated_row)
+        lay_dict['items'] = _json.loads(lay_dict.get('items') or '[]')
+        lay_dict['payments'] = [dict(p) for p in payments]
+        return jsonify({'ok': True, 'layaway': lay_dict,
+                        'collected_item': collect_item, 'item_total': item_total})
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/api/layaways/<ref>/items', methods=['PUT'])

@@ -2495,6 +2495,12 @@ def erp_layaway_amend(layaway_id: str, items: List[Dict[str, Any]], grand_total:
     })
 
 
+def erp_layaway_collect(layaway_id: str, item_code: str, qty: float) -> Dict[str, Any]:
+    return _lay_request(f"/api/layaway/{layaway_id}/collect", {
+        "items": [{"item_code": item_code, "qty": qty}],
+    })
+
+
 def erp_layaway_snapshot() -> Dict[str, Any]:
     """Pull full layaway snapshot from ERPDash (GET /api/layaway/snapshot).
     Returns dict with 'layaways' list or raises RuntimeError."""
@@ -2561,6 +2567,14 @@ def _classify_layaway_error(kind: str, error_msg: str):
         if "not submitted" in msg or "not in submitted state" in msg:
             return True, "mark_cancelled"
 
+    if kind == "layaway_collect":
+        # SI already exists for this item — idempotent, drop
+        if "already_exists" in msg or "fully billed" in msg:
+            return True, "drop"
+        # Layaway SO gone — nothing to invoice
+        if "not found" in msg:
+            return True, "drop"
+
     return False, "retry"
 
 
@@ -2622,8 +2636,8 @@ def _do_push_layaway_outbox(conn: sqlite3.Connection, limit: int) -> None:
         pending.setdefault(r["ref_id"], []).append((r["id"], r["kind"]))
 
     # Ordering weight: lower = must come first
-    _order = {"layaway_create": 0, "layaway_payment": 1, "layaway_complete": 2,
-              "layaway_cancel": 2, "layaway_amend": 1}
+    _order = {"layaway_create": 0, "layaway_payment": 1, "layaway_collect": 1,
+              "layaway_complete": 2, "layaway_cancel": 2, "layaway_amend": 1}
 
     for r in rows:
         oid, kind, ref, payload_raw, attempts = r["id"], r["kind"], r["ref_id"], r["payload_json"], r["attempts"]
@@ -2705,6 +2719,12 @@ def _do_push_layaway_outbox(conn: sqlite3.Connection, limit: int) -> None:
                 elif kind == "layaway_amend":
                     erp_layaway_amend(ref, payload["items"], payload["total"])
                     conn.execute("UPDATE layaways SET sync_status='synced' WHERE layaway_id=?", (ref,))
+                elif kind == "layaway_collect":
+                    erp_layaway_collect(
+                        payload["layaway_ref"],
+                        payload["item_code"],
+                        float(payload["qty"]),
+                    )
                 else:
                     print(f"[layaway-sync] Unknown kind {kind!r} id={oid} — dropping", flush=True)
                     conn.execute("DELETE FROM outbox WHERE id=?", (oid,))

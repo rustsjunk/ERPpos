@@ -7200,14 +7200,29 @@ function renderLayawayDetailHTML(lay) {
   </div>`;
 
   // Items table
-  html += `<table class="table table-sm lay-items-table mt-3"><thead><tr><th>Item</th><th>Qty</th><th class="text-end">Price</th><th class="text-end">Can Collect?</th></tr></thead><tbody>`;
+  html += `<table class="table table-sm lay-items-table mt-3"><thead><tr><th>Item</th><th>Qty</th><th class="text-end">Price</th><th class="text-end">Collect?</th></tr></thead><tbody>`;
   items.forEach(it => {
-    const canCollect = (lay.paid || 0) >= it.original_rate * it.qty;
-    html += `<tr>
+    const isCollected = !!it.collected;
+    const itemTotal   = (it.original_rate || 0) * (it.qty || 1);
+    const canCollect  = !isCollected && (lay.paid || 0) >= itemTotal - 0.005;
+    let collectCell;
+    if (isCollected) {
+      collectCell = '<span class="badge bg-secondary">Collected</span>';
+    } else if (canCollect) {
+      const safeName = (it.item_name || it.item_code || '').replace(/"/g, '&quot;');
+      collectCell = `<button class="btn btn-success btn-sm lay-collect-btn"
+        data-item-code="${it.item_code}"
+        data-item-name="${safeName}"
+        data-item-total="${itemTotal.toFixed(2)}">Collect</button>`;
+    } else {
+      collectCell = '<span class="badge bg-secondary">No</span>';
+    }
+    const rowClass = isCollected ? ' class="text-muted"' : '';
+    html += `<tr${rowClass}>
       <td>${it.item_name || it.item_code}</td>
       <td>${it.qty}</td>
-      <td class="text-end">£${(it.original_rate * it.qty).toFixed(2)}</td>
-      <td class="text-end">${canCollect ? '<span class="badge bg-success">Yes</span>' : '<span class="badge bg-secondary">No</span>'}</td>
+      <td class="text-end">£${itemTotal.toFixed(2)}</td>
+      <td class="text-end">${collectCell}</td>
     </tr>`;
   });
   html += `</tbody></table>`;
@@ -7264,6 +7279,19 @@ function renderLayawayDetailHTML(lay) {
 function bindLayawayDetailActions(lay) {
   const ref = lay.layaway_id;
   const cashierCode = currentCashier ? currentCashier.code : '';
+
+  // Collect item buttons
+  document.querySelectorAll('.lay-collect-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      showLayawayCollectConfirm(
+        lay,
+        btn.dataset.itemCode,
+        btn.dataset.itemName,
+        parseFloat(btn.dataset.itemTotal),
+        cashierCode,
+      );
+    });
+  });
 
   // Take payment — with change handling
   const payInput = document.getElementById('layDetPayInput');
@@ -7441,6 +7469,78 @@ function showLayawayCancelConfirm(lay, cashierCode) {
       confirmBtn.disabled = false;
       confirmBtn.textContent = 'Confirm Cancel';
     }
+  });
+}
+
+function showLayawayCollectConfirm(lay, itemCode, itemName, itemTotal, cashierCode) {
+  const body     = document.getElementById('layawayDetailBody');
+  const title    = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (title)    title.textContent    = 'Collect Item';
+  if (subtitle) subtitle.textContent = `${lay.layaway_id} — ${lay.customer_tag || ''}`;
+
+  const uncollectedTotal = (lay.items || [])
+    .filter(it => !it.collected && it.item_code !== itemCode)
+    .reduce((s, it) => s + (it.original_rate || 0) * (it.qty || 1), 0);
+  const creditAfter = Math.max(0, (lay.paid || 0) - itemTotal);
+  const newBalance  = Math.max(0, uncollectedTotal - creditAfter);
+
+  body.innerHTML = `
+    <div class="alert alert-success">
+      <strong>Collect Item</strong><br>
+      ${itemName} — £${itemTotal.toFixed(2)}
+    </div>
+    <p>The customer is taking this item home now.<br>
+    Remaining layaway balance after collection: <strong>£${newBalance.toFixed(2)}</strong></p>
+    <div class="d-flex gap-2 mt-3">
+      <button class="btn btn-secondary" id="layCollectBackBtn">Back</button>
+      <button class="btn btn-success" id="layCollectConfirmBtn">Confirm Collection</button>
+    </div>
+    <div id="layCollectError" class="text-danger small mt-2" style="display:none;"></div>`;
+
+  document.getElementById('layCollectBackBtn').addEventListener('click', () => {
+    openLayawayDetail(lay.layaway_id);
+  });
+
+  document.getElementById('layCollectConfirmBtn').addEventListener('click', async () => {
+    const confirmBtn = document.getElementById('layCollectConfirmBtn');
+    confirmBtn.disabled = true;
+    try {
+      const resp = await fetch(`/api/layaways/${encodeURIComponent(lay.layaway_id)}/collect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ item_code: itemCode, cashier_code: cashierCode }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Collection failed');
+      printLayawayReceipts(data.layaway, itemTotal, null, 'collect', data.collected_item);
+      layawayRefreshBadge();
+      showLayawayCollectedScreen(data.layaway, data.collected_item, itemTotal);
+    } catch (err) {
+      const errEl = document.getElementById('layCollectError');
+      if (errEl) { errEl.textContent = err.message; errEl.style.display = 'block'; }
+      confirmBtn.disabled = false;
+    }
+  });
+}
+
+function showLayawayCollectedScreen(lay, collectedItem, itemTotal) {
+  const body     = document.getElementById('layawayDetailBody');
+  const title    = document.getElementById('layawayDetailTitle');
+  const subtitle = document.getElementById('layawayDetailSubtitle');
+  if (title)    title.textContent    = 'Item Collected';
+  if (subtitle) subtitle.textContent = `${lay.layaway_id} — ${lay.customer_tag || ''}`;
+
+  const newBalance = Math.max(0, (lay.total || 0) - (lay.paid || 0));
+  body.innerHTML = `
+    <div class="alert alert-success">Item collected successfully.</div>
+    <p><strong>${collectedItem.item_name || collectedItem.item_code}</strong> has been given to the customer.</p>
+    ${newBalance > 0.005
+      ? `<p>Remaining balance on layaway: <strong>£${newBalance.toFixed(2)}</strong></p>`
+      : `<p class="text-success fw-bold">All items now collected or paid for.</p>`}
+    <button class="btn btn-primary mt-2" id="layCollectDoneBtn">Done</button>`;
+  document.getElementById('layCollectDoneBtn').addEventListener('click', () => {
+    openLayawayDetail(lay.layaway_id);
   });
 }
 
@@ -7771,6 +7871,30 @@ async function printLayawayReceipts(lay, paymentAmount, paymentMethod, event) {
         : 'No refund due',
       SEP,
     ], title: `Cancelled ${lay.layaway_id}` });
+    return;
+  }
+
+  // ── Item collection receipt ────────────────────────────────────────────────
+  if (event === 'collect') {
+    const collectedItem = arguments[4] || {};
+    const itemName = (collectedItem.item_name || collectedItem.item_code || '').substring(0, 26);
+    const itemAmt  = `\xA3${((collectedItem.original_rate || 0) * (collectedItem.qty || 1)).toFixed(2)}`;
+    const itemLine = rpad(`  x${collectedItem.qty || 1}  ${itemName}`, itemAmt);
+    const newBal   = Math.max(0, (lay.total || 0) - (lay.paid || 0));
+    await triggerReceiptPrint({ lines: [
+      SEP,
+      `${BIG}ITEM COLLECTED${NORM}`,
+      SEP,
+      rpad('Ref:', lay.layaway_id),
+      rpad('Customer:', lay.customer_tag || ''),
+      rpad('Date:', todayStr),
+      SEP2,
+      itemLine,
+      SEP2,
+      rpad('Remaining Balance:', `\xA3${newBal.toFixed(2)}`),
+      ...(newBal < 0.005 ? [`${BIG}ALL ITEMS COLLECTED${NORM}`] : []),
+      SEP,
+    ], title: `Collect ${lay.layaway_id}` });
     return;
   }
 
