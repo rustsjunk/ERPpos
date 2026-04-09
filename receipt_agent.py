@@ -18,6 +18,7 @@ import re
 import urllib.request
 from contextlib import contextmanager
 from datetime import datetime
+import re as _re
 from typing import Iterable, Sequence
 
 from flask import Flask, jsonify, request
@@ -39,6 +40,21 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 app = Flask(__name__)
+
+
+def _normalise_date_dmy(value: str) -> str:
+    """Ensure a date string is in dd/mm/yyyy format.
+    Accepts dd/mm/yyyy (returned as-is) or yyyy-mm-dd (converted).
+    """
+    if not value:
+        return datetime.utcnow().strftime("%d/%m/%Y")
+    if _re.match(r"^\d{4}-\d{2}-\d{2}$", value.strip()):
+        try:
+            dt = datetime.strptime(value.strip(), "%Y-%m-%d")
+            return dt.strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+    return value.strip()
 
 
 def _code39_sanitize(value: str) -> str:
@@ -323,9 +339,7 @@ def print_voucher():
     amount = payload.get("amount")
     title = payload.get("title", "GIFT VOUCHER").strip() or "GIFT VOUCHER"
     currency = payload.get("currency", "GBP")
-    issue_date = payload.get("issue_date")
-    if not issue_date:
-        issue_date = datetime.utcnow().strftime("%Y-%m-%d")
+    issue_date = _normalise_date_dmy(payload.get("issue_date", ""))
     cashier = (payload.get("cashier") or "").strip()
     voucher_name = payload.get("voucher_name") or payload.get("voucher_label") or ""
     location = payload.get("till_number") or payload.get("till") or payload.get("location")

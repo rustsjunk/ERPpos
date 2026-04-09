@@ -847,7 +847,7 @@ const receiptBuilder = (() => {
     }
     lines.push('Please retain this slip for future reference.');
     lines.push('');
-    lines.push(`Printed: ${new Date().toLocaleString()}`);
+    lines.push(`Printed: ${fmtDateTime(new Date())}`);
     return lines.join('\n');
   }
 
@@ -950,7 +950,7 @@ const receiptBuilder = (() => {
     }
     const meta = [];
     const created = info.created ? new Date(info.created) : new Date();
-    meta.push(['Date', created.toLocaleString()]);
+    meta.push(['Date', fmtDateTime(created)]);
     meta.push(['Invoice', info.invoice || '']);
     if(info.branch || settings.branch_name){
       meta.push(['Branch', info.branch || settings.branch_name || '']);
@@ -1315,6 +1315,11 @@ function handleReceiptPrintRequest(info, wantsGift){
         alert('Receipt failed to print. Please retry with the local receipt agent.');
       }
     }
+    // Always reprint any voucher slips associated with this receipt
+    if(hasVoucherPrintData(target)){
+      await waitFor(120);
+      await reprintVouchersForInfo(target);
+    }
     resetGiftCheckbox();
   })().catch(e=> err('receipt print handler failed', e));
 }
@@ -1346,7 +1351,7 @@ function buildVoucherPrintPayload(issuedVoucher, saleInfo = {}){
     amount: Number.isFinite(parsedAmount) ? parsedAmount : amountRaw,
     currency,
     title,
-    issue_date: issueDate.toISOString().slice(0, 10),
+    issue_date: fmtDate(issueDate),
     cashier: saleInfo.cashier ? (saleInfo.cashier.name || saleInfo.cashier.code || '') : undefined,
     till_number: tillRef
   };
@@ -1499,6 +1504,18 @@ async function reprintVouchersForInfo(info){
 const CURRENCY = 'GBP';
 const fmt = new Intl.NumberFormat(undefined, { style: 'currency', currency: CURRENCY });
 const money = v => fmt.format(Number(v || 0));
+
+// Date formatting — always dd/mm/yyyy
+function fmtDate(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt.getTime())) return String(d || '');
+  return String(dt.getDate()).padStart(2,'0') + '/' + String(dt.getMonth()+1).padStart(2,'0') + '/' + dt.getFullYear();
+}
+function fmtDateTime(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt.getTime())) return String(d || '');
+  return fmtDate(dt) + ' ' + String(dt.getHours()).padStart(2,'0') + ':' + String(dt.getMinutes()).padStart(2,'0');
+}
 
 function normalizeVatRate(value){
   if(value === undefined || value === null || value === '') return null;
@@ -5406,7 +5423,7 @@ async function printFloatReceipt(info) {
     lines.push(SEP);
     lines.push(`${BIG}${info.type} Float${NORM}`);
     lines.push(SEP);
-    lines.push(`Date:    ${info.date || todayStr()}`);
+    lines.push(`Date:    ${fmtDate(info.date || new Date())}`);
     if(settings.till_number) lines.push(`Till:    ${settings.till_number}`);
     if(currentCashier){
       const cashierName = String(currentCashier.name || currentCashier.code || '').trim();
@@ -5546,7 +5563,7 @@ async function printReconciliation(){
     const variance = counted - expected;
     const lines = [
       'End of Day Reconciliation',
-      `Date: ${new Date().toLocaleString()}`,
+      `Date: ${fmtDateTime(new Date())}`,
       `Till: ${settings.till_number||''}`,
       '',
       'Session Summary',
@@ -6232,7 +6249,7 @@ async function printZRead(){
     const expectedCash = opening + cashSales + (pc.in||0) - (pc.out||0);
     const lines = [
       'Z-Read',
-      `Date: ${new Date().toLocaleString()}`,
+      `Date: ${fmtDateTime(new Date())}`,
       `Branch: ${branch}`,
       `Till: ${settings.till_number||''}`,
       '',
@@ -6325,7 +6342,7 @@ async function printXRead(){
     const expectedCash = opening + cashSales + (pc.in||0) - (pc.out||0);
     const lines = [
       'X-Read',
-      `Date: ${new Date().toLocaleString()}`,
+      `Date: ${fmtDateTime(new Date())}`,
       `Branch: ${branch}`,
       `Till: ${settings.till_number||''}`,
       '',
