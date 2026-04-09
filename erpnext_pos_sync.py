@@ -41,6 +41,7 @@ def pos_ingest(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     customer = norm["customer"] or "Walk-in Customer"
     items = norm["items"]
     payments = norm["payments"]
+    return_against_receipt_id = norm.get("return_against_receipt_id") or ""
 
     if not items:
         frappe.throw(_("No items to post"))
@@ -94,8 +95,14 @@ def pos_ingest(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
                 receipt_id=rtn_rid,
                 payload=payload,
                 is_return=True,
+                return_against_receipt_id=return_against_receipt_id,
             )
             si.insert(ignore_permissions=True)
+            # Generic returns have no return_against (no original receipt was scanned).
+            # ERPNext marks return_against mandatory on is_return docs, so we bypass
+            # that specific check here to allow goodwill/no-receipt returns through.
+            if not si.return_against:
+                si.flags.ignore_mandatory = True
             si.submit()
             results.append({"type": "return", "name": si.name})
 
@@ -113,10 +120,11 @@ def _build_invoice(
     receipt_id: str,
     payload: Dict[str, Any],
     is_return: bool,
+    return_against_receipt_id: str = "",
 ) -> Any:
     """Construct (but do not insert/submit) a Sales Invoice frappe doc."""
     si = frappe.new_doc("Sales Invoice")
-    si.update({
+    doc_fields: Dict[str, Any] = {
         "customer": customer,
         "is_pos": 1,
         "is_return": 1 if is_return else 0,
@@ -126,7 +134,16 @@ def _build_invoice(
             payload.get("pos_voucher_code")
             or _voucher_code_concat(payload.get("voucher_redeem"))
         ),
-    })
+    }
+    if is_return and return_against_receipt_id:
+        original_inv = frappe.db.get_value(
+            "Sales Invoice",
+            {"pos_receipt_id": return_against_receipt_id},
+            "name",
+        )
+        if original_inv:
+            doc_fields["return_against"] = original_inv
+    si.update(doc_fields)
     for it in items:
         si.append("items", {
             "item_code": it["item_code"],
@@ -219,6 +236,7 @@ def _normalize_payload(src: Dict[str, Any]) -> Dict[str, Any]:
         "customer": src.get("customer") or src.get("customer_id") or "Walk-in Customer",
         "items": items,
         "payments": payments,
+        "return_against_receipt_id": src.get("return_against_receipt_id") or "",
     }
 
 

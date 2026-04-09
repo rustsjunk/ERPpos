@@ -95,6 +95,7 @@ let pendingVoucherBalancePrints = [];
 const CLOSING_DENOM_VALUES = [50, 20, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
 let voucherOverlayMode = 'redeem'; // 'redeem' | 'issue_refund' | 'issue_sale'
 let voucherSaleMode = false;
+let returnAgainstReceiptId = null; // original receipt ID when processing a return
 let appliedPayments = [];
 let cashEntryDirty = false;
 let otherEntryDirty = false;
@@ -4773,7 +4774,8 @@ async function completeSaleFromOverlay() {
     // Currency information - include full FX metadata if EUR conversion was active
     currency_used: fxMetadata ? 'EUR' : 'GBP',
     currency_rate_used: fxMetadata ? Number(currencyRateUsed) : 1.0,
-    fx_metadata: fxMetadata
+    fx_metadata: fxMetadata,
+    return_against_receipt_id: (isRefund && returnAgainstReceiptId) ? returnAgainstReceiptId : undefined
   };
   if(pendingVoucherBalancePrints.length){
     payload.voucher_balance_prints = pendingVoucherBalancePrints.map(entry=>{
@@ -4903,6 +4905,7 @@ async function completeSaleFromOverlay() {
     issuedVouchers = [];
     pendingVoucherBalancePrints = [];
     voucherSaleMode = false;
+    returnAgainstReceiptId = null;
     hideCheckoutOverlay();
     if(typeof TrainingWheels !== 'undefined') TrainingWheels.onSaleDone();
     updateCashSection();
@@ -5888,9 +5891,11 @@ function renderReturnResult(sale){
 function loadReturnAsRefund(){
   const res=document.getElementById('returnResult');
   const overlay=document.getElementById('returnOverlay');
+  const load=document.getElementById('returnLoadBtn');
   if(!res) return;
   const checks = res.querySelectorAll('input.form-check-input[type="checkbox"]:checked');
   if(!checks.length){ alert('Select at least one item to return.'); return; }
+  returnAgainstReceiptId = (load && load.dataset.saleId) ? load.dataset.saleId : null;
   // Clear cart for a clean return transaction
   cart = [];
   checks.forEach(chk=>{
