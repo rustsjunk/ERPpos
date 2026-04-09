@@ -6113,12 +6113,12 @@ def api_layaway_pull_from_erp():
                         and local_status not in ('completed', 'cancelled')
                     )
                     paid_update = abs(remote_paid - local_paid) > 0.005
-                    if paid_update and remote_paid < local_paid:
-                        # ERPNext shows less than local — could be a sync lag (outbox
-                        # PE not yet submitted). Only overwrite if no pending payment
-                        # outbox entries exist for this layaway.
+                    if paid_update:
+                        # If there are pending outbox entries that affect paid (payments
+                        # or collects), local has already adjusted paid in ways ERPNext
+                        # hasn't processed yet. Don't overwrite until outbox clears.
                         pending_pay = conn.execute(
-                            "SELECT 1 FROM outbox WHERE kind='layaway_payment' AND ref_id=?",
+                            "SELECT 1 FROM outbox WHERE kind IN ('layaway_payment','layaway_collect') AND ref_id=?",
                             (ref,),
                         ).fetchone()
                         if pending_pay:

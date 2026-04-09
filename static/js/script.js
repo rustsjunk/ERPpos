@@ -4698,6 +4698,44 @@ async function completeSaleFromOverlay() {
         ? (saleEffectiveRate || (eurConversionData && eurConversionData.store_rate) || 1.0)
         : 1.0);
 
+  // Auto-issue vouchers for gift voucher products added directly to the cart
+  // (items with isVoucherProduct:true were already issued via the voucher overlay)
+  if (!isRefund) {
+    const unhandledGvItems = cart.filter(i =>
+      i.item_code === giftVoucherItemCode &&
+      !i.isVoucherProduct &&
+      !i.refund
+    );
+    for (const gvItem of unhandledGvItems) {
+      const qty = Math.max(1, Math.round(Math.abs(Number(gvItem.qty || 1))));
+      const rate = Number(gvItem.rate || 0);
+      if (rate <= 0) continue;
+      for (let q = 0; q < qty; q++) {
+        try {
+          const issueResp = await fetch('/api/vouchers/issue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              amount: rate,
+              customer: customer || undefined,
+              till_number: settings.till_number || undefined,
+              remarks: 'POS gift voucher sale'
+            })
+          });
+          const issueData = await issueResp.json();
+          if ((issueResp.status === 200 || issueResp.status === 201) && issueData.voucher) {
+            const finalCode = issueData.voucher.code || issueData.voucher.voucher_code;
+            if (finalCode) {
+              issuedVouchers.push({ code: finalCode, amount: rate });
+            }
+          }
+        } catch(e) {
+          warn('Auto gift voucher issue failed', e);
+        }
+      }
+    }
+  }
+
   const payload = {
     customer,
     items: cart.map(i => ({
@@ -5978,6 +6016,7 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   const doneBtn=document.getElementById('receiptDoneBtn');
   const closeBtn=document.getElementById('receiptCloseBtn');
   const reprintBtn=document.getElementById('receiptReprintBtn');
+  const reprintVoucherBtn=document.getElementById('reprintVoucherBtn');
   const returnBtn=document.getElementById('receiptReturnBtn');
   const giftEl = document.getElementById('giftReceiptCheckbox');
   if(giftEl){
@@ -6048,6 +6087,15 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
     handleReceiptPrintRequest(info, giftEl ? !!giftEl.checked : false);
   };
   if(reprintBtn) reprintBtn.onclick = triggerPrint;
+  if(reprintVoucherBtn){
+    if(hasVoucherPrintData(info)){
+      reprintVoucherBtn.style.display = '';
+      reprintVoucherBtn.onclick = ()=> reprintVouchersForInfo(info);
+    } else {
+      reprintVoucherBtn.style.display = 'none';
+      reprintVoucherBtn.onclick = null;
+    }
+  }
   if(returnBtn) returnBtn.onclick = ()=>{
     try{
       o.style.display='none';
