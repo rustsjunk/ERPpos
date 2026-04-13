@@ -3136,10 +3136,8 @@ function bindEvents(){
     if(addPlasticBagBtn){
       if(!plasticBagItemCode){ addPlasticBagBtn.style.display = 'none'; }
       else {
-        addPlasticBagBtn.addEventListener('click', ()=>{
-          const item = items.find(x => x.item_code === plasticBagItemCode || x.name === plasticBagItemCode);
-          if(!item){ alert('Plastic bag item not found in catalogue. Check POS_PLASTIC_BAG_ITEM setting.'); return; }
-          addSimpleItemToCart(item);
+        addPlasticBagBtn.addEventListener('click', async ()=>{
+          await addPlasticBagToCart();
           renderCheckoutCart();
           updateCashSection();
         });
@@ -3224,10 +3222,8 @@ function bindEvents(){
   if(mainBagBtn){
     if(!plasticBagItemCode){ mainBagBtn.style.display = 'none'; }
     else {
-      mainBagBtn.addEventListener('click', ()=>{
-        const item = items.find(x => x.item_code === plasticBagItemCode || x.name === plasticBagItemCode);
-        if(!item){ alert('Plastic bag item not found in catalogue. Check POS_PLASTIC_BAG_ITEM setting.'); return; }
-        addSimpleItemToCart(item);
+      mainBagBtn.addEventListener('click', async ()=>{
+        await addPlasticBagToCart();
       });
     }
   }
@@ -4114,6 +4110,30 @@ function handleSearchVariantClick(item){
   }
   addSimpleItemToCart(item);
 }
+async function addPlasticBagToCart(){
+  let item = items.find(x => x.item_code === plasticBagItemCode || x.name === plasticBagItemCode);
+  if(!item){
+    try {
+      const r = await fetch(`/api/lookup-barcode?code=${encodeURIComponent(plasticBagItemCode)}`);
+      const d = await r.json();
+      if(d.status === 'success' && d.variant){
+        const v = d.variant;
+        item = {
+          item_code: v.item_id || v.name,
+          name: v.name,
+          item_name: v.name,
+          standard_rate: v.rate,
+          vat_rate: v.vat_rate,
+          brand: v.brand,
+          item_group: v.item_group,
+        };
+      }
+    } catch(_){}
+  }
+  if(!item){ alert('Plastic bag item not found in catalogue. Check POS_PLASTIC_BAG_ITEM setting.'); return; }
+  addSimpleItemToCart(item);
+}
+
 function addSimpleItemToCart(item){
   if(!item) return;
   const code = item.item_code || item.name;
