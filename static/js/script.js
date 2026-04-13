@@ -1491,13 +1491,69 @@ function hasVoucherPrintData(info){
   return issued || balances;
 }
 
+async function _fetchLiveVoucherBalance(code){
+  try{
+    const resp = await fetch('/api/vouchers/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code })
+    });
+    if(!resp.ok) return null;
+    const data = await resp.json();
+    if(data.status === 'success' && data.voucher){
+      return Number(data.voucher.balance ?? data.voucher.allowed_amount ?? 0);
+    }
+    return null;
+  }catch(e){
+    warn('Live voucher balance fetch failed for', code, e);
+    return null;
+  }
+}
+
 async function reprintVouchersForInfo(info){
   if(!hasVoucherPrintData(info)){
     alert('No vouchers to print for this receipt.');
     return;
   }
-  const issuedOk = await printIssuedVouchersAfterSale(info, { force:true }).catch(err=>{ warn('Voucher reprint failed', err); return false; });
-  const balanceOk = await printVoucherBalanceSlipsAfterSale(info, { force:true }).catch(err=>{ warn('Voucher balance reprint failed', err); return false; });
+
+  // Work on a deep clone so the original receipt info is never mutated
+  const liveInfo = JSON.parse(JSON.stringify(info));
+  const today = fmtDate(new Date());
+
+  // Update balance slips with live balances from ERPNext
+  if(Array.isArray(liveInfo.voucher_balance_prints)){
+    for(const entry of liveInfo.voucher_balance_prints){
+      const code = entry.code || entry.voucher_code;
+      if(!code) continue;
+      const live = await _fetchLiveVoucherBalance(code);
+      if(live !== null){
+        entry.amount = live;
+      }
+      // Always mark as balance slip and update the date stamp on reprint
+      entry.is_balance_slip = true;
+      entry.issue_date = today;
+      entry.title = (settings && settings.voucher_balance_title) || 'VOUCHER BALANCE';
+    }
+  }
+
+  // Issued vouchers: fetch live balance and convert to a balance slip style
+  // so the cashier hands over a slip showing what's currently on the voucher
+  if(Array.isArray(liveInfo.issued_vouchers)){
+    for(const entry of liveInfo.issued_vouchers){
+      const code = entry.code || entry.voucher_code;
+      if(!code) continue;
+      const live = await _fetchLiveVoucherBalance(code);
+      if(live !== null){
+        entry.amount = live;
+        entry.is_balance_slip = true;
+        entry.issue_date = today;
+        entry.title = (settings && settings.voucher_balance_title) || 'VOUCHER BALANCE';
+      }
+    }
+  }
+
+  const issuedOk = await printIssuedVouchersAfterSale(liveInfo, { force:true }).catch(err=>{ warn('Voucher reprint failed', err); return false; });
+  const balanceOk = await printVoucherBalanceSlipsAfterSale(liveInfo, { force:true }).catch(err=>{ warn('Voucher balance reprint failed', err); return false; });
   if(!issuedOk && !balanceOk){
     alert('Unable to reprint voucher for this receipt.');
   }
