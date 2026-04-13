@@ -348,6 +348,7 @@ def print_voucher():
     footer_lines = _normalized_lines(payload.get("footer_lines")) or _normalized_lines(payload.get("footer"))
     fun_raw = payload.get("fun_line") or "Thanks for sharing the joy!"
     fun_line = str(fun_raw).strip()
+    is_balance_slip = bool(payload.get("is_balance_slip"))
 
     safe_code = _code39_sanitize(voucher_code)
     display_name = (voucher_name or safe_code).strip() or safe_code
@@ -383,9 +384,12 @@ def print_voucher():
     if cashier:
         lines.append(f"Cashier: {cashier}\n")
     if issue_date:
-        lines.append(f"Issued: {issue_date}\n")
+        date_label = "Updated:" if is_balance_slip else "Issued:"
+        lines.append(f"{date_label} {issue_date}\n")
     if amount_label:
         lines.append("\n")
+        if is_balance_slip:
+            lines.append(center("Remaining Balance"))
         lines.append(center(f"{value_big_on}{amount_label}{huge_off}"))
         lines.append(center(""))
     lines.append(center("Scan barcode to redeem"))

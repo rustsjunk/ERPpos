@@ -1470,11 +1470,13 @@ async function printVoucherBalanceSlipsAfterSale(info, opts = {}){
   };
   const context = buildVoucherPrintContext(overrides);
   let printed = false;
+  // Brief pause so the balance slip doesn't collide with the receipt if auto-print is on
+  await waitFor(400);
   for (const voucherInfo of balances){
     try{
       await printVoucherSlip(voucherInfo, context);
       printed = true;
-      await waitFor(60);
+      await waitFor(120);
     }catch(err){
       warn('Voucher balance slip failed after sale', err);
     }
@@ -5320,6 +5322,8 @@ async function submitVoucher(){
           voucher_name: info.voucher_name || info.name || undefined,
           currency: info.currency || undefined,
           title: (settings && settings.voucher_balance_title) || 'VOUCHER BALANCE',
+          issue_date: fmtDate(new Date()),
+          is_balance_slip: true,
           header_lines: balanceHeader,
           footer_lines: balanceFooter,
           fun_line: defaultVoucherFunLine()
