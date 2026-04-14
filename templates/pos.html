@@ -51,7 +51,7 @@
                 <button id="layawayStoreBtn" class="btn btn-outline-warning btn-sm layaway-store-btn" title="Layaway Store">
                     Layaway <span id="layawayBadge" class="layaway-badge" style="display:none"></span>
                 </button>
-                <button id="returnFromReceiptBtn" aria-label="Return from receipt" class="return-cta" title="Return from receipt">? Return by Receipt</button>
+                <button id="returnFromReceiptBtn" aria-label="Return from receipt" class="return-cta" title="Return from receipt">↩ Return by Receipt</button>
                 <button id="notifIcon" aria-label="Notifications" class="notif-icon" title="Notifications">&#128276;</button>
                 <button id="settingsBtn" aria-label="Settings" class="icon-btn" title="Settings">&#9881;</button>
             </div>
@@ -853,19 +853,19 @@
 
     <!-- Return From Receipt Overlay -->
     <div id="returnOverlay" class="search-overlay" style="display:none;">
-        <div class="search-modal" style="max-width: 620px;">
+        <div class="search-modal" style="max-width: 860px;">
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <div class="h5 m-0">Return From Receipt</div>
                 <button id="returnCloseBtn" class="btn btn-outline-secondary btn-sm">Close</button>
             </div>
-            <p class="text-muted">Scan or enter the receipt barcode/ID. We will locate the transaction and let you load it as a return.</p>
+            <p class="text-muted mb-2">Scan or enter the receipt barcode/ID to locate the transaction, then select the items being returned.</p>
             <div class="input-group mb-2">
                 <input type="text" id="returnScanInput" class="form-control" placeholder="Receipt ID (e.g. MOCK-20251104-31F2FC0D)">
                 <button id="returnFindBtn" class="btn btn-primary">Find</button>
             </div>
             <div id="returnError" class="text-danger small mb-2" style="display:none;"></div>
-            <div id="returnResult" class="border rounded p-2" style="min-height: 60px;">
-                <div class="text-muted">No receipt loaded yet.</div>
+            <div id="returnResult" class="mb-1">
+                <div class="text-muted small">No receipt loaded yet.</div>
             </div>
             <div class="d-flex justify-content-end mt-2">
                 <button id="returnLoadBtn" class="btn btn-danger" disabled>Load As Return</button>

@@ -798,6 +798,8 @@ body.dark-mode .form-control, body.dark-mode .form-select { background: #2a2a2a;
 body.dark-mode .form-control::placeholder,
 body.dark-mode .form-select::placeholder { color: #adb5bd; }
 body.dark-mode .cashier-badge { background: #2a2a2a; color: #e9ecef; }
+body.dark-mode #returnFromReceiptBtn.return-cta { background: #2a2a2a; border-color: #3a3a3a; color: #ced4da; }
+body.dark-mode #returnFromReceiptBtn.return-cta:hover { background: #333; border-color: #4a4a4a; }
 body.dark-mode .cashier-menu { background: #1e1e1e; border-color: #2a2a2a; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
 body.dark-mode .app-topbar,
 body.dark-mode .action-footer { background: #1a1a1a; border-color: #2a2a2a; color: #e9ecef; }
@@ -1267,33 +1269,30 @@ body.dark-mode .search-row.active { background: #1b2a3d; }
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-height: clamp(36px, 6vh, 44px);
-    padding: 0 clamp(12px, 3vw, 18px);
+    height: 36px;
+    padding: 0 clamp(10px, 2.5vw, 16px);
     border-radius: 999px;
-    border: 1px solid #ffda6a;
-    background: #fff7e6;
-    color: #8a6d3b;
-    font-weight: 600;
-    font-size: clamp(0.85rem, 2vw, 1rem);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    border: 1px solid #dee2e6;
+    background: #fff;
+    color: #495057;
+    font-weight: 500;
+    font-size: 0.85rem;
     white-space: nowrap;
     margin: 0;
+    transition: border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease;
+    cursor: pointer;
 }
 #returnFromReceiptBtn.return-cta:hover {
-    background: #fff1cc;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.10);
+    border-color: #adb5bd;
+    background: #f8f9fa;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
 }
 #returnFromReceiptBtn.return-cta:active {
     transform: translateY(1px);
+    background: #e9ecef;
 }
 
 @media (max-width: 576px) {
-  #returnFromReceiptBtn.return-cta {
-    min-height: clamp(32px, 5vh, 40px);
-    font-size: clamp(0.8rem, 1.5vw, 0.9rem);
-    padding: 0 clamp(10px, 2vw, 14px);
-  }
-
   /* Topbar: right section scrolls horizontally so all buttons remain accessible */
   .app-topbar .container-fluid > .d-flex:last-child {
     overflow-x: auto;
@@ -1619,4 +1618,82 @@ body.dark-mode .lay-detail-summary { background: #252535; }
 .disc-item-qty {
     font-size: 0.72rem;
 }
+
+/* ── Return from receipt item grid ───────────────────────────────────────── */
+.ret-items-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 8px;
+    padding: 4px;
+    max-height: 55vh;
+    overflow-y: auto;
+}
+.ret-item-card {
+    display: flex;
+    flex-direction: column;
+    border: 2px solid #dee2e6;
+    border-radius: 10px;
+    overflow: hidden;
+    cursor: pointer;
+    background: #fff;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    user-select: none;
+}
+.ret-item-card:hover {
+    border-color: #adb5bd;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+.ret-item-card.ret-selected {
+    border-color: #dc3545;
+    box-shadow: 0 0 0 3px rgba(220,53,69,0.2);
+    background: #fff5f5;
+}
+.ret-item-img {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    background: #f8f9fa;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    font-weight: 600;
+    color: #adb5bd;
+    overflow: hidden;
+}
+.ret-item-img img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+.ret-item-info {
+    padding: 6px 8px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+}
+.ret-item-name {
+    font-size: 0.82rem;
+    font-weight: 600;
+    line-height: 1.2;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+.ret-item-price {
+    font-size: 0.72rem;
+    color: #6c757d;
+    margin-top: auto;
+}
+.ret-item-total {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #dc3545;
+}
+body.dark-mode .ret-item-card { background: #1e1e1e; border-color: #2a2a2a; color: #e9ecef; }
+body.dark-mode .ret-item-card:hover { border-color: #3a3a3a; }
+body.dark-mode .ret-item-card.ret-selected { border-color: #ea868f; box-shadow: 0 0 0 3px rgba(220,53,69,0.25); background: #2a1a1a; }
+body.dark-mode .ret-item-img { background: #2a2a2a; color: #6c757d; }
+body.dark-mode .ret-item-price { color: #adb5bd; }
 

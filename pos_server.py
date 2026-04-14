@@ -4363,8 +4363,8 @@ def item_matrix():
                i.name,
                i.brand,
                i.vat_rate,
-               (SELECT price_effective FROM v_item_prices p WHERE p.item_id = i.item_id) AS standard_rate,
-               (SELECT image_url_effective FROM v_item_images img WHERE img.item_id=i.item_id) AS image_url
+               i.price AS standard_rate,
+               i.image_url
         FROM items i
         WHERE i.item_id=? AND i.is_template=1
         """,
@@ -4372,23 +4372,27 @@ def item_matrix():
     ).fetchone()
     if not tpl:
         return jsonify({'status': 'error', 'message': 'Template not found'}), 404
-    qv = f"""
-      SELECT v.item_id,
-             v.name,
-             v.vat_rate,
-             v.image_url,
-             v.custom_style_code,
-             (SELECT price_effective FROM v_item_prices p WHERE p.item_id=v.item_id) AS rate,
-             COALESCE((SELECT qty FROM stock s WHERE s.item_id=v.item_id AND s.warehouse='{POS_WAREHOUSE}'), 0) AS qty
-      FROM items v
-      WHERE v.parent_id=? AND v.active=1 AND v.is_template=0
-    """
     variants = {}
     colors=set(); widths=set(); sizes=set()
     style_codes: Dict[str, str] = {}
     price_min = None
     price_max = None
-    rows = conn.execute(qv, (template_id,)).fetchall()
+    rows = conn.execute(
+        """
+        SELECT v.item_id,
+               v.name,
+               v.vat_rate,
+               v.image_url,
+               v.custom_style_code,
+               COALESCE(v.price, p.price) AS rate,
+               COALESCE(s.qty, 0) AS qty
+        FROM items v
+        LEFT JOIN items p ON p.item_id = v.parent_id
+        LEFT JOIN stock s ON s.item_id = v.item_id AND s.warehouse = ?
+        WHERE v.parent_id = ? AND v.active = 1 AND v.is_template = 0
+        """,
+        (POS_WAREHOUSE, template_id)
+    ).fetchall()
     reserved = _layaway_reserved_qty(conn)
     attr_map = {}
     if rows:
@@ -4545,12 +4549,22 @@ def api_variant_info():
         return jsonify({'status': 'error', 'message': 'Database not available'}), 500
     placeholders = ",".join(["?"]*len(ids))
     out = {}
-    # Fetch base item names and brand
-    for r in conn.execute(f"SELECT item_id, name, brand FROM items WHERE item_id IN ({placeholders})", tuple(ids)):
+    # Fetch base item names, brand and image (with parent inheritance)
+    for r in conn.execute(
+        f"""
+        SELECT v.item_id, v.name, v.brand,
+               COALESCE(v.image_url, p.image_url) AS image_url
+        FROM items v
+        LEFT JOIN items p ON p.item_id = v.parent_id
+        WHERE v.item_id IN ({placeholders})
+        """,
+        tuple(ids)
+    ):
         out[r['item_id']] = {
             'item_id': r['item_id'],
             'name': r['name'],
             'brand': r['brand'],
+            'image_url': _absolute_image_url(r['image_url']) if r['image_url'] else None,
             'attributes': {}
         }
     # Attach attributes (normalized key names)

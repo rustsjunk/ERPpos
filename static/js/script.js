@@ -2934,7 +2934,7 @@ function bindEvents(){
   const chk=document.getElementById('checkoutBtn'); if(chk) chk.addEventListener('click',()=>{ if(!currentCashier) return showLogin(); if(cart.length===0) return alert('Cart is empty'); openCheckoutOverlay(); });
   // clear cart
   const clr=document.getElementById('clearCartBtn'); if(clr) clr.addEventListener('click',()=>{ if(cart.length===0) return; if(confirm('Clear all items from cart?')){ cart=[]; appliedPayments=[]; vouchers=[]; issuedVouchers=[]; pendingVoucherBalancePrints=[]; voucherSaleMode=false; updateCartDisplay(); renderAppliedPayments(); updateCashSection(); }});
-  const voucherSaleBtn=document.getElementById('voucherSaleBtn'); if(voucherSaleBtn){ voucherSaleBtn.addEventListener('click', startGiftVoucherSale); }
+  const voucherSaleBtn=document.getElementById('voucherSaleBtn'); if(voucherSaleBtn){ voucherSaleBtn.addEventListener('click', ()=>{ startGiftVoucherSale(); if(typeof TrainingWheels!=='undefined'&&TrainingWheels.getLevel()>0) TrainingWheels.setStep('voucher_sale_open'); }); }
   // cashier badge/menu
   const badge=document.getElementById('cashierBadge'), menu=document.getElementById('cashierMenu'), logout=document.getElementById('logoutBtn');
   if(!badge) warn('cashierBadge not found');
@@ -3347,10 +3347,17 @@ function bindEvents(){
   });
   // Layaway store button
   const layStoreBtn = document.getElementById('layawayStoreBtn');
-  if (layStoreBtn) layStoreBtn.addEventListener('click', () => openLayawayStore());
+  if (layStoreBtn) layStoreBtn.addEventListener('click', () => {
+    openLayawayStore();
+    if(typeof TrainingWheels!=='undefined'&&TrainingWheels.getLevel()>0&&TrainingWheels.getTxnType()==='layaway_payment')
+      TrainingWheels.setStep('layaway_pay_list');
+  });
   // Put on Layaway button in checkout
   const putLayawayBtn = document.getElementById('putOnLayawayBtn');
-  if (putLayawayBtn) putLayawayBtn.addEventListener('click', () => { hideCheckoutOverlay(); startLayawayFlow(); });
+  if (putLayawayBtn) putLayawayBtn.addEventListener('click', () => {
+    hideCheckoutOverlay(); startLayawayFlow();
+    if(typeof TrainingWheels!=='undefined'&&TrainingWheels.getLevel()>0) TrainingWheels.setStep('layaway_customer');
+  });
   // Layaway store close
   const layStoreClose = document.getElementById('layawayStoreCloseBtn');
   if (layStoreClose) layStoreClose.addEventListener('click', closeLayawayStore);
@@ -3367,14 +3374,27 @@ function bindEvents(){
   const layCancelNameBtn = document.getElementById('layawayCustomerCancelBtn');
   if (layCancelNameBtn) layCancelNameBtn.addEventListener('click', closeLayawayModals);
   const layNextBtn = document.getElementById('layawayCustomerNextBtn');
-  if (layNextBtn) layNextBtn.addEventListener('click', layawayCustomerNext);
+  if (layNextBtn) layNextBtn.addEventListener('click', () => {
+    layawayCustomerNext();
+    // Only advance training if validation passed (payment modal is now visible)
+    const payModal = document.getElementById('layawayPaymentModal');
+    if(typeof TrainingWheels!=='undefined'&&TrainingWheels.getLevel()>0
+       &&payModal&&(payModal.style.display==='flex'||payModal.style.display==='block'))
+      TrainingWheels.setStep('layaway_payment_q');
+  });
   const layCustInput = document.getElementById('layawayCustomerInput');
   if (layCustInput) layCustInput.addEventListener('keydown', e => { if (e.key === 'Enter') layawayCustomerNext(); });
   // Payment modal
   const layPayBackBtn = document.getElementById('layawayPaymentBackBtn');
   if (layPayBackBtn) layPayBackBtn.addEventListener('click', () => { layawayHidePaymentModal(); layawayShowCustomerModal(); });
   const layPayConfirmBtn = document.getElementById('layawayPaymentConfirmBtn');
-  if (layPayConfirmBtn) layPayConfirmBtn.addEventListener('click', layawayConfirmCreate);
+  if (layPayConfirmBtn) layPayConfirmBtn.addEventListener('click', () => {
+    layawayConfirmCreate();
+    if(typeof TrainingWheels!=='undefined'&&TrainingWheels.getLevel()>0){
+      const t=TrainingWheels.getTxnType();
+      TrainingWheels.setStep(t==='layaway_payment'?'layaway_pay_done':'layaway_done');
+    }
+  });
   // Method pills
   document.querySelectorAll('.lay-method-btn').forEach(b => {
     b.addEventListener('click', () => {
@@ -4102,6 +4122,8 @@ function selectProduct(name){
 let currentProduct=null;
 let variantSelectionQueue=[];
 let variantCellRefs=new Map();
+// Session cache for matrix API responses — avoids re-fetching the same template
+const matrixCache=new Map();
 function handleSearchVariantClick(item){
   const templateId = item.template_id || item.parent_id || '';
   if(templateId){
@@ -4187,8 +4209,12 @@ async function openProductByTemplateId(templateId, fallbackItem){
   clearVariantMatrix();
   if(!templateId) return;
   try{
-    const r=await fetch(`/api/item_matrix?item=${encodeURIComponent(templateId)}`);
-    const d=await r.json();
+    let d=matrixCache.get(templateId);
+    if(!d){
+      const r=await fetch(`/api/item_matrix?item=${encodeURIComponent(templateId)}`);
+      d=await r.json();
+      if(d.status==='success') matrixCache.set(templateId, d);
+    }
     if(d.status==='success'){
       const data = d.data || {};
       const tpl = d.template || {};
@@ -4900,6 +4926,7 @@ async function completeSaleFromOverlay() {
       saveSettings();
       } catch(_){}
       try { loadItems(); } catch(_){}
+      matrixCache.clear(); // stock has changed — invalidate matrix cache
       // Update Z-read aggregates for today
     try{
       const saleCtx = {
@@ -5948,61 +5975,114 @@ function renderReturnResult(sale){
   const res=document.getElementById('returnResult');
   if(!res) return;
   const lines = Array.isArray(sale.items)?sale.items:[];
-  // Build selectable list
-  const make = (tag, cls, html)=>{ const el=document.createElement(tag); if(cls) el.className=cls; if(html!=null) el.innerHTML=html; return el; };
-  const wrap = make('div','');
-  const head = make('div','mb-2 fw-semibold', `Receipt: ${sale.id || ''} &mdash; Items (${lines.length})`);
-  wrap.appendChild(head);
-  const list = make('div','list-group');
-  lines.forEach((ln, idx)=>{
-    const id = `ret_${idx}`;
-    const qty = Number(ln.qty||0);
-    const rate = Number(ln.rate||0);
-    const total = qty*rate;
-    const vatRate = ln.vat_rate != null ? ln.vat_rate : '';
-    const row = make('label','list-group-item d-flex justify-content-between align-items-center');
-    row.innerHTML = `<div class=\"form-check\">\n        <input class=\"form-check-input\" type=\"checkbox\" id=\"${id}\" data-code=\"${ln.item_code}\" data-name=\"${ln.item_name}\" data-qty=\"${qty}\" data-rate=\"${rate}\" data-vat=\"${vatRate ?? ''}\" checked>\n        <span class=\"ms-2\">${ln.item_name}</span>\n      </div>\n      <div class=\"text-end small text-muted\">\n        <div>${qty} × ${money(rate)}</div>\n        <div class=\"fw-semibold\">${money(total)}</div>\n      </div>`;
-    list.appendChild(row);
-  });
-  wrap.appendChild(list);
   res.innerHTML='';
-  res.appendChild(wrap);
+  if(!lines.length){
+    res.innerHTML='<div class="text-muted small">No items found on this receipt.</div>';
+    return;
+  }
+  // Header: receipt info + select/deselect all
+  const header=document.createElement('div');
+  header.className='d-flex justify-content-between align-items-center mb-2';
+  const title=document.createElement('div');
+  title.className='small text-muted';
+  title.textContent=`Receipt ${sale.id||''} · ${lines.length} item${lines.length!==1?'s':''}`;
+  const btnGrp=document.createElement('div');
+  btnGrp.className='btn-group btn-group-sm';
+  const selAll=document.createElement('button');
+  selAll.className='btn btn-outline-secondary'; selAll.textContent='Select All';
+  selAll.addEventListener('click',()=>res.querySelectorAll('.ret-item-card').forEach(c=>c.classList.add('ret-selected')));
+  const deselAll=document.createElement('button');
+  deselAll.className='btn btn-outline-secondary'; deselAll.textContent='Deselect All';
+  deselAll.addEventListener('click',()=>res.querySelectorAll('.ret-item-card').forEach(c=>c.classList.remove('ret-selected')));
+  btnGrp.appendChild(selAll); btnGrp.appendChild(deselAll);
+  header.appendChild(title); header.appendChild(btnGrp);
+  res.appendChild(header);
+  // Card grid
+  const grid=document.createElement('div');
+  grid.className='ret-items-grid';
+  lines.forEach(ln=>{
+    const qty=Number(ln.qty||0);
+    const rate=Number(ln.rate||0);
+    const total=qty*rate;
+    const vatRate=ln.vat_rate!=null?ln.vat_rate:'';
+    const image=ln.image||null;
+    const card=document.createElement('div');
+    card.className='ret-item-card ret-selected';
+    card.dataset.code=ln.item_code||'';
+    card.dataset.name=ln.item_name||ln.item_code||'';
+    card.dataset.qty=String(qty);
+    card.dataset.rate=String(rate);
+    card.dataset.vat=vatRate!==''?String(vatRate):'';
+    card.dataset.image=image||'';
+    // Image
+    const imgArea=document.createElement('div');
+    imgArea.className='ret-item-img';
+    if(image){
+      const img=document.createElement('img');
+      img.src=typeof thumbUrl==='function'?thumbUrl(image,120,120):image;
+      img.alt=ln.item_name||ln.item_code||'';
+      img.loading='lazy';
+      imgArea.appendChild(img);
+    } else {
+      imgArea.textContent=((ln.item_name||ln.item_code||'?')[0]||'?').toUpperCase();
+    }
+    // Info
+    const info=document.createElement('div');
+    info.className='ret-item-info';
+    const nameLine=document.createElement('div');
+    nameLine.className='ret-item-name';
+    nameLine.textContent=ln.item_name||ln.item_code||'';
+    info.appendChild(nameLine);
+    const priceLine=document.createElement('div');
+    priceLine.className='ret-item-price';
+    priceLine.textContent=`${qty} × ${money(rate)}`;
+    info.appendChild(priceLine);
+    const totalLine=document.createElement('div');
+    totalLine.className='ret-item-total';
+    totalLine.textContent=money(total);
+    info.appendChild(totalLine);
+    card.appendChild(imgArea);
+    card.appendChild(info);
+    card.addEventListener('click',()=>card.classList.toggle('ret-selected'));
+    grid.appendChild(card);
+  });
+  res.appendChild(grid);
 }
 function loadReturnAsRefund(){
   const res=document.getElementById('returnResult');
   const overlay=document.getElementById('returnOverlay');
   const load=document.getElementById('returnLoadBtn');
   if(!res) return;
-  const checks = res.querySelectorAll('input.form-check-input[type="checkbox"]:checked');
-  if(!checks.length){ alert('Select at least one item to return.'); return; }
-  returnAgainstReceiptId = (load && load.dataset.saleId) ? load.dataset.saleId : null;
+  const selected=res.querySelectorAll('.ret-item-card.ret-selected');
+  if(!selected.length){ alert('Select at least one item to return.'); return; }
+  returnAgainstReceiptId=(load&&load.dataset.saleId)?load.dataset.saleId:null;
   // Clear cart for a clean return transaction
-  cart = [];
-  checks.forEach(chk=>{
-    const code = chk.getAttribute('data-code');
-    const name = chk.getAttribute('data-name');
-    const qty = Number(chk.getAttribute('data-qty')||0);
-    const rate = Number(chk.getAttribute('data-rate')||0);
-    if(!code || qty<=0) return;
-    const vatAttr = chk.getAttribute('data-vat');
+  cart=[];
+  selected.forEach(card=>{
+    const code=card.dataset.code;
+    const name=card.dataset.name;
+    const qty=Number(card.dataset.qty||0);
+    const rate=Number(card.dataset.rate||0);
+    const vatAttr=card.dataset.vat;
+    const image=card.dataset.image||null;
+    if(!code||qty<=0) return;
     cart.push({
       item_code: code,
-      item_name: name || code,
-      qty: qty,
-      rate: rate,
+      item_name: name||code,
+      qty, rate,
       original_rate: rate,
       amount: qty*rate,
-      image: null,
+      image: image||null,
       variant: {},
       item_group: null,
-      vat_rate: effectiveVatRate(vatAttr === null || vatAttr === '' ? null : Number(vatAttr)),
+      vat_rate: effectiveVatRate(vatAttr===''||vatAttr==null?null:Number(vatAttr)),
       style_code: '',
       refund: true
     });
   });
   updateCartDisplay();
   if(overlay) overlay.style.display='none';
-  try{ const cartCard=document.getElementById('cartCard'); if(cartCard){ cartCard.classList.add('cart-pulse'); setTimeout(()=>cartCard.classList.remove('cart-pulse'),700); } }catch(_){ }
+  try{ const cartCard=document.getElementById('cartCard'); if(cartCard){ cartCard.classList.add('cart-pulse'); setTimeout(()=>cartCard.classList.remove('cart-pulse'),700); } }catch(_){}
 }
 
 // Cashier/login helpers
@@ -6269,7 +6349,7 @@ async function enrichSaleItems(sale){
       const vi = map[ln.item_code];
       if(!vi) return ln;
       const display = displayNameFrom(vi.name || ln.item_name || ln.item_code, vi.attributes||{});
-      return { ...ln, item_name: display };
+      return { ...ln, item_name: display, image: vi.image_url || ln.image || null };
     }) };
     return out;
   }catch(_){ return sale; }
