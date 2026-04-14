@@ -959,6 +959,13 @@ def post_sale_to_erpnext(payload: Dict[str, Any]) -> Dict[str, Any]:
     or build a Sales Invoice document directly via /api/resource/Sales Invoice.
     This function is a stub calling /api/method/pos_ingest by default.
     """
+    # Inject is_return so ERPNext knows this is a Sales Return when items have negative qty.
+    # This covers queued/retried refunds that were stored before the flag was added.
+    payload = dict(payload)  # shallow copy — don't mutate the caller's dict
+    items = payload.get('items') or []
+    if any(float(i.get('qty') or 0) < 0 for i in items):
+        payload['is_return'] = 1
+
     # Prefer fully-qualified method if provided; fallback to legacy 'pos_ingest'
     path = "/api/method/" + (ERP_INGEST_METHOD or "pos_ingest")
     return _erp_request(path, payload)

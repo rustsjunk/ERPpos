@@ -3332,6 +3332,9 @@ def create_sale():
         invoice_name = _persist_local_sale(data, mode_label)
         return jsonify(_receipt_success_payload(invoice_name, 'Sale recorded (mock)'))
 
+    # Detect refund: any item with negative qty means this is a sales return
+    is_return = any(float(i.get('qty') or 0) < 0 for i in items)
+
     try:
         invoice_data = {
             'doctype': 'Sales Invoice',
@@ -3342,6 +3345,23 @@ def create_sale():
             'payments': payments,
             'disable_rounded_total': 1
         }
+        if is_return:
+            invoice_data['is_return'] = 1
+            # Try to resolve the original ERPNext invoice name for return_against
+            return_against_receipt_id = data.get('return_against_receipt_id')
+            if return_against_receipt_id:
+                try:
+                    conn = _db_connect()
+                    if conn:
+                        row = conn.execute(
+                            "SELECT erp_docname FROM sales WHERE sale_id=? AND erp_docname IS NOT NULL",
+                            (str(return_against_receipt_id),)
+                        ).fetchone()
+                        conn.close()
+                        if row and row['erp_docname']:
+                            invoice_data['return_against'] = row['erp_docname']
+                except Exception:
+                    pass  # return_against is optional; ERPNext will still accept without it
         response = requests.post(
             f"{ERPNEXT_URL}/api/resource/Sales Invoice",
             headers=_erp_headers(),
