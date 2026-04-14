@@ -5065,7 +5065,7 @@ function renderWebOrders(orders){
 async function printPickingNote(orderId, alreadyPrinted){
   if(alreadyPrinted && !confirm('This picking note has already been printed.\n\nMake sure nobody else is already collecting this order before printing again.\n\nPrint anyway?')) return;
   try{
-    await fetch('/api/web-orders/'+orderId+'/print-picking', {method:'POST'});
+    await fetch('/api/web-orders/'+encodeURIComponent(orderId)+'/print-picking', {method:'POST'});
     await pollWebOrders();
     renderWebOrders(_lastWebOrders);
   }catch(e){ alert('Could not print picking note.'); }

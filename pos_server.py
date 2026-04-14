@@ -3708,7 +3708,7 @@ def api_web_order_printed(order_id):
     """Mark a web order as printed (picking note produced at till)."""
     if ERPDASH_URL:
         try:
-            requests.post(f'{ERPDASH_URL}/api/web-orders/{order_id}/mark-printed', timeout=5)
+            requests.post(f'{ERPDASH_URL}/api/web-orders/{quote(order_id, safe="")}/mark-printed', timeout=5)
         except Exception:
             pass
     return jsonify(ok=True), 200
@@ -3751,7 +3751,7 @@ def api_web_order_print_picking(order_id):
 
     if ERPDASH_URL:
         try:
-            requests.post(f'{ERPDASH_URL}/api/web-orders/{order_id}/mark-printed', timeout=5)
+            requests.post(f'{ERPDASH_URL}/api/web-orders/{quote(order_id, safe="")}/mark-printed', timeout=5)
         except Exception:
             pass
 
