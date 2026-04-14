@@ -4,8 +4,10 @@
      0  Off
      1  Pulsing highlight on the next button only
      2  Level 1 + floating hint labels beside key buttons
-     3  Level 2 + guide panel below topbar with full
-        step-by-step instructions and decision prompts
+     3  Level 2 + guide panel with transaction-type flow:
+        — Type picker at start (Sale / Return / Search)
+        — Step-by-step guidance tailored to the chosen type
+        — Payment-type picker on checkout screen
    ========================================================= */
 'use strict';
 
@@ -16,12 +18,14 @@
   // -------------------------------------------------------
   let level = 0;
   let currentStep = 'idle';
+  let txnType = null;       // 'sale' | 'return' | 'search' | null
+  let returnLoaded = false; // true once user has been to the return overlay
   let highlightedEls = [];
-  let activeHints = [];     // DOM elements to remove on next step
+  let activeHints = [];
   let stepCompleteTimer = null;
 
   // -------------------------------------------------------
-  // Step → highlighted elements (all levels)
+  // Step → highlighted elements (levels 1, 2, 3)
   // -------------------------------------------------------
   const HIGHLIGHTS = {
     idle:            ['#itemSearch', '#barcodeInput'],
@@ -40,8 +44,6 @@
 
   // -------------------------------------------------------
   // Level 2 — hint pill definitions per step
-  // Each hint appears near its target element.
-  // placement: 'right' | 'left' | 'above' | 'below'
   // -------------------------------------------------------
   const HINTS = {
     idle: [
@@ -58,7 +60,7 @@
       { sel: '[data-tender="other"]',        text: 'Other tender',               place: 'below' },
       { sel: '#openDiscountBtn',             text: 'Any discount?',              place: 'right' },
       { sel: '#convertToEuroBtn',            text: 'Customer paying in €',       place: 'above' },
-      { sel: '#addPlasticBagBtn',            text: 'Add plastic bag (22c)',      place: 'above' },
+      { sel: '#addPlasticBagBtn',            text: 'Add plastic bag',            place: 'above' },
       { sel: '.checkout-refund-btn',         text: 'Tap to mark item as return', place: 'left' },
       { sel: '#checkoutReturnBtn',           text: 'Return / receipt scan',      place: 'above' },
       { sel: '#completeSaleBtn',             text: 'Finish transaction',         place: 'left'  },
@@ -73,23 +75,24 @@
       { sel: '#applyCashBtn',   text: 'Then tap here',           place: 'above' },
     ],
     tender_card: [
-      { sel: '#otherAmountInput', text: 'Enter card amount', place: 'right' },
-      { sel: '#applyOtherBtn',    text: 'Then tap here',     place: 'above' },
+      { sel: '#otherAmountInput',   text: 'Enter card amount',    place: 'right' },
+      { sel: '#otherFullAmountBtn', text: 'Or fill remaining',    place: 'above' },
+      { sel: '#applyOtherBtn',      text: 'Then tap here',        place: 'above' },
     ],
     tender_voucher: [
-      { sel: '#voucherCodeInput',   text: 'Scan or type voucher code', place: 'right' },
-      { sel: '#voucherSubmitBtn',   text: 'Then tap here',             place: 'left'  },
+      { sel: '#voucherCodeInput',  text: 'Scan or type voucher code', place: 'right' },
+      { sel: '#voucherSubmitBtn',  text: 'Then tap here',             place: 'left'  },
     ],
     tender_eur: [
-      { sel: '#eurOverlayGbpTotal',  text: 'GBP total to collect',        place: 'right' },
-      { sel: '#eurOverlayExact',     text: 'Exact EUR equivalent',         place: 'right' },
-      { sel: '#eurOverlayRoundUp',   text: 'Rounded up — easier change',   place: 'right' },
+      { sel: '#eurOverlayGbpTotal', text: 'GBP total to collect',       place: 'right' },
+      { sel: '#eurOverlayExact',    text: 'Exact EUR equivalent',        place: 'right' },
+      { sel: '#eurOverlayRoundUp',  text: 'Rounded up — easier change',  place: 'right' },
     ],
     tender_discount: [
-      { sel: '#discountItemsList',  text: 'Tick items to discount',       place: 'right' },
-      { sel: '#discModePercent',    text: 'Or choose % off',              place: 'right' },
-      { sel: '#discountValueInput', text: 'Enter the discount value',     place: 'right' },
-      { sel: '#discountCloseBtn',   text: 'Done — applies to cart',       place: 'left'  },
+      { sel: '#discountItemsList',  text: 'Tick items to discount',   place: 'right' },
+      { sel: '#discModePercent',    text: 'Or choose % off',          place: 'right' },
+      { sel: '#discountValueInput', text: 'Enter the discount value', place: 'right' },
+      { sel: '#discountCloseBtn',   text: 'Done — applies to cart',   place: 'left'  },
     ],
     payment_partial: [
       { sel: '.tender-grid', text: 'Add another payment method for the rest', place: 'above' },
@@ -100,110 +103,231 @@
   };
 
   // -------------------------------------------------------
-  // Level 3 — guide panel content per step
-  // body: may contain safe HTML (hardcoded, not user input)
-  // actions: array of { icon, label, style, fn }
+  // Helpers — click a button safely
+  // -------------------------------------------------------
+  function clickEl(sel) {
+    try {
+      const el = typeof sel === 'string' ? document.querySelector(sel) : sel;
+      if (el && !el.disabled) el.click();
+    } catch (_) {}
+  }
+  function focusEl(sel) {
+    try {
+      const el = document.querySelector(sel);
+      if (el) el.focus();
+    } catch (_) {}
+  }
+
+  // -------------------------------------------------------
+  // Level 3 — Guide panel content
+  // Keyed by step name or step_txnType for type-specific entries.
+  // getGuideConfig() resolves the right entry at runtime.
   // -------------------------------------------------------
   const GUIDE = {
-    idle: {
-      title: 'Step 1 of 4 — Start a transaction',
-      body: 'Use the <strong>search box</strong> to find a product by name, or scan its barcode using the scanner at the bottom of the screen. You can also click any product in the grid below to add it to the cart.',
-    },
-    cart_ready: {
-      title: 'Step 2 of 4 — Review the cart',
-      body: 'Item added to the cart on the right. Use the <strong>+</strong> and <strong>−</strong> buttons to adjust quantities. When everything looks correct, tap <strong>Checkout</strong> in the bottom-right corner.',
-    },
-    checkout_open: {
-      title: 'Step 3 of 4 — Before you take payment',
-      body: 'Check for any extras. To <strong>return an item</strong>: tap its <em>Refund</em> button in the cart list — or use <em>↩ Return from receipt</em> to load a previous transaction.',
+
+    // ── Transaction type picker (idle, no type chosen yet) ─────────────
+    idle_null: {
+      title: 'What type of transaction?',
+      body: 'Choose below to get tailored step-by-step guidance.',
       actions: [
-        {
-          icon: '🏷️', label: 'Gift voucher',
-          style: 'warning',
-          fn: () => { const v = document.querySelector('[data-tender="voucher"]'); if (v) v.click(); }
-        },
-        {
-          icon: '💸', label: 'Discount',
-          style: 'outline',
-          fn: () => { const d = document.getElementById('openDiscountBtn'); if (d) d.click(); }
-        },
-        {
-          icon: '🛍️', label: 'Plastic bag',
-          style: 'outline',
-          fn: () => { const b = document.getElementById('addPlasticBagBtn'); if (b) b.click(); }
-        },
-        {
-          icon: '€', label: 'Pay in euros',
-          style: 'outline',
-          fn: () => { const e = document.getElementById('convertToEuroBtn'); if (e) e.click(); }
-        },
-        {
-          icon: '↩️', label: 'Return from receipt',
-          style: 'outline',
-          fn: () => { const r = document.getElementById('checkoutReturnBtn'); if (r) r.click(); }
-        },
-        {
-          icon: '✅', label: 'No extras — go to payment',
-          style: 'primary',
-          fn: () => hideGuidePanel()
-        },
+        { icon: '🛒', label: 'Sale',              style: 'primary', fn: () => chooseTxnType('sale')   },
+        { icon: '↩️', label: 'Return / Exchange', style: 'outline', fn: () => chooseTxnType('return') },
+        { icon: '🔍', label: 'Search / Browse',   style: 'outline', fn: () => chooseTxnType('search') },
       ],
     },
+
+    // ── Sale flow ──────────────────────────────────────────────────────
+    idle_sale: {
+      title: 'Step 1 — Add items to the cart',
+      body: 'Scan a barcode or use the <strong>search box</strong> to find a product. Tap any item in the grid to add it directly.',
+    },
+
+    cart_ready: {
+      title: 'Step 2 — Review the cart',
+      body: 'Use <strong>+</strong> and <strong>−</strong> to adjust quantities. When everything looks right, tap <strong>Checkout</strong>.',
+      actions: [
+        { icon: '✅', label: 'Checkout →', style: 'primary', fn: () => clickEl('#checkoutBtn') },
+      ],
+    },
+
+    // ── Return / Exchange flow ─────────────────────────────────────────
+    idle_return: {
+      title: 'Step 1 — Add the returned item',
+      body: 'Scan the returned item\'s barcode, or search for it by name. Then tap <strong>Checkout</strong> to open the return panel.',
+    },
+
+    cart_ready_return: {
+      title: 'Step 2 — Return items loaded',
+      body: 'Refund lines are in the cart. Check quantities, then tap <strong>Checkout</strong> to process the refund.',
+      actions: [
+        { icon: '↩️', label: 'Process Refund →', style: 'primary', fn: () => clickEl('#checkoutBtn') },
+      ],
+    },
+
+    // ── Search / Browse only ───────────────────────────────────────────
+    idle_search: {
+      title: 'Searching & browsing',
+      body: 'Use the <strong>search box</strong> to find products by name, barcode, or style code. Tap any result to see its variants, stock, and price.',
+    },
+
+    // ── Checkout: load return (before return overlay visited) ──────────
+    checkout_open_return_load: {
+      title: 'Step 3 — Load the receipt',
+      body: 'Tap <strong>↩ Return</strong> to scan the original receipt and load the items being returned.',
+      actions: [
+        { icon: '↩️', label: '↩ Return from receipt', style: 'primary', fn: () => clickEl('#checkoutReturnBtn') },
+      ],
+    },
+
+    // ── Checkout: payment picker (sale, or return after receipt loaded) ─
+    checkout_open_pay: {
+      title: 'How is the customer paying?',
+      body: 'Tap a payment method to continue, or add extras below.',
+      actions: [
+        { icon: '💵', label: 'Cash',      style: 'primary', fn: () => clickEl('[data-tender="cash"]')    },
+        { icon: '💳', label: 'Card',      style: 'outline', fn: () => clickEl('[data-tender="card"]')    },
+        { icon: '🏷️', label: 'Voucher',  style: 'outline', fn: () => clickEl('[data-tender="voucher"]') },
+        { icon: '€',  label: 'Pay in €', style: 'outline', fn: () => clickEl('#convertToEuroBtn')       },
+        { icon: '🛍️', label: '+ Bag',    style: 'outline', fn: () => clickEl('#addPlasticBagBtn')       },
+        { icon: '💸', label: 'Discount', style: 'outline', fn: () => clickEl('#openDiscountBtn')        },
+      ],
+    },
+
+    // ── Return overlay ─────────────────────────────────────────────────
+    return_open: {
+      title: 'Step 3 — Scan the receipt',
+      body: '<ol><li>Scan the receipt barcode or type the receipt ID into the box.</li><li>Tap <strong>Find</strong> — the original items will appear.</li><li>Tick the items being returned (all pre-selected by default).</li><li>Tap <strong>Load As Return</strong> to add them to the cart.</li></ol>',
+      actions: [
+        { icon: '🔍', label: 'Tap Find →',          style: 'primary', fn: () => clickEl('#returnFindBtn') },
+        { icon: '↩️', label: 'Load As Return →',    style: 'outline', fn: () => clickEl('#returnLoadBtn') },
+      ],
+    },
+
+    // ── Cash payment ───────────────────────────────────────────────────
     tender_cash: {
-      title: 'Cash payment — how to proceed',
-      body: '<ol><li>Count the cash the customer hands over.</li><li>Enter that amount on the keypad or in the number field.</li><li>Tap <strong>Apply Cash</strong> — the till shows the change due.</li><li>If the total isn\'t fully covered, add a second payment method.</li></ol>',
+      title: 'Cash payment',
+      body: '<ol><li>Count the cash the customer hands over.</li><li>Enter that amount in the field, or use the keypad.</li><li>The till will show the <strong>change due</strong>.</li><li>Tap <strong>Apply Cash</strong> to record it.</li></ol>',
+      actions: [
+        { icon: '⌨️', label: 'Click cash field',  style: 'outline', fn: () => focusEl('#cashInputField') },
+        { icon: '✅', label: 'Apply Cash →',       style: 'primary', fn: () => clickEl('#applyCashBtn')   },
+      ],
     },
+
+    // ── Card payment ───────────────────────────────────────────────────
     tender_card: {
-      title: 'Card payment — how to proceed',
-      body: '<ol><li>Process the payment on the card terminal <em>first</em>.</li><li>Enter the amount charged to the card here.</li><li>Tap <strong>Remaining Amount</strong> to auto-fill the balance, or type it manually.</li><li>Click <strong>Apply</strong> to record it. Mix with other methods for split payments.</li></ol>',
+      title: 'Card payment',
+      body: '<ol><li>Process the payment on the card terminal <em>first</em>.</li><li>Tap <strong>Fill Remaining</strong> to auto-fill the balance, or type the amount manually.</li><li>Tap <strong>Apply</strong> to record it.</li></ol>',
+      actions: [
+        { icon: '📋', label: 'Fill Remaining', style: 'primary', fn: () => clickEl('#otherFullAmountBtn') },
+        { icon: '✅', label: 'Apply →',         style: 'outline', fn: () => clickEl('#applyOtherBtn')      },
+      ],
     },
+
+    // ── Gift voucher ───────────────────────────────────────────────────
     tender_voucher: {
-      title: 'Gift voucher — how to proceed',
-      body: '<ol><li>Ask the customer for their voucher.</li><li>Scan or type the voucher code in the field.</li><li>Enter the amount to apply (cannot exceed the voucher\'s remaining balance).</li><li>Tap <strong>Use Voucher</strong> to apply it. Add another payment for any remainder.</li></ol>',
+      title: 'Gift voucher',
+      body: '<ol><li>Ask the customer for their voucher.</li><li>Scan or type the voucher code.</li><li>Enter the amount to apply (up to the voucher balance).</li><li>Tap <strong>Use Voucher</strong> to apply it.</li></ol>',
+      actions: [
+        { icon: '✅', label: 'Use Voucher →', style: 'primary', fn: () => clickEl('#voucherSubmitBtn') },
+      ],
     },
+
+    // ── Euro payment ───────────────────────────────────────────────────
     tender_eur: {
       title: 'Euro payment',
-      body: '<ol><li>The panel shows the GBP total and the current exchange rate.</li><li>Choose a EUR target: <strong>Exact</strong>, <strong>Round Up</strong> (easier for customer), or <strong>Round Down</strong>.</li><li>The customer hands over euros — enter the amount they give and tap <strong>Apply EUR</strong>.</li><li>The system records the EUR taken and calculates any change in GBP or EUR.</li></ol>',
+      body: '<ol><li>The panel shows the GBP total and live exchange rate.</li><li>Choose <strong>Exact</strong>, <strong>Round Up</strong>, or <strong>Round Down</strong> as the EUR target.</li><li>Enter the euros handed over and tap <strong>Apply EUR</strong>.</li><li>The till calculates change in GBP or EUR.</li></ol>',
     },
+
+    // ── Discount ───────────────────────────────────────────────────────
     tender_discount: {
       title: 'Applying a discount',
-      body: '<ol><li><strong>Select items</strong> to discount using the checkboxes — or tap <em>Select All</em>.</li><li>Choose the discount type: <strong>Amount off</strong> (fixed price reduction per item), <strong>Percent off</strong> (e.g. 10 for 10%), or <strong>Set unit price</strong> (override the price directly).</li><li>Type the value on the keypad.</li><li>Tap <strong>Done</strong> to apply. The updated prices appear in the cart immediately.</li></ol>',
+      body: '<ol><li>Tick items to discount (or tap <em>Select All</em>).</li><li>Choose type: <strong>Amount off</strong>, <strong>Percent off</strong>, or <strong>Set unit price</strong>.</li><li>Enter the value on the keypad.</li><li>Tap <strong>Done</strong> to apply.</li></ol>',
     },
-    return_open: {
-      title: 'Processing a return',
-      body: '<ol><li>Scan the customer\'s receipt barcode or type the receipt ID into the box.</li><li>Tap <strong>Find</strong> — the original items will appear with checkboxes.</li><li>Tick the items the customer is returning (all are pre-selected by default).</li><li>Tap <strong>Load As Return</strong> — the items are added to the cart as refund lines.</li><li>Process the refund payment: cash back, card refund, or issue a voucher.</li></ol>',
-    },
+
+    // ── Split / partial payment ────────────────────────────────────────
     payment_partial: {
-      title: 'Split payment in progress',
-      body: 'Part of the balance has been applied. There\'s still an <strong>amount outstanding</strong> — you can see it in the "Remaining Due" field. Choose another payment method (Cash, Card, or Voucher) to cover the rest.',
+      title: 'Part payment applied',
+      body: 'Part of the balance is covered. There\'s still an <strong>amount outstanding</strong> — choose another payment method to cover the rest.',
+      actions: [
+        { icon: '💵', label: 'Cash',     style: 'primary', fn: () => clickEl('[data-tender="cash"]')    },
+        { icon: '💳', label: 'Card',     style: 'outline', fn: () => clickEl('[data-tender="card"]')    },
+        { icon: '🏷️', label: 'Voucher', style: 'outline', fn: () => clickEl('[data-tender="voucher"]') },
+      ],
     },
+
+    // ── Payment complete ───────────────────────────────────────────────
     payment_ready: {
-      title: 'Step 4 of 4 — Complete the sale',
-      body: 'Payment is fully covered! Count out any change for the customer. Tap <strong>Complete Sale</strong> to process the transaction — a receipt will print automatically.',
+      title: 'Step 4 — Complete the transaction',
+      body: 'Payment is fully covered! Count out any change for the customer, then tap <strong>Complete Sale</strong>.',
+      actions: [
+        { icon: '✅', label: 'Complete Sale →', style: 'primary', fn: () => clickEl('#completeSaleBtn') },
+      ],
     },
+
+    // ── Done ───────────────────────────────────────────────────────────
     complete: {
       title: '✅ Transaction complete',
-      body: 'The sale is recorded and a receipt is printing. Hand the customer their change (if any) and the receipt. Tap <strong>Done</strong> on the receipt screen to reset the till for the next customer.',
+      body: 'The transaction is recorded and a receipt is printing. Hand the customer any change and the receipt, then tap <strong>Done</strong> to reset the till.',
     },
   };
 
   // -------------------------------------------------------
-  // Highlights
+  // Resolve the right GUIDE config for the current step + txnType
   // -------------------------------------------------------
-  function clearHighlights() {
-    highlightedEls.forEach(el => el.classList.remove('training-highlight'));
-    highlightedEls = [];
+  function getGuideConfig(stepKey) {
+    if (level < 3) return null;
+
+    switch (stepKey) {
+      case 'idle':
+        return GUIDE[txnType ? `idle_${txnType}` : 'idle_null'];
+
+      case 'cart_ready':
+        return txnType === 'return' ? GUIDE.cart_ready_return : GUIDE.cart_ready;
+
+      case 'checkout_open':
+        if (txnType === 'return' && !returnLoaded) return GUIDE.checkout_open_return_load;
+        return GUIDE.checkout_open_pay;
+
+      default:
+        return GUIDE[stepKey] || null;
+    }
   }
 
+  // -------------------------------------------------------
+  // Highlights — level-3 overrides for type-aware steps
+  // -------------------------------------------------------
   function applyHighlights(stepKey) {
     clearHighlights();
     if (!level) return;
-    (HIGHLIGHTS[stepKey] || []).forEach(sel => {
+
+    let sels;
+    if (level >= 3) {
+      if (stepKey === 'idle' && !txnType) {
+        sels = []; // Type picker: nothing to highlight
+      } else if (stepKey === 'checkout_open') {
+        if (txnType === 'return' && !returnLoaded) {
+          sels = ['#checkoutReturnBtn'];
+        } else {
+          sels = ['[data-tender="cash"]', '[data-tender="card"]', '[data-tender="voucher"]'];
+        }
+      } else {
+        sels = HIGHLIGHTS[stepKey] || [];
+      }
+    } else {
+      sels = HIGHLIGHTS[stepKey] || [];
+    }
+
+    sels.forEach(sel => {
       try {
         const el = document.querySelector(sel);
         if (el) { el.classList.add('training-highlight'); highlightedEls.push(el); }
       } catch (_) {}
     });
+  }
+
+  function clearHighlights() {
+    highlightedEls.forEach(el => el.classList.remove('training-highlight'));
+    highlightedEls = [];
   }
 
   // -------------------------------------------------------
@@ -242,7 +366,6 @@
         break;
     }
 
-    // Clamp to viewport
     const vw = window.innerWidth, vh = window.innerHeight;
     const l = parseFloat(hint.style.left), t = parseFloat(hint.style.top);
     hint.style.left = Math.max(4, Math.min(l, vw - hw - 4)) + 'px';
@@ -269,10 +392,8 @@
       } catch (_) {}
     });
 
-    // Wait two animation frames for the target to be laid out (overlay transitions)
     requestAnimationFrame(() => requestAnimationFrame(() => {
       pending.forEach(p => positionHint(p.hint, p.target, p.place));
-      // Fade in
       pending.forEach(p => p.hint.classList.add('tw-visible'));
     }));
   }
@@ -280,21 +401,24 @@
   // -------------------------------------------------------
   // Level 3 — Guide panel
   // -------------------------------------------------------
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   function showGuidePanel(stepKey) {
-    if (level < 3) return;
-    const cfg = GUIDE[stepKey];
+    const cfg = getGuideConfig(stepKey);
     if (!cfg) return;
 
-    const panel  = document.getElementById('trainingGuidePanel');
-    const title  = document.getElementById('tgpTitle');
-    const body   = document.getElementById('tgpBody');
-    const acts   = document.getElementById('tgpActions');
+    const panel = document.getElementById('trainingGuidePanel');
+    const title = document.getElementById('tgpTitle');
+    const body  = document.getElementById('tgpBody');
+    const acts  = document.getElementById('tgpActions');
     if (!panel || !title || !body || !acts) return;
 
-    // Position is handled by CSS (bottom-right floating card)
-
     title.textContent = cfg.title;
-    body.innerHTML = cfg.body || '';
+    body.innerHTML    = cfg.body || '';
 
     acts.innerHTML = '';
     (cfg.actions || []).forEach(act => {
@@ -311,12 +435,6 @@
   function hideGuidePanel() {
     const panel = document.getElementById('trainingGuidePanel');
     if (panel) panel.classList.remove('tw-visible');
-  }
-
-  function escHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   // -------------------------------------------------------
@@ -340,10 +458,34 @@
   }
 
   // -------------------------------------------------------
+  // chooseTxnType — called from type-picker action buttons
+  // Updates txnType and re-renders the current step without
+  // resetting state (unlike setStep which resets on 'idle').
+  // -------------------------------------------------------
+  function chooseTxnType(type) {
+    txnType = type;
+    applyHighlights(currentStep);
+    showGuidePanel(currentStep);
+  }
+
+  // -------------------------------------------------------
   // Public: setStep — called from script.js hooks
   // -------------------------------------------------------
   function setStep(stepKey) {
     if (!level) return;
+
+    // Returning to idle means a new transaction — reset type state
+    if (stepKey === 'idle') {
+      txnType = null;
+      returnLoaded = false;
+    }
+
+    // Once the return overlay has been opened, subsequent checkout_open
+    // steps should show payment guidance rather than "load return".
+    if (stepKey === 'return_open') {
+      returnLoaded = true;
+    }
+
     currentStep = stepKey;
     applyHighlights(stepKey);
     showHints(stepKey);
@@ -356,7 +498,6 @@
   function onSaleDone() {
     if (!level) return;
     setStep('complete');
-    // After 4 seconds transition back to idle
     clearTimeout(stepCompleteTimer);
     stepCompleteTimer = setTimeout(() => {
       if (currentStep === 'complete') setStep('idle');
@@ -364,30 +505,33 @@
   }
 
   // -------------------------------------------------------
-  // Public: init — called from applySettings
+  // Public: init — called from applySettings / login
   // -------------------------------------------------------
   function init(lvl) {
     level = parseInt(lvl, 10) || 0;
+    txnType = null;
+    returnLoaded = false;
     clearHighlights();
     clearHints();
     hideGuidePanel();
     updateBadge();
     if (!level) return;
-    // Reposition guide panel whenever window resizes
     window.removeEventListener('resize', onResize);
     if (level >= 3) window.addEventListener('resize', onResize);
     setStep('idle');
   }
 
-  function onResize() { /* no-op: panel position is CSS-controlled */ }
+  function onResize() { /* panel position is CSS-controlled */ }
 
-  // Wire up close buttons after DOM ready
+  // Wire close button
   document.addEventListener('DOMContentLoaded', () => {
     const closeBtn = document.getElementById('tgpClose');
     if (closeBtn) closeBtn.addEventListener('click', hideGuidePanel);
   });
 
-  // Expose public API
+  // -------------------------------------------------------
+  // Public API
+  // -------------------------------------------------------
   window.TrainingWheels = {
     init,
     setStep,
