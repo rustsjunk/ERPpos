@@ -58,9 +58,10 @@
     payment_ready:         ['#completeSaleBtn'],
     complete:              [],
     // ── return sub-steps ─────────────────────────────────────
-    return_receipt:        ['#returnFromReceiptBtn'],
-    return_open:           ['#returnScanInput', '#returnFindBtn', '#returnLoadBtn'],
-    return_manual:         ['#itemSearch', '#barcodeInput'],
+    return_receipt:              ['#returnFromReceiptBtn'],
+    return_open:                 ['#returnScanInput', '#returnFindBtn', '#returnLoadBtn'],
+    return_manual:               ['#itemSearch', '#barcodeInput'],
+    checkout_open_return_manual: ['.checkout-refund-btn'],
     // ── layaway sub-steps ────────────────────────────────────
     layaway_customer:      ['#layawayCustomerInput', '#layawayCustomerNextBtn'],
     layaway_payment_q:     ['#layawayPaymentConfirmBtn'],
@@ -240,9 +241,9 @@
       body:  'Ask the customer for their voucher. Click the highlighted <strong>Voucher</strong> button on screen to open the voucher entry.',
     },
     eur: {
-      highlightSels: ['#convertToEuroBtn'],
-      title: 'Euro payment',
-      body:  'The system converts the total to euros at today\'s rate and offers rounding options. Click the highlighted <strong>€ Euro</strong> button on screen to open the converter.',
+      highlightSels: ['[data-tender="cash"]'],
+      title: 'Euro payment — Step 1',
+      body:  'First click the highlighted <strong>Cash</strong> button to open the cash section. Inside it you will find an <strong>€ Convert</strong> button — click that to open the currency converter.',
     },
   };
 
@@ -487,6 +488,15 @@
       ],
     },
 
+    // ── Checkout: manual return (per-item refund toggle) ──
+    checkout_open_return_manual: {
+      title: 'Step 3 — Mark items as refund',
+      body:  'Find each item in the cart list. Tap the <strong>Refund</strong> button next to it to mark it as a return (it will turn red). Do this for every item being returned, then complete the refund.',
+      actions: [
+        { icon: '✅', label: 'Complete Refund →', style: 'primary', fn: () => highlightMany(['#completeSaleBtn']) },
+      ],
+    },
+
     // ── Checkout: return receipt load (existing) ─────────
     checkout_open_return_load: {
       title: 'Step 3 — Return from receipt',
@@ -537,8 +547,11 @@
     },
 
     tender_eur: {
-      title: 'Euro payment',
-      body:  '<ol><li>The panel shows the GBP total and live exchange rate.</li><li>Choose <strong>Exact</strong>, <strong>Round Up</strong>, or <strong>Round Down</strong> as the EUR target.</li><li>Enter the euros handed over and tap <strong>Apply EUR</strong>.</li><li>The till calculates change in GBP or EUR.</li></ol>',
+      title: 'Euro payment — currency converter',
+      body:  '<ol><li>The panel shows the <strong>GBP total</strong> to collect and the live exchange rate.</li><li>Choose <strong>Exact</strong>, <strong>Round Up</strong>, or <strong>Round Down</strong> as your EUR target amount.</li><li>Enter the euros the customer hands over and tap <strong>Apply EUR</strong>.</li><li>The till calculates any change due in GBP or EUR.</li></ol>',
+      actions: [
+        { icon: '✅', label: 'Apply EUR →', style: 'primary', fn: () => highlightMany(['#applyEurBtn', '#eurApplyBtn', '.eur-apply-btn']) },
+      ],
     },
 
     tender_discount: {
@@ -591,8 +604,9 @@
         return GUIDE.cart_ready_sale;
 
       case 'checkout_open':
-        if (txnType === 'layaway')               return GUIDE.checkout_open_layaway;
-        if (txnType === 'return' && !returnLoaded) return GUIDE.checkout_open_return_load;
+        if (txnType === 'layaway')                             return GUIDE.checkout_open_layaway;
+        if (txnType === 'return' && returnPath === 'manual')   return GUIDE.checkout_open_return_manual;
+        if (txnType === 'return' && !returnLoaded)             return GUIDE.checkout_open_return_load;
         return GUIDE.checkout_open_pay;
 
       // All other step keys fall through to a direct GUIDE lookup
@@ -617,8 +631,9 @@
         else if (txnType === 'return') sels = HIGHLIGHTS.cart_ready_return;
         else sels = HIGHLIGHTS.cart_ready_sale || HIGHLIGHTS.cart_ready;
       } else if (stepKey === 'checkout_open') {
-        if (txnType === 'layaway')               sels = HIGHLIGHTS.checkout_open_layaway;
-        else if (txnType === 'return' && !returnLoaded) sels = ['#checkoutReturnBtn'];
+        if (txnType === 'layaway')                            sels = HIGHLIGHTS.checkout_open_layaway;
+        else if (txnType === 'return' && returnPath==='manual') sels = HIGHLIGHTS.checkout_open_return_manual;
+        else if (txnType === 'return' && !returnLoaded)       sels = ['#checkoutReturnBtn'];
         else sels = ['[data-tender="cash"]', '[data-tender="card"]', '[data-tender="voucher"]'];
       } else {
         sels = HIGHLIGHTS[stepKey] || [];

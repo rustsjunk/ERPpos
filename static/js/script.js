@@ -3120,7 +3120,7 @@ function bindEvents(){
       convertToEuroBtn.addEventListener('click', async ()=>{
         const amountDueEl = document.getElementById('amountDue');
         const amountDue = amountDueEl ? Number(amountDueEl.textContent.replace(/[^\d.-]/g, '')) : 0;
-        
+
         if(amountDue <= 0){
           alert('No amount due to convert.');
           return;
@@ -3128,6 +3128,8 @@ function bindEvents(){
 
         // Open the EUR conversion overlay
         await openEurConversionOverlay(amountDue);
+        if(typeof TrainingWheels !== 'undefined' && TrainingWheels.getLevel() > 0)
+          TrainingWheels.setStep('tender_eur');
       });
     }
     
@@ -4291,9 +4293,16 @@ function renderVariantMatrix(item,m){
         td.dataset.stockValue=String(qty);
         td.dataset.variantKey=key;
         variantCellRefs.set(key, td);
+        const vrec=(m.variants&&m.variants[key])||null;
         if(qty>0){
-          const vrec=(m.variants&&m.variants[key])||null;
           td.addEventListener('click',()=>queueVariantSelection(item,{color,width,size:sz,qtyAvailable:qty}, vrec));
+        } else if(vrec){
+          // Allow 0-stock add (e.g. for returns) with confirmation
+          td.addEventListener('click',()=>{
+            if(confirm(`${sz||'This variant'} shows 0 stock. Add anyway (e.g. for a return)?`)){
+              queueVariantSelection(item,{color,width,size:sz,qtyAvailable:0}, vrec);
+            }
+          });
         }
         row.appendChild(td);
       }); 
@@ -4492,6 +4501,7 @@ function openCheckoutOverlay(options = {}){
   const toggleKeypadBtn = document.getElementById('toggleKeypadBtn');
   if (toggleKeypadBtn) toggleKeypadBtn.textContent = 'Show Keypad';
   renderCheckoutCart();
+  updateCashSection();
   o.style.display='flex';
   o.style.visibility='visible';
   o.style.opacity='1';
@@ -4696,18 +4706,30 @@ function updateCashSection() {
   if (otherEntryDisplayEl) otherEntryDisplayEl.textContent = money(Number((otherAmtEl && otherAmtEl.value) || 0));
   if (otherEntryDueEl) otherEntryDueEl.textContent = money(remaining);
   if (cashBtn){
-    const labelAmount = Math.abs(cashVal||0);
-    cashBtn.textContent = isRefund ? `Refund ${money(labelAmount)}` : `${money(cashVal)} Cash`;
+    cashBtn.textContent = isRefund ? 'Cash' : `${money(cashVal)} Cash`;
+  }
+  if (applyCashBtn){
+    applyCashBtn.textContent = isRefund ? 'Apply Refund' : 'Apply Cash';
+    applyCashBtn.className = applyCashBtn.className
+      .replace(/\bbtn-success\b|\bbtn-danger\b/g, '').trim()
+      + (isRefund ? ' btn-danger' : ' btn-success');
   }
   if (clear) clear.onclick = () => { resetCashEntry(); updateCashSection(); };
-  if (applyCashBtn) applyCashBtn.disabled = false;
   if (applyOtherBtn) applyOtherBtn.disabled = false;
   if (voucherBtn){
     voucherBtn.disabled = false;
   }
   updateVoucherButtonLabel();
   if (otherFullBtn) otherFullBtn.disabled = false;
-  
+
+  // Update Complete Sale button text + colour for refund mode
+  const completeSaleBtn = document.getElementById('completeSaleBtn');
+  if (completeSaleBtn) {
+    completeSaleBtn.textContent = isRefund ? 'Complete Refund' : 'Complete Sale';
+    completeSaleBtn.classList.toggle('btn-danger',  isRefund);
+    completeSaleBtn.classList.toggle('btn-success', !isRefund);
+  }
+
   renderAppliedPayments();
 }
 
@@ -6190,7 +6212,20 @@ function logoutToLogin(reason){
 
 // Receipt overlay
 function showReceiptOverlay(info){ const o=document.getElementById('receiptOverlay'); const inv=document.getElementById('receiptInvoice'); const ch=document.getElementById('receiptChange'); if(!o){ err('loginOverlay element missing'); return; }
-  neutralizeForeignOverlays(); if(inv) inv.textContent = info.invoice || 'N/A'; if(ch) ch.textContent = money(info.change || 0); o.style.display='flex';
+  neutralizeForeignOverlays(); if(inv) inv.textContent = info.invoice || 'N/A'; if(ch) ch.textContent = money(info.change || 0);
+  // Render barcode for the receipt ID
+  try {
+    const barcodeVal = info.invoice || '';
+    const svg = document.getElementById('receiptBarcodeSvg');
+    const wrap = document.getElementById('receiptBarcodeWrap');
+    if(svg && wrap && barcodeVal && typeof JsBarcode !== 'undefined'){
+      JsBarcode(svg, barcodeVal, { format: 'CODE128', width: 2, height: 60, displayValue: false, margin: 4 });
+      wrap.style.display = 'block';
+    } else if(wrap){
+      wrap.style.display = 'none';
+    }
+  } catch(_){}
+  o.style.display='flex';
   o.style.visibility='visible';
   o.style.opacity='1';
   try { const cs = getComputedStyle(o); const r=o.getBoundingClientRect(); log('loginOverlay computed', { display: cs.display, zIndex: cs.zIndex, visibility: cs.visibility, opacity: cs.opacity, rect: { x:r.x, y:r.y, w:r.width, h:r.height } }); } catch(_){}
