@@ -103,7 +103,7 @@
   };
 
   // -------------------------------------------------------
-  // Helpers — click a button safely
+  // Helpers
   // -------------------------------------------------------
   function clickEl(sel) {
     try {
@@ -118,6 +118,85 @@
     } catch (_) {}
   }
 
+  // Highlight a single element (used by showTenderGuide)
+  function highlightOne(sel) {
+    clearHighlights();
+    try {
+      const el = document.querySelector(sel);
+      if (el) { el.classList.add('training-highlight'); highlightedEls.push(el); }
+    } catch (_) {}
+  }
+
+  // -------------------------------------------------------
+  // Pre-tender guidance: called when user taps a payment type
+  // in the payment picker.  Shows guidance + highlights the
+  // real UI button — does NOT auto-open the overlay.
+  // A "← Back" button returns to the payment picker.
+  // -------------------------------------------------------
+  const PRETENDER = {
+    cash: {
+      highlightSel: '[data-tender="cash"]',
+      title: 'Cash payment',
+      body: 'Count the cash the customer hands over. Now click the highlighted <strong>Cash</strong> button on screen to open the cash entry section.',
+    },
+    card: {
+      highlightSel: '[data-tender="card"]',
+      title: 'Card payment',
+      body: 'Process the payment on the card terminal <em>first</em>, then click the highlighted <strong>Card</strong> button on screen to record the amount.',
+    },
+    voucher: {
+      highlightSel: '[data-tender="voucher"]',
+      title: 'Gift voucher',
+      body: 'Ask the customer for their voucher. Click the highlighted <strong>Voucher</strong> button on screen to open the voucher entry.',
+    },
+    eur: {
+      highlightSel: '#convertToEuroBtn',
+      title: 'Euro payment',
+      body: 'The system converts the total to euros at today\'s rate and offers rounding options. Click the highlighted <strong>€ Euro</strong> button on screen to open the currency converter.',
+    },
+    bag: {
+      highlightSel: '#addPlasticBagBtn',
+      title: 'Plastic bag charge',
+      body: 'Click the highlighted <strong>+ Bag</strong> button on screen to add the bag charge to this sale.',
+    },
+    discount: {
+      highlightSel: '#openDiscountBtn',
+      title: 'Applying a discount',
+      body: 'Click the highlighted <strong>Discount</strong> button on screen to open the discount panel where you can reduce prices by amount or percentage.',
+    },
+  };
+
+  function showTenderGuide(type) {
+    const cfg = PRETENDER[type];
+    if (!cfg) return;
+
+    // Highlight the real UI button
+    highlightOne(cfg.highlightSel);
+
+    // Render guidance in the panel without changing currentStep
+    const panel = document.getElementById('trainingGuidePanel');
+    const title = document.getElementById('tgpTitle');
+    const body  = document.getElementById('tgpBody');
+    const acts  = document.getElementById('tgpActions');
+    if (!panel || !title || !body || !acts) return;
+
+    title.textContent = cfg.title;
+    body.innerHTML    = cfg.body;
+    acts.className    = 'tgp-actions';
+    acts.innerHTML    = '';
+
+    const backBtn = document.createElement('button');
+    backBtn.className = 'tgp-btn tgp-btn-outline';
+    backBtn.innerHTML = '← Back to payment types';
+    backBtn.addEventListener('click', () => {
+      applyHighlights(currentStep);
+      showGuidePanel(currentStep);
+    });
+    acts.appendChild(backBtn);
+
+    panel.classList.add('tw-visible');
+  }
+
   // -------------------------------------------------------
   // Level 3 — Guide panel content
   // Keyed by step name or step_txnType for type-specific entries.
@@ -129,6 +208,7 @@
     idle_null: {
       title: 'What type of transaction?',
       body: 'Choose below to get tailored step-by-step guidance.',
+      actionsClass: 'tgp-actions-picker',
       actions: [
         { icon: '🛒', label: 'Sale',              style: 'primary', fn: () => chooseTxnType('sale')   },
         { icon: '↩️', label: 'Return / Exchange', style: 'outline', fn: () => chooseTxnType('return') },
@@ -152,8 +232,11 @@
 
     // ── Return / Exchange flow ─────────────────────────────────────────
     idle_return: {
-      title: 'Step 1 — Add the returned item',
-      body: 'Scan the returned item\'s barcode, or search for it by name. Then tap <strong>Checkout</strong> to open the return panel.',
+      title: 'Step 1 — Processing a return',
+      body: 'Scan the returned item\'s barcode to add it to the cart, then tap <strong>Checkout</strong>. On the payment screen use <strong>↩ Return from Receipt</strong> to scan the original receipt — this is the fastest way and loads all items automatically.',
+      actions: [
+        { icon: '✅', label: 'Open Checkout →', style: 'primary', fn: () => clickEl('#checkoutBtn') },
+      ],
     },
 
     cart_ready_return: {
@@ -172,24 +255,25 @@
 
     // ── Checkout: load return (before return overlay visited) ──────────
     checkout_open_return_load: {
-      title: 'Step 3 — Load the receipt',
-      body: 'Tap <strong>↩ Return</strong> to scan the original receipt and load the items being returned.',
+      title: 'Step 3 — Return from receipt',
+      body: 'Tap the highlighted <strong>↩ Return</strong> button to scan the customer\'s receipt. This loads all original items automatically — tick which ones are being returned, then tap <strong>Load As Return</strong>.',
       actions: [
-        { icon: '↩️', label: '↩ Return from receipt', style: 'primary', fn: () => clickEl('#checkoutReturnBtn') },
+        { icon: '↩️', label: '↩ Tap Return from Receipt', style: 'primary', fn: () => clickEl('#checkoutReturnBtn') },
       ],
     },
 
     // ── Checkout: payment picker (sale, or return after receipt loaded) ─
     checkout_open_pay: {
       title: 'How is the customer paying?',
-      body: 'Tap a payment method to continue, or add extras below.',
+      body: 'Tap a method below for guidance, then click the highlighted button on screen.',
+      actionsClass: 'tgp-actions-grid',
       actions: [
-        { icon: '💵', label: 'Cash',      style: 'primary', fn: () => clickEl('[data-tender="cash"]')    },
-        { icon: '💳', label: 'Card',      style: 'outline', fn: () => clickEl('[data-tender="card"]')    },
-        { icon: '🏷️', label: 'Voucher',  style: 'outline', fn: () => clickEl('[data-tender="voucher"]') },
-        { icon: '€',  label: 'Pay in €', style: 'outline', fn: () => clickEl('#convertToEuroBtn')       },
-        { icon: '🛍️', label: '+ Bag',    style: 'outline', fn: () => clickEl('#addPlasticBagBtn')       },
-        { icon: '💸', label: 'Discount', style: 'outline', fn: () => clickEl('#openDiscountBtn')        },
+        { icon: '💵', label: 'Cash',      style: 'primary', fn: () => showTenderGuide('cash')    },
+        { icon: '💳', label: 'Card',      style: 'outline', fn: () => showTenderGuide('card')    },
+        { icon: '🏷️', label: 'Voucher',  style: 'outline', fn: () => showTenderGuide('voucher') },
+        { icon: '€',  label: 'Pay in €', style: 'outline', fn: () => showTenderGuide('eur')     },
+        { icon: '🛍️', label: '+ Bag',    style: 'outline', fn: () => showTenderGuide('bag')     },
+        { icon: '💸', label: 'Discount', style: 'outline', fn: () => showTenderGuide('discount') },
       ],
     },
 
@@ -247,11 +331,12 @@
     // ── Split / partial payment ────────────────────────────────────────
     payment_partial: {
       title: 'Part payment applied',
-      body: 'Part of the balance is covered. There\'s still an <strong>amount outstanding</strong> — choose another payment method to cover the rest.',
+      body: 'Part of the balance is covered. There\'s still an <strong>amount outstanding</strong> — choose another method below for the rest.',
+      actionsClass: 'tgp-actions-grid',
       actions: [
-        { icon: '💵', label: 'Cash',     style: 'primary', fn: () => clickEl('[data-tender="cash"]')    },
-        { icon: '💳', label: 'Card',     style: 'outline', fn: () => clickEl('[data-tender="card"]')    },
-        { icon: '🏷️', label: 'Voucher', style: 'outline', fn: () => clickEl('[data-tender="voucher"]') },
+        { icon: '💵', label: 'Cash',     style: 'primary', fn: () => showTenderGuide('cash')    },
+        { icon: '💳', label: 'Card',     style: 'outline', fn: () => showTenderGuide('card')    },
+        { icon: '🏷️', label: 'Voucher', style: 'outline', fn: () => showTenderGuide('voucher') },
       ],
     },
 
@@ -420,6 +505,7 @@
     title.textContent = cfg.title;
     body.innerHTML    = cfg.body || '';
 
+    acts.className = `tgp-actions${cfg.actionsClass ? ' ' + cfg.actionsClass : ''}`;
     acts.innerHTML = '';
     (cfg.actions || []).forEach(act => {
       const btn = document.createElement('button');
