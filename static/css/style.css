@@ -901,6 +901,12 @@ body.dark-mode .table > :not(caption) > * > * { color: #e9ecef; border-color: #2
 .checkout-refund-btn:hover { background: #fff3cd; border-color: #ffc107; color: #664d03; }
 .checkout-refund-btn.active { background: #c92a2a; border-color: #c92a2a; color: #fff; }
 .checkout-refund-btn.active:hover { background: #a61e1e; }
+.checkout-remove-btn {
+    font-size: 0.85rem; font-weight: 700; line-height: 1; padding: 3px 7px; border-radius: 12px;
+    border: 1px solid #dee2e6; background: #f8f9fa; color: #adb5bd; cursor: pointer;
+    white-space: nowrap; transition: background 0.15s, color 0.15s, border-color 0.15s; flex-shrink: 0;
+}
+.checkout-remove-btn:hover { background: #ffe3e3; border-color: #c92a2a; color: #c92a2a; }
 .tender-btn { background: #f1f3f5; border: 1px solid #dee2e6; }
 .tender-btn.active { background: #0d6efd; color: #fff; border-color: #0d6efd; }
 .tender-grid {

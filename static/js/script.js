@@ -971,7 +971,8 @@ const receiptBuilder = (() => {
     const items = Array.isArray(info.items) ? info.items : [];
     const vatInclusive = info.vat_inclusive!=null ? !!info.vat_inclusive : !!settings.vat_inclusive;
     let vatTotal = 0;
-    items.forEach(item=>{
+    items.forEach((item, itemIdx)=>{
+      if(itemIdx > 0) write('-'.repeat(RECEIPT_LINE_WIDTH));
       const nameLines = wrapText(item.name || item.item_name || item.code || 'Item');
       if(!nameLines.length) nameLines.push('Item');
       nameLines.forEach((line, idx)=> write(idx ? `  ${line}` : line));
@@ -986,7 +987,10 @@ const receiptBuilder = (() => {
       if(gift){
         write(`Qty: ${qty}${item.refund ? ' (refund)' : ''}`);
       }else{
-        const qtyLabel = `${item.refund ? '-' : ''}${qty} x ${moneyFmt(rate)}`;
+        // Show qty and total; only include the unit price when qty > 1 so the line isn't redundant
+        const qtyLabel = qty !== 1
+          ? `${item.refund ? '-' : ''}${qty} x ${moneyFmt(rate)}`
+          : `${item.refund ? 'Refund' : 'Qty'}: ${qty}`;
         write(padLine(qtyLabel, moneyFmt(lineTotal)));
       }
     });
@@ -1756,6 +1760,7 @@ function updateZAggWithSale(ctx){
     const cname = (ctx.cashier && (ctx.cashier.name||ctx.cashier.code)) || 'Unknown';
     agg.perCashier[cname] = (agg.perCashier[cname]||0) + Number(ctx.net||0);
     saveSettings();
+    _debouncedSaveTillState(); // keep server copy in sync intraday
   }catch(e){ /* ignore aggregation errors */ }
 }
 
@@ -3182,10 +3187,6 @@ function bindEvents(){
     if (eurApplyBtn) {
       eurApplyBtn.addEventListener('click', applySelectedEurTender);
     }
-    const eurUseExpectedBtn = document.getElementById('eurUseExpectedBtn');
-    if (eurUseExpectedBtn) {
-      eurUseExpectedBtn.addEventListener('click', fillEurWithExpected);
-    }
     const eurOverlayCloseBtn = document.getElementById('eurOverlayCloseBtn');
     if (eurOverlayCloseBtn) {
       eurOverlayCloseBtn.addEventListener('click', hideEurOverlay);
@@ -3454,6 +3455,30 @@ function loadSettings(){
   }catch(_){}
 }
 function saveSettings(){ try{ localStorage.setItem('pos_settings', JSON.stringify(settings)); }catch(e){} }
+
+// ---- Server-side till state persistence ----
+// Saves opening float + intraday z_agg to the server so a browser crash or
+// clear doesn't force the cashier to re-enter the float and lose the day's data.
+async function _saveTillState(){
+  try{
+    await fetch('/api/till/state', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        date: settings.opening_date || todayStr(),
+        till_id: settings.till_number || 'default',
+        opening_float: settings.opening_float || 0,
+        opened_at: settings.till_opened_at || null,
+        z_agg: settings.z_agg || {},
+      }),
+    });
+  }catch(_){}
+}
+let _saveTillStateTimer = null;
+function _debouncedSaveTillState(delayMs = 3000){
+  if(_saveTillStateTimer) clearTimeout(_saveTillStateTimer);
+  _saveTillStateTimer = setTimeout(()=>{ _saveTillStateTimer=null; _saveTillState(); }, delayMs);
+}
 function normalizeMultilineInput(value){
   if(typeof value !== 'string') return '';
   return value.replace(/\r\n/g, '\n');
@@ -4578,12 +4603,24 @@ function renderCheckoutCart() {
       renderCheckoutCart();
       updateCashSection();
     });
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'checkout-remove-btn';
+    removeBtn.title = 'Remove item from checkout';
+    removeBtn.innerHTML = '&times;';
+    removeBtn.addEventListener('click', () => {
+      const idx = cart.findIndex(c => c.item_code === item.item_code && !!c.refund === isRefund);
+      if(idx !== -1) cart.splice(idx, 1);
+      renderCheckoutCart();
+      updateCashSection();
+    });
     const price = document.createElement('div');
     price.className = 'price';
     price.textContent = money(lineTotal);
     row.appendChild(img);
     row.appendChild(details);
     row.appendChild(refundBtn);
+    row.appendChild(removeBtn);
     row.appendChild(price);
     el.appendChild(row);
   });
@@ -5535,6 +5572,32 @@ function showOpeningOverlay(options = {}){
   o.style.display='flex';
   o.style.visibility='visible';
   o.style.opacity='1';
+
+  // If the till has no float for today in localStorage, check server for a saved state
+  // (handles browser crash / clear / new tab without forcing re-entry of the float).
+  if(amt === 0 && forceOpen){
+    const tillId = encodeURIComponent(settings.till_number || 'default');
+    fetch(`/api/till/state?date=${todayStr()}&till_id=${tillId}`)
+      .then(r=>r.ok?r.json():null)
+      .then(data=>{
+        if(!data || !data.found || !(data.opening_float > 0)) return;
+        // Restore float and z_agg from server
+        settings.opening_float = data.opening_float;
+        settings.opening_date  = data.date;
+        settings.till_opened_at = data.opened_at || settings.till_opened_at;
+        if(data.z_agg) settings.z_agg = Object.assign(settings.z_agg||{}, data.z_agg);
+        saveSettings();
+        const restored = data.opening_float;
+        openingDigits = String(Math.round(restored * 100));
+        if(input){
+          input.value = (restored).toFixed(2);
+          // Show a subtle hint so the cashier knows the float was recovered
+          const hint = document.getElementById('openingRestoreHint');
+          if(hint){ hint.textContent = `Previous float £${restored.toFixed(2)} restored — confirm or change`; hint.style.display='block'; }
+        }
+      })
+      .catch(()=>{});
+  }
 }
 function digitsToAmountStr(d){ if(!d) return '0.00'; const n = Math.max(0, parseInt(d,10)||0); const v = (n/100).toFixed(2); return v; }
 function setOpeningFromDigits(){ const input=document.getElementById('openingFloatInput'); if(input){ input.value = digitsToAmountStr(openingDigits); } }
@@ -5593,11 +5656,13 @@ function saveOpeningFloat(){
   settings.till_opened_at = new Date().toISOString();
   settings.till_closed_at = null;
   saveSettings();
+  _saveTillState(); // persist to server immediately so a crash doesn't lose the float
   openingDigits = '';
-  
+  const _rh = document.getElementById('openingRestoreHint'); if(_rh) _rh.style.display='none';
+
   const o = document.getElementById('openingOverlay');
   if(o) o.style.display = 'none';
-  
+
   // Print float receipt
   printFloatReceipt({
     type: 'Opening',
@@ -5897,6 +5962,8 @@ function applyDiscountsToSelected(){
     else if(mode==='set') newRate = Math.max(0, raw);
     it.curr = Number(newRate.toFixed(2));
   });
+  // Clear selection before re-render so items are deselected after the discount is applied
+  list.querySelectorAll('.disc-item-card.disc-selected').forEach(c=>c.classList.remove('disc-selected'));
   renderDiscountItems();
   resetDiscountValueInput();
 }
@@ -6165,8 +6232,8 @@ function showLogin(){
   const e=document.getElementById('loginError');
   if(!o){ err('loginOverlay element missing'); return; }
   neutralizeForeignOverlays();
-  // Ensure other overlays are closed so login isn't obscured
-  const overlays=['searchOverlay','productOverlay','checkoutOverlay','voucherOverlay','menuOverlay','receiptOverlay'];
+  // Ensure all overlays are closed so login isn't obscured
+  const overlays=['searchOverlay','productOverlay','checkoutOverlay','voucherOverlay','menuOverlay','receiptOverlay','invoicesOverlay','cashMenuOverlay','pettyCashOverlay','webOrdersOverlay','eurConverterOverlay'];
   overlays.forEach(id=>{ const el=document.getElementById(id); if(el) el.style.display='none'; });
   o.style.display='flex';
   o.style.visibility='visible';
@@ -6215,7 +6282,7 @@ function showReceiptOverlay(info){ const o=document.getElementById('receiptOverl
   neutralizeForeignOverlays(); if(inv) inv.textContent = info.invoice || 'N/A'; if(ch) ch.textContent = money(info.change || 0);
   // Render barcode for the receipt ID
   try {
-    const barcodeVal = info.invoice || '';
+    const barcodeVal = info.barcode_value || info.invoice || '';
     const svg = document.getElementById('receiptBarcodeSvg');
     const wrap = document.getElementById('receiptBarcodeWrap');
     if(svg && wrap && barcodeVal && typeof JsBarcode !== 'undefined'){
@@ -6485,6 +6552,26 @@ async function printZRead(){
     const decorated = decorateWithReceiptLayout(lines.join('\n'));
     const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
     if(!ok) throw new Error('Receipt agent not ready');
+
+    // Save an archived copy of this Z-read to the server before resetting local state.
+    try{
+      await fetch('/api/till/z-read', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({
+          date: today,
+          till_id: settings.till_number || 'default',
+          opened_at: settings.till_opened_at || null,
+          opening_float: opening,
+          data: {
+            totals, discounts, tenders, perCashier, perGroup, perBrand,
+            petty_cash: pc,
+            expected_cash: expectedCash,
+            branch, lines,
+          },
+        }),
+      });
+    }catch(_){}
 
     try{
       settings.opening_float = 0;
@@ -6794,6 +6881,7 @@ function buildReceiptInfoFromInvoice(inv){
   const balances = normalizeVoucherPrintEntries(inv.voucher_balance_prints);
   const info = {
     invoice: inv.id || inv.erp_docname || '',
+    barcode_value: inv.pos_receipt_id || inv.id || inv.erp_docname || '',
     change: isRefund ? Math.abs(changeRaw||0) : changeRaw,
     total: totalProvided,
     items,

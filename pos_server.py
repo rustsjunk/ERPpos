@@ -1619,6 +1619,35 @@ def _ensure_schema(conn: sqlite3.Connection):
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sale_lines_sale_id ON sale_lines(sale_id)")
     except Exception:
         pass
+    # Till state persistence — opening float + intraday z_agg, survives browser/crash restarts
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS till_state (
+                till_id  TEXT NOT NULL DEFAULT 'default',
+                date     TEXT NOT NULL,
+                opening_float REAL NOT NULL DEFAULT 0,
+                opened_at     TEXT,
+                z_agg         TEXT,
+                saved_at      TEXT NOT NULL,
+                PRIMARY KEY (till_id, date)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS z_reads (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                till_id       TEXT NOT NULL DEFAULT 'default',
+                date          TEXT NOT NULL,
+                opened_at     TEXT,
+                closed_at     TEXT NOT NULL,
+                opening_float REAL,
+                data          TEXT NOT NULL,
+                created_at    TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_z_reads_date ON z_reads(date)")
+        conn.commit()
+    except Exception:
+        pass
 
 def _has_erp_credentials() -> bool:
     return bool(ERPNEXT_URL and API_KEY and API_SECRET)
@@ -3024,6 +3053,130 @@ def api_cashier_logout():
     if removed:
         app.logger.info("Cashier session closed (active=%d)", _active_session_count())
     return jsonify({'status': 'success', 'active_sessions': _active_session_count()})
+
+
+@app.route('/api/till/state', methods=['GET'])
+def api_till_state_get():
+    """Return the persisted till state for today (opening float + z_agg).
+
+    Query params:
+      date    — ISO date (YYYY-MM-DD), defaults to server's today
+      till_id — till identifier (default: 'default')
+    """
+    import datetime as _dt
+    today = request.args.get('date') or _dt.date.today().isoformat()
+    till_id = (request.args.get('till_id') or 'default').strip() or 'default'
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'error': 'db unavailable'}), 503
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT * FROM till_state WHERE till_id=? AND date=?",
+            (till_id, today),
+        ).fetchone()
+        if not row:
+            return jsonify({'found': False}), 200
+        import json as _json2
+        return jsonify({
+            'found': True,
+            'date': row['date'],
+            'till_id': row['till_id'],
+            'opening_float': row['opening_float'],
+            'opened_at': row['opened_at'],
+            'z_agg': _json2.loads(row['z_agg']) if row['z_agg'] else None,
+            'saved_at': row['saved_at'],
+        }), 200
+    except Exception as exc:
+        app.logger.warning('till/state GET failed: %s', exc)
+        return jsonify({'error': str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/till/state', methods=['POST'])
+def api_till_state_save():
+    """Persist the current till state (opening float + intraday z_agg).
+
+    Body (JSON):
+      date          — ISO date (YYYY-MM-DD)
+      till_id       — till identifier (default: 'default')
+      opening_float — float amount in pounds
+      opened_at     — ISO datetime when till was opened
+      z_agg         — full z_agg object (keyed by date)
+    """
+    import datetime as _dt, json as _json2
+    data = request.get_json(silent=True) or {}
+    today = (data.get('date') or _dt.date.today().isoformat()).strip()
+    till_id = (data.get('till_id') or 'default').strip() or 'default'
+    opening_float = float(data.get('opening_float') or 0)
+    opened_at = data.get('opened_at') or None
+    z_agg = data.get('z_agg')
+    saved_at = _dt.datetime.utcnow().isoformat() + 'Z'
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'error': 'db unavailable'}), 503
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO till_state (till_id, date, opening_float, opened_at, z_agg, saved_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(till_id, date) DO UPDATE SET
+                opening_float = excluded.opening_float,
+                opened_at     = excluded.opened_at,
+                z_agg         = excluded.z_agg,
+                saved_at      = excluded.saved_at
+            """,
+            (till_id, today, opening_float, opened_at, _json2.dumps(z_agg) if z_agg is not None else None, saved_at),
+        )
+        conn.commit()
+        return jsonify({'ok': True, 'saved_at': saved_at}), 200
+    except Exception as exc:
+        app.logger.warning('till/state POST failed: %s', exc)
+        return jsonify({'error': str(exc)}), 500
+    finally:
+        conn.close()
+
+
+@app.route('/api/till/z-read', methods=['POST'])
+def api_till_z_read_save():
+    """Save a Z-read snapshot.
+
+    Body (JSON):
+      date          — trading date (YYYY-MM-DD)
+      till_id       — till identifier
+      opened_at     — ISO datetime till was opened
+      opening_float — float in pounds
+      data          — full z-read data object (totals, tenders, cashiers, etc.)
+    """
+    import datetime as _dt, json as _json2
+    body = request.get_json(silent=True) or {}
+    today = (body.get('date') or _dt.date.today().isoformat()).strip()
+    till_id = (body.get('till_id') or 'default').strip() or 'default'
+    opened_at = body.get('opened_at') or None
+    opening_float = float(body.get('opening_float') or 0)
+    data = body.get('data') or {}
+    closed_at = _dt.datetime.utcnow().isoformat() + 'Z'
+    conn = _db_connect()
+    if not conn:
+        return jsonify({'error': 'db unavailable'}), 503
+    try:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO z_reads (till_id, date, opened_at, closed_at, opening_float, data, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (till_id, today, opened_at, closed_at, opening_float, _json2.dumps(data), closed_at),
+        )
+        conn.commit()
+        return jsonify({'ok': True, 'closed_at': closed_at}), 200
+    except Exception as exc:
+        app.logger.warning('till/z-read POST failed: %s', exc)
+        return jsonify({'error': str(exc)}), 500
+    finally:
+        conn.close()
 
 
 def _format_till_segment(till_value: Optional[str]) -> str:
@@ -5240,6 +5393,7 @@ def api_invoice_detail(inv_id: str):
                     pays.append({'method': p.get('method') or p.get('mode_of_payment') or 'Payment', 'amount': float(p.get('amount') or 0), 'ref': p.get('ref')})
                 inv = {
                     'id': row['erp_docname'] or row['sale_id'] or sid,
+                    'pos_receipt_id': row['sale_id'] or '',
                     'created_at': row['created_utc'],
                     'customer': row['customer_id'] or '',
                     'cashier': row['cashier'] or '',
