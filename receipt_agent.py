@@ -541,5 +541,10 @@ if __name__ == "__main__":
         logging.info("Starting receipt agent on http://%s:%d using Windows printer %r", HOST, PORT, PRINTER_NAME)
     else:
         logging.info("Starting receipt agent on http://%s:%d printing to %s@%d", HOST, PORT, SERIAL_PORT, BAUD_RATE)
-    # Avoid Flask reloader to keep serial port exclusive
-    app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+    try:
+        from waitress import serve
+        logging.info("Using waitress WSGI server")
+        serve(app, host=HOST, port=PORT, threads=4)
+    except ImportError:
+        logging.warning("waitress not installed, falling back to Flask dev server")
+        app.run(host=HOST, port=PORT, debug=False, use_reloader=False)

@@ -1697,9 +1697,16 @@ function _ensureZAggToday(){
       totals: { gross:0, net:0, vat_sales:0, vat_returns:0, returns_amount:0, sale_count:0, return_count:0, items_qty:0 },
       discounts: { sales:0, returns:0 },
       tenders: { Cash:0, Card:0, Voucher:0, Other:0 },
+      tendersSales: { Cash:0, Card:0, Voucher:0, Other:0 },
+      tendersReturns: { Cash:0, Card:0, Voucher:0, Other:0 },
       perCashier: {},
       perGroup: {},
-      perBrand: {}
+      perBrand: {},
+      perVat: {},
+      firstReceipt: null,
+      lastReceipt: null,
+      layaways: { new_amount:0, payments:0, cancellations:0 },
+      vouchers: { issued_count:0, issued_amount:0, used_amount:0 },
     };
   }
   return settings.z_agg[d];
@@ -1715,6 +1722,7 @@ function updateZAggWithSale(ctx){
     let vatSales = 0;
     let vatReturns = 0;
     const isReturn = Number(ctx.net||0) < 0;
+    if(!agg.perVat) agg.perVat = {};
     (ctx.lines||[]).forEach(ln=>{
       const qty = Math.abs(Number(ln.qty||0));
       const rate = Number(ln.rate||0);
@@ -1740,6 +1748,17 @@ function updateZAggWithSale(ctx){
       b.qty += (ln.refund?-qty:qty);
       b.amount += lineNet;
       agg.perBrand[brandKey] = b;
+      // Per-VAT-rate breakdown
+      const vatKey = lineVatRate != null ? lineVatRate.toFixed(2) : '0.00';
+      const vr = agg.perVat[vatKey] || { excl:0, vat:0, incl:0 };
+      const lineVatAmt = Math.abs(lineVat);
+      const lineInclAbs = Math.abs(lineNet);
+      const lineExclAbs = settings.vat_inclusive ? (lineInclAbs - lineVatAmt) : lineInclAbs;
+      const lineInclFinal = settings.vat_inclusive ? lineInclAbs : (lineInclAbs + lineVatAmt);
+      vr.excl += lineExclAbs * sign;
+      vr.vat += lineVat;
+      vr.incl += lineInclFinal * sign;
+      agg.perVat[vatKey] = vr;
     });
     agg.totals.gross += gross;
     agg.totals.net += Number(ctx.net||0);
@@ -1751,14 +1770,45 @@ function updateZAggWithSale(ctx){
     agg.totals.vat_sales += vatSales;
     agg.totals.vat_returns += vatReturns;
     // tenders
+    if(!agg.tendersSales) agg.tendersSales = { Cash:0, Card:0, Voucher:0, Other:0 };
+    if(!agg.tendersReturns) agg.tendersReturns = { Cash:0, Card:0, Voucher:0, Other:0 };
     (ctx.payments||[]).forEach(p=>{
       const m = (p.mode_of_payment||'Other');
       const key = (/cash/i.test(m)?'Cash':/card/i.test(m)?'Card':/voucher/i.test(m)?'Voucher':'Other');
-      agg.tenders[key] = (agg.tenders[key]||0) + Number(p.amount||0);
+      const amt = Number(p.amount||0);
+      agg.tenders[key] = (agg.tenders[key]||0) + amt;
+      if(amt >= 0) agg.tendersSales[key] = (agg.tendersSales[key]||0) + amt;
+      else agg.tendersReturns[key] = (agg.tendersReturns[key]||0) + Math.abs(amt);
     });
+    // voucher tracking
+    if(!agg.vouchers) agg.vouchers = { issued_count:0, issued_amount:0, used_amount:0 };
+    (ctx.voucher_issue||[]).forEach(v=>{
+      agg.vouchers.issued_count += 1;
+      agg.vouchers.issued_amount += Number(v.amount||0);
+    });
+    (ctx.payments||[]).forEach(p=>{
+      if(/voucher/i.test(p.mode_of_payment||'') && Number(p.amount||0) > 0){
+        agg.vouchers.used_amount = (agg.vouchers.used_amount||0) + Number(p.amount||0);
+      }
+    });
+    // receipt range tracking
+    if(ctx.receiptName){
+      if(!agg.firstReceipt) agg.firstReceipt = ctx.receiptName;
+      agg.lastReceipt = ctx.receiptName;
+    }
     // cashier totals by net
     const cname = (ctx.cashier && (ctx.cashier.name||ctx.cashier.code)) || 'Unknown';
-    agg.perCashier[cname] = (agg.perCashier[cname]||0) + Number(ctx.net||0);
+    const ctxItemQty = (ctx.lines||[]).reduce((s,l)=>s+Math.abs(Number(l.qty||0)),0);
+    const ctxQtySigned = isReturn ? -ctxItemQty : ctxItemQty;
+    const existingCashier = agg.perCashier[cname];
+    if(!existingCashier){
+      agg.perCashier[cname] = { amount: Number(ctx.net||0), qty: ctxQtySigned };
+    } else if(typeof existingCashier === 'number'){
+      agg.perCashier[cname] = { amount: existingCashier + Number(ctx.net||0), qty: ctxQtySigned };
+    } else {
+      existingCashier.amount += Number(ctx.net||0);
+      existingCashier.qty = (existingCashier.qty||0) + ctxQtySigned;
+    }
     saveSettings();
     _debouncedSaveTillState(); // keep server copy in sync intraday
   }catch(e){ /* ignore aggregation errors */ }
@@ -4992,6 +5042,8 @@ async function completeSaleFromOverlay() {
         net: total,
         payments: payments,
         cashier: currentCashier ? { code: currentCashier.code, name: currentCashier.name } : null,
+        receiptName: data.invoice_name || null,
+        voucher_issue: issuedVouchers.map(v=>({ code: v.code, amount: Number(v.amount||0) })),
         lines: cart.map(i=>({
           qty: i.qty,
           rate: i.rate,
@@ -6484,120 +6536,289 @@ function _pettyCashLines(agg){
   return lines;
 }
 
+// ---- X/Z Read formatting helpers ----
+const _XZ_WIDTH = 42;
+
+function _xzDivider(char='-'){ return char.repeat(_XZ_WIDTH); }
+
+function _xzLine(label, value){
+  const l = String(label);
+  const v = String(value);
+  const gap = _XZ_WIDTH - l.length - v.length;
+  if(gap > 0) return l + ' '.repeat(gap) + v;
+  return l.substring(0, _XZ_WIDTH - v.length - 1) + ' ' + v;
+}
+
+function _xzTableHeader(cols, widths){
+  let row = '';
+  cols.forEach((c,i)=>{
+    if(i===0) row += String(c).padEnd(widths[i]);
+    else row += String(c).padStart(widths[i]);
+  });
+  return row.substring(0, _XZ_WIDTH);
+}
+
+function _xzTableRow(cols, widths){
+  return _xzTableHeader(cols, widths);
+}
+
+function _xzMoney(v){ return money(Number(v||0)); }
+
+function _buildXZReadText(readType, agg, opening, branch){
+  const D = _xzDivider;
+  const L = _xzLine;
+  const totals = Object.assign({gross:0, net:0, vat_sales:0, vat_returns:0, returns_amount:0, sale_count:0, return_count:0, items_qty:0}, agg.totals||{});
+  const discounts = Object.assign({sales:0, returns:0}, agg.discounts||{});
+  const tendersSales = agg.tendersSales || {};
+  const tendersReturns = agg.tendersReturns || {};
+  const perCashier = agg.perCashier || {};
+  const perGroup = agg.perGroup || {};
+  const perBrand = agg.perBrand || {};
+  const perVat = agg.perVat || {};
+  const pc = agg.petty_cash || { in:0, out:0 };
+  const vouchers = agg.vouchers || { issued_count:0, issued_amount:0, used_amount:0 };
+  const layaways = agg.layaways || { new_amount:0, payments:0, cancellations:0 };
+  const cashNetSales = Number(tendersSales.Cash||0);
+  const cashNetReturns = Number(tendersReturns.Cash||0);
+  const cashNet = cashNetSales - cashNetReturns;
+  const expectedCash = opening + cashNet + (pc.in||0) - (pc.out||0);
+  const salesGross = Number(totals.gross||0) + Number(totals.returns_amount||0);
+  const returnsGross = Number(totals.returns_amount||0);
+  const netSales = Number(totals.net||0);
+
+  const lines = [];
+  const push = (...ls) => ls.forEach(l => lines.push(l));
+
+  // Title
+  push(D(), readType === 'Z' ? 'Z-READ' : 'X-READ', D());
+
+  // Branch/Till info
+  if(branch) push(L('Branch:', branch));
+  const tillNum = settings.till_number || '';
+  if(tillNum) push(L('Till:', tillNum));
+
+  // Date/Time + receipt range
+  push(L('Date:', fmtDateTime(new Date())));
+  if(agg.firstReceipt || agg.lastReceipt){
+    push(L('First:', agg.firstReceipt||'-'), L('Last:', agg.lastReceipt||'-'));
+  }
+  push(D());
+
+  // Sales section
+  push(L('Sales', _xzMoney(salesGross)));
+  push(L('Returns', `-${_xzMoney(returnsGross)}`));
+  push(L('Discounts on Sales', _xzMoney(discounts.sales)));
+  push(L('Discounts on Returns', _xzMoney(discounts.returns)));
+  push(D());
+
+  // Net Sales
+  push(L('Net Sales', _xzMoney(netSales)));
+  push(D());
+
+  // Layaways
+  push(L('Layaways', _xzMoney(layaways.new_amount)));
+  push(L('Layaway Payments', _xzMoney(layaways.payments)));
+  push(L('Layaway Cancellations', _xzMoney(layaways.cancellations)));
+  push(D());
+
+  // Vouchers
+  push(L('Vouchers Issued', String(vouchers.issued_count||0) + (vouchers.issued_amount>0 ? ' ('+_xzMoney(vouchers.issued_amount)+')' : '')));
+  push(L('Vouchers Used', _xzMoney(vouchers.used_amount)));
+  push(D());
+
+  // Totals
+  push('Totals');
+  push(L('  Transactions', `${totals.sale_count} sales  ${totals.return_count} rtn`));
+  push(L('  Items Sold', String(Math.abs(Number(totals.items_qty||0)))));
+  push(L('  Gross', _xzMoney(totals.gross)));
+  push(D());
+
+  // VAT Summary
+  push('VAT Summary');
+  const vatW = [8, 11, 9, 10]; // Rate, Ex-VAT, VAT, Inc-VAT
+  push(_xzTableHeader(['Rate','Ex-VAT','VAT','Inc-VAT'], vatW));
+  const vatRateKeys = Object.keys(perVat).sort((a,b)=>Number(b)-Number(a));
+  let vatTotal = 0;
+  if(vatRateKeys.length){
+    vatRateKeys.forEach(rk=>{
+      const vr = perVat[rk];
+      vatTotal += Number(vr.vat||0);
+      push(_xzTableRow([
+        `${Number(rk).toFixed(2)}%`,
+        _xzMoney(vr.excl),
+        _xzMoney(vr.vat),
+        _xzMoney(vr.incl)
+      ], vatW));
+    });
+  } else {
+    const vatAmt = Number(totals.vat_sales||0) - Number(totals.vat_returns||0);
+    vatTotal = vatAmt;
+    const rk = settings.vat_rate != null ? Number(settings.vat_rate).toFixed(2) : '20.00';
+    const inclAmt = netSales;
+    const exclAmt = inclAmt - vatAmt;
+    push(_xzTableRow([`${rk}%`, _xzMoney(exclAmt), _xzMoney(vatAmt), _xzMoney(inclAmt)], vatW));
+  }
+  push(D());
+  push(L('VAT Total', _xzMoney(vatTotal)));
+  push(D());
+
+  // Cashier Summary
+  push('Cashier Summary');
+  const cashierEntries = Object.entries(perCashier).filter(([_,v])=>{
+    const amt = typeof v === 'number' ? Math.abs(v) : Math.abs(Number((v&&v.amount)||0));
+    return amt > 0.0001;
+  }).sort((a,b)=>{
+    const av = typeof a[1]==='number'?Math.abs(a[1]):Math.abs(Number((a[1]&&a[1].amount)||0));
+    const bv = typeof b[1]==='number'?Math.abs(b[1]):Math.abs(Number((b[1]&&b[1].amount)||0));
+    return bv - av;
+  });
+  const cW = [22, 8, 12];
+  push(_xzTableHeader(['Name','Qty','Value'], cW));
+  if(cashierEntries.length){
+    cashierEntries.forEach(([name, v])=>{
+      const amt = typeof v === 'number' ? v : Number((v&&v.amount)||0);
+      const qty = typeof v === 'number' ? '' : String(Math.abs(Number((v&&v.qty)||0)));
+      push(_xzTableRow([name, qty, _xzMoney(amt)], cW));
+    });
+  } else { push('  No data'); }
+  push(D());
+
+  // Item Group Summary
+  push('Item Group Summary');
+  const groupEntries = Object.entries(perGroup)
+    .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001||Math.abs(Number(v.qty||0))>0.0001))
+    .sort((a,b)=>Math.abs(Number(b[1].amount||0))-Math.abs(Number(a[1].amount||0)));
+  const gW = [22, 8, 12];
+  push(_xzTableHeader(['Group','Qty','Value'], gW));
+  if(groupEntries.length){
+    groupEntries.forEach(([name,v])=>push(_xzTableRow([name, String(Math.abs(Number(v.qty||0))), _xzMoney(v.amount)], gW)));
+  } else { push('  No data'); }
+  push(D());
+
+  // Brand Summary
+  push('Brand Summary');
+  const brandEntries = Object.entries(perBrand)
+    .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001||Math.abs(Number(v.qty||0))>0.0001))
+    .sort((a,b)=>Math.abs(Number(b[1].amount||0))-Math.abs(Number(a[1].amount||0)));
+  const bW = [22, 8, 12];
+  push(_xzTableHeader(['Brand','Qty','Value'], bW));
+  if(brandEntries.length){
+    brandEntries.forEach(([name,v])=>push(_xzTableRow([name, String(Math.abs(Number(v.qty||0))), _xzMoney(v.amount)], bW)));
+  } else { push('  No data'); }
+  push(D());
+
+  // Tenders Report
+  push('Tenders Report');
+  const tenderTypes = ['Cash','Card','Voucher','Other'];
+  tenderTypes.forEach(tk=>{
+    const sale = Number(tendersSales[tk]||0);
+    const ret = Number(tendersReturns[tk]||0);
+    if(sale > 0.0001 || ret > 0.0001){
+      push(L(tk, _xzMoney(sale)));
+      push(L(`${tk} Refund`, ret > 0.0001 ? `-${_xzMoney(ret)}` : _xzMoney(0)));
+    }
+  });
+  // Petty cash
+  if(pc.in || pc.out){
+    push(L('Petty Cash In', _xzMoney(pc.in||0)));
+    push(L('Petty Cash Out', `-${_xzMoney(pc.out||0)}`));
+  }
+  push(D());
+
+  // In Drawer / Sub Total
+  push(L('In Drawer', _xzMoney(expectedCash)));
+  push(D());
+  push(L('Sub Total', _xzMoney(totals.gross)));
+  push(D());
+
+  return lines.join('\n');
+}
+
+function showXZReadModal(readType, textContent, onPrint){
+  const overlay = document.getElementById('xzReadOverlay');
+  const titleEl = document.getElementById('xzReadTitle');
+  const bodyEl = document.getElementById('xzReadBody');
+  const printBtn = document.getElementById('xzReadPrintBtn');
+  const closeBtn = document.getElementById('xzReadCloseBtn');
+  if(!overlay || !bodyEl || !printBtn || !closeBtn) return;
+  if(titleEl) titleEl.textContent = readType === 'Z' ? 'Z-Read' : 'X-Read';
+  bodyEl.textContent = textContent;
+  overlay.style.display = 'flex';
+  // Replace buttons to clear old listeners
+  const newPrintBtn = printBtn.cloneNode(true);
+  printBtn.parentNode.replaceChild(newPrintBtn, printBtn);
+  newPrintBtn.addEventListener('click', async ()=>{
+    newPrintBtn.disabled = true;
+    newPrintBtn.textContent = 'Printing...';
+    try{ await onPrint(); } catch(_){}
+    newPrintBtn.disabled = false;
+    newPrintBtn.textContent = 'Print';
+  });
+  const newCloseBtn = closeBtn.cloneNode(true);
+  closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
+  newCloseBtn.addEventListener('click', ()=>{ overlay.style.display='none'; });
+}
+
+// ---- End X/Z Read helpers ----
+
 async function printZRead(){
   try{
     const opening = Number(settings.opening_float||0);
-    const cashSales = Number(settings.net_cash||0);
-    const cardSales = Number(settings.net_card||0);
-    const voucher = Number(settings.net_voucher||0);
     const branch = settings.branch_name || '';
     const today = todayStr();
-    const agg = (settings.z_agg && settings.z_agg[today]) || { totals:{}, discounts:{}, tenders:{}, perCashier:{}, perGroup:{} };
-    const totals = Object.assign({gross:0, net:0, vat_sales:0, vat_returns:0, returns_amount:0, sale_count:0, return_count:0, items_qty:0}, agg.totals||{});
-    const discounts = Object.assign({sales:0, returns:0}, agg.discounts||{});
-    const tenders = Object.assign({Cash:cashSales, Card:cardSales, Voucher:voucher, Other:0}, agg.tenders||{});
-    const perCashier = agg.perCashier || {};
-    const perGroup = agg.perGroup || {};
-    const perBrand = agg.perBrand || {};
-    const tenderLines = Object.entries(tenders)
-      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
-      .map(([k,v])=>`  ${k}: ${money(v)}`);
-    const cashierLines = Object.entries(perCashier)
-      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
-      .map(([k,v])=>`  ${k}: ${money(v)}`);
-    const groupLines = Object.entries(perGroup)
-      .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
-      .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
-    const brandLines = Object.entries(perBrand)
-      .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
-      .sort((a,b)=>Number(b[1].amount||0)-Number(a[1].amount||0))
-      .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
-    const pc = agg.petty_cash || { in:0, out:0 };
-    const expectedCash = opening + cashSales + (pc.in||0) - (pc.out||0);
-    const lines = [
-      'Z-Read',
-      `Date: ${fmtDateTime(new Date())}`,
-      `Branch: ${branch}`,
-      `Till: ${settings.till_number||''}`,
-      '',
-      'Session Totals',
-      `  Opening Float: ${money(opening)}`,
-      `  Cash (net): ${money(cashSales)}`,
-      `  Card (net): ${money(cardSales)}`,
-      `  Vouchers Redeemed: ${money(voucher)}`,
-      `  Gross Sales: ${money(totals.gross)}`,
-      `  Net Sales: ${money(totals.net)}`,
-      `  VAT Sales: ${money(totals.vat_sales)}`,
-      `  VAT Returns: ${money(totals.vat_returns)}`,
-      `  Returns Amount: ${money(totals.returns_amount)}`,
-      `  Transactions: ${totals.sale_count} sales, ${totals.return_count} returns`,
-      `  Items Sold: ${Number(totals.items_qty||0)}`,
-      `  Discounts Sales: ${money(discounts.sales)}`,
-      `  Discounts Returns: ${money(discounts.returns)}`,
-      '',
-      'By Tender',
-      ...tenderLines,
-      ..._pettyCashLines(agg),
-      `  Expected Cash in Drawer: ${money(expectedCash)}`,
-      '',
-      'By Cashier',
-      ...(cashierLines.length ? cashierLines : ['  No data']),
-      '',
-      'By Brand',
-      ...(brandLines.length ? brandLines : ['  No data']),
-      '',
-      'By Item Group',
-      ...(groupLines.length ? groupLines : ['  No data'])
-    ];
-    const decorated = decorateWithReceiptLayout(lines.join('\n'));
-    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
-    if(!ok) throw new Error('Receipt agent not ready');
+    const agg = (settings.z_agg && settings.z_agg[today]) || { totals:{}, discounts:{}, tenders:{}, tendersSales:{}, tendersReturns:{}, perCashier:{}, perGroup:{} };
+    const text = _buildXZReadText('Z', agg, opening, branch);
 
-    // Save an archived copy of this Z-read to the server before resetting local state.
-    try{
-      await fetch('/api/till/z-read', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          date: today,
-          till_id: settings.till_number || 'default',
-          opened_at: settings.till_opened_at || null,
-          opening_float: opening,
-          data: {
-            totals, discounts, tenders, perCashier, perGroup, perBrand,
-            petty_cash: pc,
-            expected_cash: expectedCash,
-            branch, lines,
-          },
-        }),
-      });
-    }catch(_){}
+    showXZReadModal('Z', text, async ()=>{
+      const decorated = decorateWithReceiptLayout(text);
+      const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
+      if(!ok) throw new Error('Receipt agent not ready');
 
-    try{
-      settings.opening_float = 0;
-      settings.opening_date = '';
-      settings.net_cash = 0;
-      settings.net_card = 0;
-      settings.net_voucher = 0;
-      settings.net_cash_change = 0;
-      settings.till_open = false;
-      settings.till_closed_at = new Date().toISOString();
-      const d = todayStr();
-      if(settings.z_agg && settings.z_agg[d]) delete settings.z_agg[d];
-      // petty cash entries are included in z_agg and cleared above
-      saveSettings();
-    }catch(_){ }
+      // Save archived copy
+      try{
+        const pc = agg.petty_cash || {};
+        const expectedCash = opening + Number((agg.tendersSales&&agg.tendersSales.Cash)||agg.tenders&&agg.tenders.Cash||0) - Number((agg.tendersReturns&&agg.tendersReturns.Cash)||0) + Number(pc.in||0) - Number(pc.out||0);
+        await fetch('/api/till/z-read', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({
+            date: today,
+            till_id: settings.till_number || 'default',
+            opened_at: settings.till_opened_at || null,
+            opening_float: opening,
+            data: { ...agg, expected_cash: expectedCash, branch, text },
+          }),
+        });
+      }catch(_){}
 
-    try{
-      const cashMenu = document.getElementById('cashMenuOverlay'); if(cashMenu) cashMenu.style.display='none';
-      const closingOverlay = document.getElementById('closingOverlay'); if(closingOverlay) closingOverlay.style.display='none';
-      const closingMenu = document.getElementById('closingMenuOverlay'); if(closingMenu) closingMenu.style.display='none';
-    }catch(_){ }
-    showOpeningOverlay({ force:true });
+      // Reset till state
+      try{
+        settings.opening_float = 0;
+        settings.opening_date = '';
+        settings.net_cash = 0;
+        settings.net_card = 0;
+        settings.net_voucher = 0;
+        settings.net_cash_change = 0;
+        settings.till_open = false;
+        settings.till_closed_at = new Date().toISOString();
+        const d = todayStr();
+        if(settings.z_agg && settings.z_agg[d]) delete settings.z_agg[d];
+        saveSettings();
+      }catch(_){ }
+
+      try{
+        const cashMenu = document.getElementById('cashMenuOverlay'); if(cashMenu) cashMenu.style.display='none';
+        const closingOverlay = document.getElementById('closingOverlay'); if(closingOverlay) closingOverlay.style.display='none';
+        const closingMenu = document.getElementById('closingMenuOverlay'); if(closingMenu) closingMenu.style.display='none';
+        const xzOverlay = document.getElementById('xzReadOverlay'); if(xzOverlay) xzOverlay.style.display='none';
+      }catch(_){ }
+      showOpeningOverlay({ force:true });
+    });
+
     return true;
   }catch(e){
     err('z-read print failed', e);
-    alert('Failed to print Z-read');
+    alert('Failed to show Z-read');
     return false;
   }
 }
@@ -6605,66 +6826,18 @@ async function printZRead(){
 async function printXRead(){
   try{
     const opening = Number(settings.opening_float||0);
-    const cashSales = Number(settings.net_cash||0);
-    const cardSales = Number(settings.net_card||0);
-    const voucher = Number(settings.net_voucher||0);
     const branch = settings.branch_name || '';
     const today = todayStr();
-    const agg = (settings.z_agg && settings.z_agg[today]) || { totals:{}, discounts:{}, tenders:{}, perCashier:{}, perGroup:{} };
-    const totals = Object.assign({gross:0, net:0, vat_sales:0, vat_returns:0, returns_amount:0, sale_count:0, return_count:0, items_qty:0}, agg.totals||{});
-    const discounts = Object.assign({sales:0, returns:0}, agg.discounts||{});
-    const tenders = Object.assign({Cash:cashSales, Card:cardSales, Voucher:voucher, Other:0}, agg.tenders||{});
-    const perCashier = agg.perCashier || {};
-    const perGroup = agg.perGroup || {};
-    const tenderLines = Object.entries(tenders)
-      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
-      .map(([k,v])=>`  ${k}: ${money(v)}`);
-    const cashierLines = Object.entries(perCashier)
-      .filter(([_,v])=>Math.abs(Number(v||0))>0.0001)
-      .map(([k,v])=>`  ${k}: ${money(v)}`);
-    const groupLines = Object.entries(perGroup)
-      .filter(([_,v])=>v && (Math.abs(Number(v.amount||0))>0.0001 || Math.abs(Number(v.qty||0))>0.0001))
-      .map(([k,v])=>`  ${k} (qty ${Number(v.qty||0)}): ${money(Number(v.amount||0))}`);
-    const pc = agg.petty_cash || { in:0, out:0 };
-    const expectedCash = opening + cashSales + (pc.in||0) - (pc.out||0);
-    const lines = [
-      'X-Read',
-      `Date: ${fmtDateTime(new Date())}`,
-      `Branch: ${branch}`,
-      `Till: ${settings.till_number||''}`,
-      '',
-      'Session Totals',
-      `  Opening Float: ${money(opening)}`,
-      `  Cash (net): ${money(cashSales)}`,
-      `  Card (net): ${money(cardSales)}`,
-      `  Vouchers Redeemed: ${money(voucher)}`,
-      `  Gross Sales: ${money(totals.gross)}`,
-      `  Net Sales: ${money(totals.net)}`,
-      `  VAT Sales: ${money(totals.vat_sales)}`,
-      `  VAT Returns: ${money(totals.vat_returns)}`,
-      `  Returns: ${money(totals.returns_amount)}`,
-      `  Transactions: ${totals.sale_count} sales, ${totals.return_count} returns`,
-      `  Items Sold: ${Number(totals.items_qty||0)}`,
-      `  Discounts Sales: ${money(discounts.sales)}`,
-      `  Discounts Returns: ${money(discounts.returns)}`,
-      '',
-      'By Tender',
-      ...tenderLines,
-      ..._pettyCashLines(agg),
-      `  Expected Cash in Drawer: ${money(expectedCash)}`,
-      '',
-      'By Cashier',
-      ...(cashierLines.length ? cashierLines : ['  No data']),
-      '',
-      'By Item Group',
-      ...(groupLines.length ? groupLines : ['  No data'])
-    ];
-    const decorated = decorateWithReceiptLayout(lines.join('\n'));
-    const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
-    if(!ok) throw new Error('Receipt agent not ready');
+    const agg = (settings.z_agg && settings.z_agg[today]) || { totals:{}, discounts:{}, tenders:{}, tendersSales:{}, tendersReturns:{}, perCashier:{}, perGroup:{} };
+    const text = _buildXZReadText('X', agg, opening, branch);
+    showXZReadModal('X', text, async ()=>{
+      const decorated = decorateWithReceiptLayout(text);
+      const ok = await sendTextToReceiptAgent(decorated, { line_feeds: 5, cut: true });
+      if(!ok) throw new Error('Receipt agent not ready');
+    });
   }catch(e){
     err('x-read print failed', e);
-    alert('Failed to print X-read');
+    alert('Failed to show X-read');
   }
 }
 

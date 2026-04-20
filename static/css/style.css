@@ -674,6 +674,27 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 /* Receipt modal tweaks */
 .receipt-modal { width: clamp(280px, 95vw, 600px); }
 
+/* X/Z Read viewer modal */
+.xz-read-modal { width: clamp(320px, 60vw, 680px); }
+.xz-read-body {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    white-space: pre;
+    background: #f8f8f8;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    max-height: 65vh;
+    overflow-y: auto;
+}
+body.dark-mode .xz-read-body {
+    background: #1e1e1e;
+    border-color: #444;
+    color: #e0e0e0;
+}
+
 /* 4:3 aspect ratio and smaller screen optimizations (1080x768, 800x600, etc.) */
 @media (max-aspect-ratio: 16 / 12) {
     /* Reduce padding and gaps on 4:3 screens */
