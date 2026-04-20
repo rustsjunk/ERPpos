@@ -3,10 +3,9 @@ import subprocess
 import sys
 from pos_server import app, start_background_services
 
+
 def start_receipt_agent():
     if os.getenv('RECEIPT_AGENT_AUTO_START', '0') != '1':
-        return None
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         return None
     script_path = os.path.join(os.path.dirname(__file__), 'receipt_agent.py')
     if not os.path.exists(script_path):
@@ -19,8 +18,6 @@ def start_receipt_agent():
 
 def start_till_agent():
     if os.getenv('TILL_AGENT_AUTO_START', '0') != '1':
-        return None
-    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
         return None
     script_path = os.path.join(os.path.dirname(__file__), 'till_agent.py')
     if not os.path.exists(script_path):
@@ -41,14 +38,18 @@ def start_till_agent():
 
 
 if __name__ == '__main__':
-    debug = os.getenv('FLASK_DEBUG', '0') == '1'
+    from waitress import serve
+
     port = int(os.getenv('PORT', '5000'))
     host = os.getenv('HOST', '0.0.0.0')
+    threads = int(os.getenv('WAITRESS_THREADS', '4'))
+
     start_background_services()
     agent_proc = start_receipt_agent()
     till_agent_proc = start_till_agent()
     try:
-        app.run(host=host, port=port, debug=debug)
+        print(f" * Serving erppos on http://{host}:{port} (waitress, {threads} threads)")
+        serve(app, host=host, port=port, threads=threads)
     finally:
         for proc in (agent_proc, till_agent_proc):
             if proc:

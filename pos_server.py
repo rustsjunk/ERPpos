@@ -38,7 +38,7 @@ def _env_string(name: str, default: Optional[str] = None) -> Optional[str]:
     return raw
 
 app = Flask(__name__)
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0  # disable static caching during development
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 3600  # 1-hour static file cache for production
 
 _LOG_LEVEL_NAME = (os.getenv('POS_LOG_LEVEL') or 'INFO').strip().upper()
 try:
