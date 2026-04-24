@@ -29,6 +29,13 @@ ERP_VOUCHER_REDEEM_CHILD = os.environ.get(
 )
 ERP_VOUCHER_EVENT_ENDPOINT = os.environ.get("ERP_VOUCHER_EVENT_ENDPOINT", "/api/pos/voucher_event")
 
+# POS_DEFAULT_VAT_RATE — fallback VAT rate (%) stored on items whose ERPNext tax template is blank.
+# Set to 20 for UK standard rate, or leave unset to leave vat_rate as NULL (POS JS uses its own default).
+try:
+    _DEFAULT_VAT_RATE: Optional[float] = float(os.environ.get("POS_DEFAULT_VAT_RATE", ""))
+except (ValueError, TypeError):
+    _DEFAULT_VAT_RATE = None
+
 # Track docs we repeatedly fail to fetch so we can fall back without noisy retries
 UNFETCHABLE_ITEM_DOCS: Set[str] = set()
 _FULL_SYNC_FAST = False
@@ -86,6 +93,20 @@ def _ensure_item_extras(conn: sqlite3.Connection):
         conn.execute(sql)
     if alters:
         conn.commit()
+    # One-time repair: fill in item_group and brand on variants that have NULL values
+    # but whose parent template has the correct value.  This heals stale synced data
+    # without needing a full re-sync.
+    try:
+        conn.execute("""
+            UPDATE items SET
+                item_group = COALESCE(item_group, (SELECT item_group FROM items p WHERE p.item_id = items.parent_id)),
+                brand       = COALESCE(brand,      (SELECT brand      FROM items p WHERE p.item_id = items.parent_id))
+            WHERE parent_id IS NOT NULL
+              AND (item_group IS NULL OR brand IS NULL)
+        """)
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _ensure_customer_table(conn: sqlite3.Connection):
@@ -156,8 +177,8 @@ def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]):
     ON CONFLICT(item_id) DO UPDATE SET
       parent_id=excluded.parent_id,
       name=excluded.name,
-      brand=excluded.brand,
-      item_group=excluded.item_group,
+      brand=COALESCE(excluded.brand, items.brand),
+      item_group=COALESCE(excluded.item_group, items.item_group),
       custom_style_code=excluded.custom_style_code,
       custom_simple_colour=excluded.custom_simple_colour,
       vat_rate=COALESCE(excluded.vat_rate, items.vat_rate),
@@ -1353,6 +1374,20 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE
         _ingest_child_barcodes(conn, d.get("barcodes"), d["name"])
     if variants_to_hydrate and not _FULL_SYNC_FAST:
         _hydrate_variant_attributes(conn, variants_to_hydrate, prefetched_docs=prefetched_item_docs)
+    # Propagate item_group and brand from template to variants that have NULL values.
+    # ERPNext often omits these fields on variant items in the list API response.
+    if variants_to_hydrate:
+        parent_ids = list({p for _, p in variants_to_hydrate if p})
+        if parent_ids:
+            placeholders = ",".join("?" * len(parent_ids))
+            conn.execute(f"""
+                UPDATE items SET
+                    item_group = COALESCE(item_group, (SELECT item_group FROM items p WHERE p.item_id = items.parent_id)),
+                    brand       = COALESCE(brand,      (SELECT brand      FROM items p WHERE p.item_id = items.parent_id))
+                WHERE parent_id IN ({placeholders})
+                  AND (item_group IS NULL OR brand IS NULL)
+            """, parent_ids)
+            conn.commit()
     if item_rows and not _FULL_SYNC_FAST:
         _hydrate_item_tax_rates(conn, item_rows)
     _cursor_set(conn, "Item", data[-1]["modified"], data[-1]["name"])
@@ -1563,15 +1598,25 @@ def _hydrate_item_tax_rates(conn: sqlite3.Connection, item_rows: List[Dict[str, 
             except Exception as exc:
                 print(f"Failed to fetch tax info for {item_id}: {exc}", file=sys.stderr)
                 vat_rate = None
+        # If ERPNext returned no tax data, try inheriting from parent template,
+        # then fall back to POS_DEFAULT_VAT_RATE (if configured).
+        if vat_rate is None and parent_id:
+            try:
+                row_parent = conn.execute(
+                    "SELECT vat_rate FROM items WHERE item_id=?", (parent_id,)
+                ).fetchone()
+                if row_parent and row_parent["vat_rate"] is not None:
+                    vat_rate = float(row_parent["vat_rate"])
+            except Exception:
+                pass
+        if vat_rate is None:
+            vat_rate = _DEFAULT_VAT_RATE
         try:
             if vat_rate is not None:
-                conn.execute("UPDATE items SET vat_rate=? WHERE item_id=?", (vat_rate, item_id))
-            elif parent_id:
-                conn.execute("""
-                    UPDATE items
-                    SET vat_rate = COALESCE(vat_rate, (SELECT vat_rate FROM items WHERE item_id=?))
-                    WHERE item_id=? AND vat_rate IS NULL
-                """, (parent_id, item_id))
+                conn.execute(
+                    "UPDATE items SET vat_rate=? WHERE item_id=? AND (vat_rate IS NULL OR vat_rate != ?)",
+                    (vat_rate, item_id, vat_rate),
+                )
         except Exception:
             continue
     conn.commit()

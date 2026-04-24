@@ -1737,7 +1737,7 @@ function updateZAggWithSale(ctx){
       else { discSales += lineDisc; vatSales += lineVat; }
       gross += Math.abs(lineGrossAbs) * (ln.refund?-1:1);
       itemsQty += qty * (ln.refund?-1:1);
-      const groupKey = ln.item_group || ln.brand || 'Ungrouped';
+      const groupKey = ln.item_group || 'Ungrouped';
       const g = agg.perGroup[groupKey] || { qty:0, amount:0 };
       g.qty += (ln.refund?-qty:qty);
       g.amount += lineNet;
@@ -6602,6 +6602,7 @@ function _buildXZReadText(readType, agg, opening, branch){
   if(agg.firstReceipt || agg.lastReceipt){
     push(L('First:', agg.firstReceipt||'-'), L('Last:', agg.lastReceipt||'-'));
   }
+  push(L('Opening Float', _xzMoney(opening)));
   push(D());
 
   // Sales section
@@ -6718,10 +6719,10 @@ function _buildXZReadText(readType, agg, opening, branch){
       push(L(`${tk} Refund`, ret > 0.0001 ? `-${_xzMoney(ret)}` : _xzMoney(0)));
     }
   });
-  // Petty cash
+  // Cash paid in/out from admin
   if(pc.in || pc.out){
-    push(L('Petty Cash In', _xzMoney(pc.in||0)));
-    push(L('Petty Cash Out', `-${_xzMoney(pc.out||0)}`));
+    push(L('Paid In', _xzMoney(pc.in||0)));
+    push(L('Paid Out', `-${_xzMoney(pc.out||0)}`));
   }
   push(D());
 
@@ -7532,6 +7533,20 @@ async function layawayConfirmCreate() {
     const confirmedChange = d.change || 0;
     const confirmedDeposit = lay.paid || 0;
 
+    // Record in Z-read aggregates
+    try {
+      const agg = _ensureZAggToday();
+      if(!agg.layaways) agg.layaways = { new_amount:0, payments:0, cancellations:0 };
+      agg.layaways.new_amount = (agg.layaways.new_amount || 0) + (lay.total || 0);
+      if(confirmedDeposit > 0.005){
+        agg.layaways.payments = (agg.layaways.payments || 0) + confirmedDeposit;
+        const tKey = /cash/i.test(method)?'Cash':/card/i.test(method)?'Card':/voucher/i.test(method)?'Voucher':'Other';
+        if(!agg.tendersSales) agg.tendersSales = { Cash:0, Card:0, Voucher:0, Other:0 };
+        agg.tendersSales[tKey] = (agg.tendersSales[tKey]||0) + confirmedDeposit;
+      }
+      saveSettings();
+    } catch(_) {}
+
     // Refresh badge
     layawayRefreshBadge();
 
@@ -8002,6 +8017,13 @@ function showLayawayCancelConfirm(lay, cashierCode) {
       });
       const d = await r.json();
       if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
+      // Record cancellation in Z-read aggregates
+      try {
+        const agg = _ensureZAggToday();
+        if(!agg.layaways) agg.layaways = { new_amount:0, payments:0, cancellations:0 };
+        agg.layaways.cancellations = (agg.layaways.cancellations || 0) + refundAmount;
+        saveSettings();
+      } catch(_) {}
       layawayRefreshBadge();
       showLayawayCancelledScreen(lay, refundAmount);
     } catch (e) {
@@ -8212,6 +8234,16 @@ function showLayawayPaymentConfirm(lay, tendered, actualPayment, method, change,
       if (!r.ok || d.status !== 'success') throw new Error(d.message || 'Failed');
       const confirmedChange  = d.change || 0;
       const confirmedAmount  = d.amount_applied || actualPayment;
+      // Record layaway payment in Z-read aggregates
+      try {
+        const agg = _ensureZAggToday();
+        if(!agg.layaways) agg.layaways = { new_amount:0, payments:0, cancellations:0 };
+        agg.layaways.payments = (agg.layaways.payments || 0) + confirmedAmount;
+        const tKey = /cash/i.test(method)?'Cash':/card/i.test(method)?'Card':/voucher/i.test(method)?'Voucher':'Other';
+        if(!agg.tendersSales) agg.tendersSales = { Cash:0, Card:0, Voucher:0, Other:0 };
+        agg.tendersSales[tKey] = (agg.tendersSales[tKey]||0) + confirmedAmount;
+        saveSettings();
+      } catch(_) {}
       layawayRefreshBadge();
       if (d.auto_completed) {
         showLayawayCompletionScreen(d.layaway, confirmedAmount, method, confirmedChange);

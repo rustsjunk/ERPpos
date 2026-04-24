@@ -20,6 +20,31 @@ import frappe
 from frappe import _
 from frappe.utils import nowdate
 
+# ── VAT template configuration ────────────────────────────────────────────────
+# Set these in your ERPNext site's environment (site_config.json or .env):
+#
+#   ERP_VAT_TEMPLATE_20  — name of the Sales Taxes and Charges Template for 20% VAT
+#                          e.g. "Standard Rate 20%"
+#   ERP_VAT_TEMPLATE_0   — name of the Sales Taxes and Charges Template for 0% VAT
+#                          e.g. "Zero Rate 0%"
+#   ERP_SALES_TAX_TEMPLATE — fallback invoice-level template when items have mixed rates
+#   ERP_VAT_ACCOUNT        — GL account used to post "Actual" tax rows when no template
+#                            is configured (e.g. "VAT - ABC")
+#
+# When ERP_VAT_TEMPLATE_20 / ERP_VAT_TEMPLATE_0 are set, every invoice item whose
+# payload carries vat_rate=20 or vat_rate=0 will be stamped with the corresponding
+# item_tax_template, and the invoice-level taxes_and_charges will be set automatically
+# when all items share the same rate.
+_VAT_TEMPLATE_MAP: Dict[str, str] = {}
+_t20 = os.environ.get("ERP_VAT_TEMPLATE_20", "").strip()
+_t0  = os.environ.get("ERP_VAT_TEMPLATE_0",  "").strip()
+if _t20:
+    _VAT_TEMPLATE_MAP["20"] = _t20
+    _VAT_TEMPLATE_MAP["20.0"] = _t20
+if _t0:
+    _VAT_TEMPLATE_MAP["0"]  = _t0
+    _VAT_TEMPLATE_MAP["0.0"] = _t0
+
 
 @frappe.whitelist()
 def pos_ingest(payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -124,6 +149,42 @@ def _build_invoice(
 ) -> Any:
     """Construct (but do not insert/submit) a Sales Invoice frappe doc."""
     si = frappe.new_doc("Sales Invoice")
+
+    fallback_template = os.environ.get("ERP_SALES_TAX_TEMPLATE", "").strip()
+    vat_account       = os.environ.get("ERP_VAT_ACCOUNT", "").strip()
+
+    # Work out which item_tax_template to stamp on each item and derive the
+    # invoice-level taxes_and_charges from the set of rates actually present.
+    item_rows: List[Dict[str, Any]] = []
+    rate_templates_seen: set = set()
+    for it in items:
+        row: Dict[str, Any] = {
+            "item_code": it["item_code"],
+            "qty": it["qty"],
+            "rate": it["rate"],
+        }
+        # Explicit template wins over vat_rate lookup
+        if it.get("item_tax_template"):
+            row["item_tax_template"] = it["item_tax_template"]
+            rate_templates_seen.add(it["item_tax_template"])
+        elif it.get("vat_rate") is not None and _VAT_TEMPLATE_MAP:
+            key = str(float(it["vat_rate"]))
+            # normalise e.g. "20.0" → "20", "0.0" → "0"
+            key_int = key.rstrip("0").rstrip(".")
+            tpl = _VAT_TEMPLATE_MAP.get(key_int) or _VAT_TEMPLATE_MAP.get(key)
+            if tpl:
+                row["item_tax_template"] = tpl
+                rate_templates_seen.add(tpl)
+        item_rows.append(row)
+
+    # Determine invoice-level taxes_and_charges:
+    # · single distinct template → use it
+    # · multiple templates / none → use the configured fallback
+    if len(rate_templates_seen) == 1:
+        invoice_template = next(iter(rate_templates_seen))
+    else:
+        invoice_template = fallback_template
+
     doc_fields: Dict[str, Any] = {
         "customer": customer,
         "is_pos": 1,
@@ -135,6 +196,8 @@ def _build_invoice(
             or _voucher_code_concat(payload.get("voucher_redeem"))
         ),
     }
+    if invoice_template:
+        doc_fields["taxes_and_charges"] = invoice_template
     if is_return and return_against_receipt_id:
         original_inv = frappe.db.get_value(
             "Sales Invoice",
@@ -144,17 +207,25 @@ def _build_invoice(
         if original_inv:
             doc_fields["return_against"] = original_inv
     si.update(doc_fields)
-    for it in items:
-        si.append("items", {
-            "item_code": it["item_code"],
-            "qty": it["qty"],
-            "rate": it["rate"],
-        })
+    for row in item_rows:
+        si.append("items", row)
     for p in payments:
         si.append("payments", {
             "mode_of_payment": p["mode_of_payment"],
             "amount": p["amount"],
         })
+    # Fallback: if no template resolved but we have a VAT account and a POS-calculated
+    # tax total, create a single "Actual" tax row so at least the total is recorded.
+    if not invoice_template and vat_account:
+        tax_amount = float(payload.get("tax") or 0)
+        if abs(tax_amount) > 0.005:
+            si.append("taxes", {
+                "charge_type": "Actual",
+                "account_head": vat_account,
+                "description": "VAT",
+                "tax_amount": -abs(tax_amount) if is_return else abs(tax_amount),
+                "included_in_print_rate": 1,
+            })
     return si
 
 
@@ -221,7 +292,12 @@ def _normalize_payload(src: Dict[str, Any]) -> Dict[str, Any]:
             continue
         qty = float(it.get("qty") or 0)
         rate = float(it.get("rate") or it.get("price") or 0)
-        items.append({"item_code": item_code, "qty": qty, "rate": rate})
+        item_row: Dict[str, Any] = {"item_code": item_code, "qty": qty, "rate": rate}
+        if it.get("item_tax_template"):
+            item_row["item_tax_template"] = it["item_tax_template"]
+        elif it.get("vat_rate") is not None:
+            item_row["vat_rate"] = it["vat_rate"]
+        items.append(item_row)
 
     pays_raw = src.get("payments") or []
     payments = []

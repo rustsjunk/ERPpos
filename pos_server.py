@@ -94,6 +94,18 @@ if API_SECRET and not os.getenv('ERP_API_SECRET'):
 
 # Optional bootstrap tuning + cashier source configuration
 POS_WAREHOUSE = os.getenv('POS_WAREHOUSE', 'Shop')
+
+# VAT configuration
+# POS_DEFAULT_VAT_RATE  — rate applied to items whose ERPNext tax template is blank
+#                         (20 for standard UK rate; set 0 only if your whole catalogue is zero-rated)
+# POS_VAT_TEMPLATE_20   — ERPNext Sales Taxes and Charges Template name for 20% items
+#                         e.g. "Standard Rate 20%"  (also set ERP_VAT_TEMPLATE_20 on the ERPNext server)
+# POS_VAT_TEMPLATE_0    — ERPNext Sales Taxes and Charges Template name for 0% items
+#                         e.g. "Zero Rate 0%"       (also set ERP_VAT_TEMPLATE_0 on the ERPNext server)
+try:
+    POS_DEFAULT_VAT_RATE: Optional[float] = float(os.getenv('POS_DEFAULT_VAT_RATE', ''))
+except (ValueError, TypeError):
+    POS_DEFAULT_VAT_RATE = None
 try:
     BOOTSTRAP_ITEM_BATCHES = int(os.getenv('POS_BOOTSTRAP_ITEM_BATCHES', '6'))
 except ValueError:
