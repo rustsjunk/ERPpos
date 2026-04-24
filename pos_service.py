@@ -99,10 +99,10 @@ def _ensure_item_extras(conn: sqlite3.Connection):
     try:
         conn.execute("""
             UPDATE items SET
-                item_group = COALESCE(item_group, (SELECT item_group FROM items p WHERE p.item_id = items.parent_id)),
-                brand       = COALESCE(brand,      (SELECT brand      FROM items p WHERE p.item_id = items.parent_id))
+                item_group = COALESCE(NULLIF(item_group,''), (SELECT NULLIF(item_group,'') FROM items p WHERE p.item_id = items.parent_id)),
+                brand       = COALESCE(NULLIF(brand,''),      (SELECT NULLIF(brand,'')      FROM items p WHERE p.item_id = items.parent_id))
             WHERE parent_id IS NOT NULL
-              AND (item_group IS NULL OR brand IS NULL)
+              AND (item_group IS NULL OR item_group = '' OR brand IS NULL OR brand = '')
         """)
         conn.commit()
     except Exception:
@@ -177,8 +177,8 @@ def upsert_item(conn: sqlite3.Connection, item: Dict[str, Any]):
     ON CONFLICT(item_id) DO UPDATE SET
       parent_id=excluded.parent_id,
       name=excluded.name,
-      brand=COALESCE(excluded.brand, items.brand),
-      item_group=COALESCE(excluded.item_group, items.item_group),
+      brand=COALESCE(NULLIF(excluded.brand,''), items.brand),
+      item_group=COALESCE(NULLIF(excluded.item_group,''), items.item_group),
       custom_style_code=excluded.custom_style_code,
       custom_simple_colour=excluded.custom_simple_colour,
       vat_rate=COALESCE(excluded.vat_rate, items.vat_rate),
@@ -762,11 +762,13 @@ def record_sale(conn: sqlite3.Connection, sale: Dict[str, Any]) -> str:
 
         # Insert sale header
         conn.execute("""
-            INSERT INTO sales (sale_id, created_utc, cashier, customer_id, subtotal, tax, discount, total, pay_status, queue_status, erp_docname, payload_json)
-            VALUES (?,?,?,?,?,?,?,?,?,'queued',NULL,?)
+            INSERT INTO sales (sale_id, created_utc, cashier, customer_id, subtotal, tax, discount, total, pay_status, queue_status, erp_docname, payload_json, return_against_id)
+            VALUES (?,?,?,?,?,?,?,?,?,'queued',NULL,?,?)
         """, (
             sale_id, created, sale.get("cashier"), sale.get("customer_id"),
-            subtotal, tax, discount, total, pay_status, json.dumps(payload, separators=(",",":"))
+            subtotal, tax, discount, total, pay_status,
+            json.dumps(payload, separators=(",",":")),
+            sale.get("return_against_receipt_id") or None,
         ))
 
         # Lines
@@ -1354,8 +1356,8 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE
           "item_id": d["name"],
           "parent_id": parent,
           "name": d.get("item_name") or d["name"],
-          "brand": d.get("brand"),
-          "item_group": d.get("item_group"),
+          "brand": d.get("brand") or None,
+          "item_group": d.get("item_group") or None,
           "custom_style_code": d.get("custom_style_code"),
           "custom_simple_colour": d.get("custom_simple_colour"),
           "vat_rate": None,
@@ -1382,10 +1384,10 @@ def pull_items_incremental(conn: sqlite3.Connection, limit: int = ITEM_PULL_PAGE
             placeholders = ",".join("?" * len(parent_ids))
             conn.execute(f"""
                 UPDATE items SET
-                    item_group = COALESCE(item_group, (SELECT item_group FROM items p WHERE p.item_id = items.parent_id)),
-                    brand       = COALESCE(brand,      (SELECT brand      FROM items p WHERE p.item_id = items.parent_id))
+                    item_group = COALESCE(NULLIF(item_group,''), (SELECT NULLIF(item_group,'') FROM items p WHERE p.item_id = items.parent_id)),
+                    brand       = COALESCE(NULLIF(brand,''),      (SELECT NULLIF(brand,'')      FROM items p WHERE p.item_id = items.parent_id))
                 WHERE parent_id IN ({placeholders})
-                  AND (item_group IS NULL OR brand IS NULL)
+                  AND (item_group IS NULL OR item_group = '' OR brand IS NULL OR brand = '')
             """, parent_ids)
             conn.commit()
     if item_rows and not _FULL_SYNC_FAST:

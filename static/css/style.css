@@ -1718,9 +1718,24 @@ body.dark-mode .lay-detail-summary { background: #252535; }
     font-weight: 600;
     color: #dc3545;
 }
+.ret-item-card.ret-fully-returned {
+    opacity: 0.45;
+    cursor: not-allowed;
+    border-color: #dee2e6;
+    background: #f8f9fa;
+}
+.ret-item-card.ret-fully-returned:hover {
+    border-color: #dee2e6;
+    box-shadow: none;
+}
+.ret-item-card.ret-fully-returned .ret-item-price {
+    color: #adb5bd;
+    font-style: italic;
+}
 body.dark-mode .ret-item-card { background: #1e1e1e; border-color: #2a2a2a; color: #e9ecef; }
 body.dark-mode .ret-item-card:hover { border-color: #3a3a3a; }
 body.dark-mode .ret-item-card.ret-selected { border-color: #ea868f; box-shadow: 0 0 0 3px rgba(220,53,69,0.25); background: #2a1a1a; }
+body.dark-mode .ret-item-card.ret-fully-returned { background: #1a1a1a; border-color: #2a2a2a; }
 body.dark-mode .ret-item-img { background: #2a2a2a; color: #6c757d; }
 body.dark-mode .ret-item-price { color: #adb5bd; }
 

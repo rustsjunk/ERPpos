@@ -1610,12 +1610,14 @@ def _ensure_schema(conn: sqlite3.Connection):
     ).fetchone()
     if not row:
         ps.init_db(conn, SCHEMA_PATH)
-    # Migrate sales table: add payload_json column if missing (added after initial schema)
+    # Migrate sales table: add columns if missing
     try:
         sales_cols = {r['name'] for r in conn.execute("PRAGMA table_info(sales)").fetchall()}
         if 'payload_json' not in sales_cols:
             conn.execute("ALTER TABLE sales ADD COLUMN payload_json TEXT")
-            conn.commit()
+        if 'return_against_id' not in sales_cols:
+            conn.execute("ALTER TABLE sales ADD COLUMN return_against_id TEXT")
+        conn.commit()
     except Exception:
         pass
     # Search indexes for faster lookup
@@ -3399,6 +3401,7 @@ def _build_sale_payload(data: dict, sale_id: str) -> dict:
         'change': change_due,
         'till': till_number,
         'till_number': till_number,
+        'return_against_receipt_id': data.get('return_against_receipt_id') or None,
     }
 
 
@@ -4547,6 +4550,7 @@ def item_matrix():
         SELECT i.item_id,
                i.name,
                i.brand,
+               i.item_group,
                i.vat_rate,
                i.price AS standard_rate,
                i.image_url
@@ -4640,6 +4644,7 @@ def item_matrix():
         'item_id': tpl['item_id'],
         'item_name': tpl['name'],
         'brand': tpl['brand'],
+        'item_group': tpl['item_group'],
         'vat_rate': float(tpl['vat_rate']) if tpl['vat_rate'] is not None else None,
         'standard_rate': float(tpl['standard_rate']) if tpl['standard_rate'] is not None else None,
         'image': _absolute_image_url(tpl['image_url']),
@@ -4852,6 +4857,31 @@ def api_get_sale(sale_id: str):
     except Exception:
         pass
     return jsonify({'status': 'error', 'message': 'Sale not found'}), 404
+
+
+@app.route('/api/sale/<sale_id>/returned_qtys')
+def api_sale_returned_qtys(sale_id: str):
+    """Return {item_id: qty_already_returned} for all return transactions against this sale."""
+    sid = (sale_id or '').strip()
+    if not sid:
+        return jsonify({'status': 'error', 'message': 'Missing sale id'}), 400
+    result: Dict[str, float] = {}
+    try:
+        conn = _db_connect()
+        if conn:
+            rows = conn.execute("""
+                SELECT sl.item_id, SUM(ABS(sl.qty)) AS returned_qty
+                FROM sales s
+                JOIN sale_lines sl ON sl.sale_id = s.sale_id
+                WHERE s.return_against_id = ? AND sl.qty < 0
+                GROUP BY sl.item_id
+            """, (sid,)).fetchall()
+            for row in rows:
+                result[row['item_id']] = float(row['returned_qty'])
+    except Exception:
+        app.logger.exception('returned_qtys lookup failed for %s', sid)
+    return jsonify({'status': 'success', 'returned_qtys': result})
+
 
 # ---- Paused/Hold transactions API ----
 

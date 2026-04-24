@@ -4307,7 +4307,7 @@ async function openProductByTemplateId(templateId, fallbackItem){
         standard_rate: tpl.standard_rate != null ? tpl.standard_rate : (fallbackItem && fallbackItem.standard_rate),
         image: tpl.image || (fallbackItem && fallbackItem.image) || null,
         vat_rate: tpl.vat_rate != null ? tpl.vat_rate : (fallbackItem && fallbackItem.vat_rate),
-        item_group: (fallbackItem && fallbackItem.item_group) || null,
+        item_group: tpl.item_group || (fallbackItem && fallbackItem.item_group) || null,
         custom_style_code: (fallbackItem && fallbackItem.custom_style_code) || ''
       };
       currentProduct = itemForMatrix;
@@ -6095,16 +6095,21 @@ async function findReturnSale(){
   if(err){ err.textContent=''; err.style.display='none'; }
   res.innerHTML = '<div class="text-muted">Looking up receipt...</div>';
   try{
-    const r = await fetch(`/api/sale/${encodeURIComponent(id)}`);
+    const [r, rr] = await Promise.all([
+      fetch(`/api/sale/${encodeURIComponent(id)}`),
+      fetch(`/api/sale/${encodeURIComponent(id)}/returned_qtys`),
+    ]);
     const d = await r.json().catch(()=>({}));
+    const rd = await rr.json().catch(()=>({}));
     if(!r.ok || !d || d.status!=='success' || !d.sale){
       res.innerHTML = '';
       if(err){ err.textContent = (d&&d.message)||'Receipt not found'; err.style.display='block'; }
       if(load){ load.disabled=true; load.dataset.saleId=''; }
       return;
     }
+    const returnedQtys = (rd && rd.returned_qtys) || {};
     const enriched = await enrichSaleItems(d.sale);
-    renderReturnResult(enriched);
+    renderReturnResult(enriched, returnedQtys);
     if(load){ load.disabled=false; load.dataset.saleId = d.sale.id || id; }
   }catch(e){
     res.innerHTML = '';
@@ -6112,7 +6117,8 @@ async function findReturnSale(){
     if(load){ load.disabled=true; load.dataset.saleId=''; }
   }
 }
-function renderReturnResult(sale){
+function renderReturnResult(sale, returnedQtys){
+  returnedQtys = returnedQtys || {};
   const res=document.getElementById('returnResult');
   if(!res) return;
   const lines = Array.isArray(sale.items)?sale.items:[];
@@ -6131,7 +6137,7 @@ function renderReturnResult(sale){
   btnGrp.className='btn-group btn-group-sm';
   const selAll=document.createElement('button');
   selAll.className='btn btn-outline-secondary'; selAll.textContent='Select All';
-  selAll.addEventListener('click',()=>res.querySelectorAll('.ret-item-card').forEach(c=>c.classList.add('ret-selected')));
+  selAll.addEventListener('click',()=>res.querySelectorAll('.ret-item-card:not(.ret-fully-returned)').forEach(c=>c.classList.add('ret-selected')));
   const deselAll=document.createElement('button');
   deselAll.className='btn btn-outline-secondary'; deselAll.textContent='Deselect All';
   deselAll.addEventListener('click',()=>res.querySelectorAll('.ret-item-card').forEach(c=>c.classList.remove('ret-selected')));
@@ -6144,14 +6150,19 @@ function renderReturnResult(sale){
   lines.forEach(ln=>{
     const qty=Number(ln.qty||0);
     const rate=Number(ln.rate||0);
-    const total=qty*rate;
+    const itemCode=ln.item_code||'';
+    const alreadyReturned=Number(returnedQtys[itemCode]||0);
+    const maxReturnable=Math.max(0, qty - alreadyReturned);
+    const fullyReturned=(maxReturnable<=0);
+    const total=maxReturnable*rate;
     const vatRate=ln.vat_rate!=null?ln.vat_rate:'';
     const image=ln.image||null;
     const card=document.createElement('div');
-    card.className='ret-item-card ret-selected';
-    card.dataset.code=ln.item_code||'';
-    card.dataset.name=ln.item_name||ln.item_code||'';
+    card.className='ret-item-card' + (fullyReturned?' ret-fully-returned':' ret-selected');
+    card.dataset.code=itemCode;
+    card.dataset.name=ln.item_name||itemCode||'';
     card.dataset.qty=String(qty);
+    card.dataset.maxReturnable=String(maxReturnable);
     card.dataset.rate=String(rate);
     card.dataset.vat=vatRate!==''?String(vatRate):'';
     card.dataset.image=image||'';
@@ -6161,30 +6172,40 @@ function renderReturnResult(sale){
     if(image){
       const img=document.createElement('img');
       img.src=typeof thumbUrl==='function'?thumbUrl(image,120,120):image;
-      img.alt=ln.item_name||ln.item_code||'';
+      img.alt=ln.item_name||itemCode||'';
       img.loading='lazy';
       imgArea.appendChild(img);
     } else {
-      imgArea.textContent=((ln.item_name||ln.item_code||'?')[0]||'?').toUpperCase();
+      imgArea.textContent=((ln.item_name||itemCode||'?')[0]||'?').toUpperCase();
     }
     // Info
     const info=document.createElement('div');
     info.className='ret-item-info';
     const nameLine=document.createElement('div');
     nameLine.className='ret-item-name';
-    nameLine.textContent=ln.item_name||ln.item_code||'';
+    nameLine.textContent=ln.item_name||itemCode||'';
     info.appendChild(nameLine);
     const priceLine=document.createElement('div');
     priceLine.className='ret-item-price';
-    priceLine.textContent=`${qty} × ${money(rate)}`;
+    if(fullyReturned){
+      priceLine.textContent='Already returned';
+    } else if(alreadyReturned>0){
+      priceLine.textContent=`${maxReturnable} of ${qty} remaining`;
+    } else {
+      priceLine.textContent=`${qty} × ${money(rate)}`;
+    }
     info.appendChild(priceLine);
-    const totalLine=document.createElement('div');
-    totalLine.className='ret-item-total';
-    totalLine.textContent=money(total);
-    info.appendChild(totalLine);
+    if(!fullyReturned){
+      const totalLine=document.createElement('div');
+      totalLine.className='ret-item-total';
+      totalLine.textContent=money(total);
+      info.appendChild(totalLine);
+    }
     card.appendChild(imgArea);
     card.appendChild(info);
-    card.addEventListener('click',()=>card.classList.toggle('ret-selected'));
+    if(!fullyReturned){
+      card.addEventListener('click',()=>card.classList.toggle('ret-selected'));
+    }
     grid.appendChild(card);
   });
   res.appendChild(grid);
@@ -6202,7 +6223,7 @@ function loadReturnAsRefund(){
   selected.forEach(card=>{
     const code=card.dataset.code;
     const name=card.dataset.name;
-    const qty=Number(card.dataset.qty||0);
+    const qty=Number(card.dataset.maxReturnable||card.dataset.qty||0);
     const rate=Number(card.dataset.rate||0);
     const vatAttr=card.dataset.vat;
     const image=card.dataset.image||null;
@@ -6711,12 +6732,16 @@ function _buildXZReadText(readType, agg, opening, branch){
   // Tenders Report
   push('Tenders Report');
   const tenderTypes = ['Cash','Card','Voucher','Other'];
+  let tendersNetTotal = 0;
   tenderTypes.forEach(tk=>{
     const sale = Number(tendersSales[tk]||0);
     const ret = Number(tendersReturns[tk]||0);
+    const net = sale - ret;
+    tendersNetTotal += net;
     if(sale > 0.0001 || ret > 0.0001){
       push(L(tk, _xzMoney(sale)));
-      push(L(`${tk} Refund`, ret > 0.0001 ? `-${_xzMoney(ret)}` : _xzMoney(0)));
+      if(ret > 0.0001) push(L(`  ${tk} Refunds`, `-${_xzMoney(ret)}`));
+      if(ret > 0.0001) push(L(`  ${tk} Net`, _xzMoney(net)));
     }
   });
   // Cash paid in/out from admin
@@ -6724,10 +6749,11 @@ function _buildXZReadText(readType, agg, opening, branch){
     push(L('Paid In', _xzMoney(pc.in||0)));
     push(L('Paid Out', `-${_xzMoney(pc.out||0)}`));
   }
+  push(L('Total Tenders Net', _xzMoney(tendersNetTotal)));
   push(D());
 
-  // In Drawer / Sub Total
-  push(L('In Drawer', _xzMoney(expectedCash)));
+  // Cash In Drawer / Sub Total
+  push(L('Cash In Drawer', _xzMoney(expectedCash)));
   push(D());
   push(L('Sub Total', _xzMoney(totals.gross)));
   push(D());
